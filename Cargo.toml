@@ -1,0 +1,13 @@
+[package]
+name = "aside"
+version = "0.1.0"
+edition = "2024"
+description = "A keyboard-summoned AI chat panel for Wayland that leaves nothing on disk"
+license = "AGPL-3.0-only"
+
+[dependencies]
+ab_glyph = "0.2.32"
+fontdb = "0.24.0"
+smithay-client-toolkit = "0.21.1"
+wayland-client = "0.31.14"
+wayland-protocols = { version = "0.32.13", features = ["unstable"] }

@@ -1,0 +1,254 @@
+//! `zwp_text_input_v3`: what makes the panel usable for anyone who types
+//! through an input method.
+//!
+//! `smithay-client-toolkit` 0.21 has no client-side text input (only the
+//! input-method side), so the protocol is spoken directly here. The state
+//! machine is pure and tested; the protocol calls around it are thin.
+//!
+//! The rule when typing: with a text-input object the compositor delivers text
+//! as `commit_string`, and raw keysyms are only used when no text-input manager
+//! was advertised at all. Both paths exist because a compositor with the
+//! protocol but no running input method sends nothing through it — verified
+//! behaviour of wlroots, and the reason the fallback cannot simply be dropped.
+
+use wayland_client::{
+    Connection, Dispatch, Proxy, QueueHandle,
+    globals::GlobalList,
+    protocol::{wl_seat::WlSeat, wl_surface::WlSurface},
+};
+use wayland_protocols::wp::text_input::zv3::client::{
+    zwp_text_input_manager_v3::ZwpTextInputManagerV3,
+    zwp_text_input_v3::{ContentHint, ContentPurpose, Event as TextInputEvent, ZwpTextInputV3},
+};
+
+/// What the input line should do with a protocol event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// Replace the pre-edit with this text (shown, not committed).
+    Preedit(String),
+    /// The user committed this text: it goes into the input line.
+    Commit(String),
+    /// Delete up to this many characters before (and after) the caret.
+    DeleteSurrounding { before: u32, after: u32 },
+    /// End of a batch: the panel acknowledges and repaints.
+    RoundTrip,
+    /// Nothing to do.
+    Ignore,
+}
+
+/// The text-input state: the pre-edit string being composed, if any.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Ime {
+    /// Text the input method is currently composing. Raw keysyms are ignored
+    /// while this is non-empty, because the input method is handling them.
+    pub preedit: String,
+    /// Whether a text-input manager was advertised at all.
+    pub available: bool,
+}
+
+impl Ime {
+    pub fn new(available: bool) -> Ime {
+        Ime {
+            available,
+            ..Ime::default()
+        }
+    }
+
+    /// Whether typing should come from raw keysyms rather than the input method.
+    pub fn wants_raw_keys(&self) -> bool {
+        !self.available
+    }
+
+    /// What to do about one protocol event.
+    pub fn handle(&mut self, event: TextInputEvent) -> Action {
+        match event {
+            TextInputEvent::PreeditString { text, .. } => {
+                self.preedit = text.clone().unwrap_or_default();
+                match text {
+                    Some(t) => Action::Preedit(t),
+                    None => Action::Ignore,
+                }
+            }
+            TextInputEvent::CommitString { text } => {
+                self.preedit.clear();
+                Action::Commit(text.unwrap_or_default())
+            }
+            TextInputEvent::DeleteSurroundingText {
+                before_length,
+                after_length,
+            } => Action::DeleteSurrounding {
+                before: before_length,
+                after: after_length,
+            },
+            TextInputEvent::Done { .. } => Action::RoundTrip,
+            _ => Action::Ignore,
+        }
+    }
+}
+
+/// Binds the manager, if the compositor has one. `None` means the panel types
+/// with raw keysyms and says so, rather than appearing to accept input it cannot
+/// finish without an input method.
+pub fn bind(globals: &GlobalList, qh: &QueueHandle<crate::State>) -> Option<ZwpTextInputManagerV3> {
+    // Version 1 is enough: v2 adds actions and a language event the panel does
+    // not use, and asking for less than the compositor offers is always legal.
+    globals
+        .bind::<ZwpTextInputManagerV3, crate::State, ()>(qh, 1..=1, ())
+        .ok()
+}
+
+/// Create the panel's text-input object for `surface` on `seat`, and enable it:
+/// the compositor delivers nothing until the object is enabled and committed.
+pub fn attach(
+    manager: &ZwpTextInputManagerV3,
+    seat: &WlSeat,
+    surface: &WlSurface,
+    qh: &QueueHandle<crate::State>,
+) -> ZwpTextInputV3 {
+    // The object is not tied to a surface: `enter`/`leave` say which surface
+    // it is typing into, which is what the panel wants when it is unminimised.
+    let _ = surface;
+    let ti = manager.get_text_input(seat, qh, ());
+    ti.enable();
+    ti.set_content_type(ContentHint::empty(), ContentPurpose::Normal);
+    ti.commit();
+    ti
+}
+
+/// The panel's `Dispatch` side of the protocol: events go to the input line.
+impl Dispatch<ZwpTextInputManagerV3, ()> for crate::State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwpTextInputManagerV3,
+        _event: <ZwpTextInputManagerV3 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // The manager has no events.
+    }
+}
+
+impl Dispatch<ZwpTextInputV3, ()> for crate::State {
+    fn event(
+        state: &mut Self,
+        _proxy: &ZwpTextInputV3,
+        event: TextInputEvent,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        state.on_text_input(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(e: TextInputEvent) -> TextInputEvent {
+        e
+    }
+
+    #[test]
+    fn a_commit_replaces_the_preedit() {
+        let mut ime = Ime::new(true);
+        assert_eq!(
+            ime.handle(event(TextInputEvent::PreeditString {
+                text: Some("zhong".into()),
+                cursor_begin: 5,
+                cursor_end: 5,
+            })),
+            Action::Preedit("zhong".into())
+        );
+        assert_eq!(ime.preedit, "zhong");
+        assert_eq!(
+            ime.handle(event(TextInputEvent::CommitString {
+                text: Some("中".into())
+            })),
+            Action::Commit("中".into())
+        );
+        assert!(ime.preedit.is_empty(), "a commit ends the composition");
+    }
+
+    #[test]
+    fn a_long_cjk_commit_arrives_whole() {
+        // A composed Chinese sentence, committed in one event: nothing may be
+        // dropped, and the input buffer holds exactly what was composed.
+        let sentence =
+            "这是一段用输入法合成的问题，需要完整地进入输入行，不能丢字，也不能被截断。".repeat(6);
+        assert!(sentence.chars().count() > 200);
+        let mut ime = Ime::new(true);
+        let mut input = crate::layout::Input::default();
+        assert_eq!(
+            ime.handle(event(TextInputEvent::PreeditString {
+                text: Some("zhe shi yi duan".into()),
+                cursor_begin: 15,
+                cursor_end: 15,
+            })),
+            Action::Preedit("zhe shi yi duan".into())
+        );
+        let action = ime.handle(event(TextInputEvent::CommitString {
+            text: Some(sentence.clone()),
+        }));
+        if let Action::Commit(text) = action {
+            input.insert(&text);
+        }
+        assert_eq!(input.text(), sentence);
+        assert!(ime.preedit.is_empty());
+    }
+
+    #[test]
+    fn a_null_commit_commits_nothing() {
+        let mut ime = Ime::default();
+        assert_eq!(
+            ime.handle(event(TextInputEvent::CommitString { text: None })),
+            Action::Commit(String::new())
+        );
+    }
+
+    #[test]
+    fn a_done_event_is_the_end_of_a_batch() {
+        let mut ime = Ime::default();
+        assert_eq!(
+            ime.handle(event(TextInputEvent::Done { serial: 7 })),
+            Action::RoundTrip
+        );
+    }
+
+    #[test]
+    fn surrounding_deletion_is_reported_as_lengths() {
+        let mut ime = Ime::default();
+        assert_eq!(
+            ime.handle(event(TextInputEvent::DeleteSurroundingText {
+                before_length: 2,
+                after_length: 1
+            })),
+            Action::DeleteSurrounding {
+                before: 2,
+                after: 1
+            }
+        );
+    }
+
+    #[test]
+    fn without_a_manager_typing_uses_raw_keys() {
+        let ime = Ime::default();
+        assert!(ime.wants_raw_keys(), "no text input means raw keysyms");
+        let ime = Ime::new(true);
+        assert!(!ime.wants_raw_keys());
+    }
+
+    #[test]
+    fn a_v2_event_the_panel_does_not_use_is_ignored() {
+        let mut ime = Ime::default();
+        // Version 2 events can still turn up from a compositor that offers more
+        // than the panel asked for; they are not guessed at.
+        assert_eq!(
+            ime.handle(event(TextInputEvent::Language {
+                language: "en".into()
+            })),
+            Action::Ignore
+        );
+    }
+}

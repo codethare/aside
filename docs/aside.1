@@ -1,0 +1,153 @@
+.TH ASIDE 1 2026-10-17 aside "User Commands"
+.SH NAME
+aside \- a keyboard-summoned AI chat panel for Wayland
+.SH SYNOPSIS
+.B aside
+.RB [ \-\-model " model" ]
+.RB [ \-\-base\-url " url" ]
+.br
+.B aside \-\-preview
+.I file
+.SH DESCRIPTION
+.B aside
+opens a chat panel on the current Wayland session, streams the answer to your
+question into it as the answer is generated, keeps the conversation going while
+the panel is open, and leaves nothing behind: the transcript lives in this
+process's memory and dies with it.
+.PP
+Typed input goes through
+.BR zwp_text_input_v3 ,
+so an input method (fcitx, ibus) can compose text.  Answers are plain wrapped
+text: there is no Markdown, code-block or table rendering.
+.PP
+The provider request is made by one
+.BR curl (1)
+process inside one
+.BR bwrap (1)
+sandbox.  The sandbox has the network and nothing else, and the API key is
+handed to
+.B curl
+on standard input rather than as an argument, so it appears in no process list.
+.SH OPTIONS
+.TP
+.BI \-\-model " model"
+Ask this model.  Default
+.IR deepseek/deepseek\-v4.1\-flash .
+.TP
+.BI \-\-base\-url " url"
+Provider base URL.  Default
+.IR https://api.commandcode.ai/provider/v1 .
+.TP
+.BI \-\-preview " file"
+Render a scripted conversation to
+.I file
+as a PPM image and exit, without opening a window or contacting a provider.
+This is how the layout is checked on a machine with no compositor.
+.TP
+.B \-\-help
+Print usage and exit.
+.TP
+.B \-\-version
+Print the version and exit.
+.SH KEYS
+.TP
+.B Enter
+Send the typed question.
+.TP
+.B Esc
+Cancel a streaming answer.  With no answer streaming, close the panel.
+.TP
+.B Up ", " Down
+Move the highlighted transcript line.
+.TP
+.B PageUp ", " PageDown
+Move it one page.
+.TP
+.B Alt+C
+Copy the highlighted line to the clipboard with
+.BR wl\-copy (1).
+.TP
+.B Left ", " Right ", " Home ", " End ", " Backspace ", " Delete
+Edit the input line.
+.TP
+.B Ctrl+Left ", " Ctrl+Right
+Move the caret by a word.
+.PP
+There is no newline key: the input is one logical line that soft-wraps, and a
+multi-line question can be pasted.
+.SH ENVIRONMENT
+.TP
+.B COMMAND_CODE_API_KEY
+The provider credential.  Required: without it
+.B aside
+writes one line to standard error and exits non-zero without opening a window.
+.TP
+.B ASIDE_MODEL ", " ASIDE_BASE_URL
+Overridden by the matching flag, overriding the configuration file.
+.TP
+.B XDG_CONFIG_HOME
+Where the configuration file is looked for.
+.TP
+.B XDG_RUNTIME_DIR
+Where the single-instance socket lives, so that a second launch raises the
+running panel instead of opening a second window.
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/aside/config.toml
+Read, never written.  Flat
+.I key = "value"
+lines, with
+.I model
+and
+.I base_url
+recognised.  No credential may be stored here.
+.SH EXIT STATUS
+.TP
+.B 0
+The panel closed normally.
+.TP
+.B 1
+The session could not be used: no compositor, no usable font, or the sandbox
+could not start.
+.TP
+.B 2
+The configuration was refused: a missing or unreadable credential, or a
+malformed configuration file.
+.SH SECURITY
+The provider request runs inside
+.BR bwrap (1)
+with
+.BR \-\-unshare\-all \-\-share\-net
+and an empty environment.  Inside it there is no home directory, no
+.BR $XDG_RUNTIME_DIR ,
+no Wayland socket, no configuration file and no writable path; only the system
+library tree, the name-resolution files, the certificate store, and the network
+are bound.  When the sandbox cannot start, no request is sent and no unsandboxed
+.B curl
+is run.
+.PP
+What this does not cover: the network is reachable without restriction, so the
+provider sees the question and anything able to intercept the connection sees
+it too; the credential is readable by any process running as the same user; and
+the panel itself is not sandboxed.
+.SH PRIVACY
+The question, the request body, the response bytes and the rendered answer live
+in memory.  Nothing is written to disk: the only path opened for writing during
+a normal run is none, and the only file a run ever reads is the configuration.
+No history, cache or state directory is created or read.
+.PP
+Diagnostics go to standard error only and never contain the question, the
+answer, or the key.  Whether the parent redirects standard error into a journal
+is outside the program's control.
+.PP
+Copying a line with
+.B Alt+C
+is the one deliberate way text leaves: after that,
+.B wl\-copy
+serves the line to any application that asks for the clipboard, and its process
+outlives the panel.  The compositor, and anything able to read the screen or the
+process's memory as the same user, are outside the guarantee.
+.SH SEE ALSO
+.BR bwrap (1),
+.BR curl (1),
+.BR wl\-copy (1)
