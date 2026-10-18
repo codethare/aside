@@ -6,8 +6,9 @@ description = "A keyboard-summoned AI chat panel for Wayland that leaves nothing
 license = "AGPL-3.0-only"
 
 [dependencies]
-ab_glyph = "0.2.32"
+ab_glyph_rasterizer = "0.1.10"
 fontdb = "0.24.0"
+skrifa = "0.48.0"
 smithay-client-toolkit = "0.21.1"
 wayland-client = "0.31.14"
 wayland-protocols = { version = "0.32.13", features = ["unstable"] }

@@ -1,7 +1,9 @@
 //! Software renderer: draws the panel into an ARGB8888 (BGRA byte order) shm buffer.
 //! Pure CPU, no Wayland dependency, so it is unit-testable headless.
 
-use ab_glyph::{Font, Glyph, GlyphId, PxScale, ScaleFont, point};
+use ab_glyph_rasterizer::{Point, Rasterizer, point};
+use skrifa::outline::{DrawSettings, OutlinePen, pen::PathStyle};
+use skrifa::prelude::*;
 
 pub type Bgra = [u8; 4];
 
@@ -123,7 +125,6 @@ pub fn draw_text(
     max_w: f32,
     subpixel: Subpixel,
 ) -> f32 {
-    let scale = || PxScale::from(font.size);
     let mut cx = x;
     let end = x + max_w;
     let mode = match subpixel {
@@ -134,78 +135,70 @@ pub fn draw_text(
     let bucket = |v: f32| ((v.fract() * BUCKETS_PER_PX) as u8).min(BUCKETS_PER_PX as u8 - 1);
     let canonical = |v: f32| (v.fract() * BUCKETS_PER_PX).floor() / BUCKETS_PER_PX;
     'ch: for ch in s.chars() {
-        // Walk the face chain (primary first); draw with the first face that
-        // has this glyph so CJK etc. fall back to a system font. A face beyond
-        // the primary is read on first use here.
-        for face_idx in 0..font.face_count() {
-            let Some(face) = font.face(face_idx) else {
-                continue; // unreadable face, try the next
-            };
-            let scaled = face.as_scaled(scale());
-            let gid = scaled.glyph_id(ch);
-            if gid == GlyphId(0) {
-                continue; // no glyph in this face, try the next
-            }
-            let advance = scaled.h_advance(gid);
-            if cx + advance > end {
-                break 'ch;
-            }
-            let key: crate::font::GlyphKey =
-                (face_idx as u8, gid.0, bucket(cx), bucket(baseline), mode);
-            if !font.glyphs.borrow().contains_key(&key) {
-                if font.glyphs.borrow().len() >= GLYPH_CACHE_CAP {
-                    font.glyphs.borrow_mut().clear();
-                }
-                // Rasterize at the canonical pen (subpixel part only), then blit
-                // at the whole-pixel part — the two differ by an integer shift.
-                let planes = match subpixel {
-                    // One neutral plane, used for every channel.
-                    Subpixel::Gray => {
-                        vec![raster(
-                            &face,
-                            gid,
-                            scale(),
-                            point(canonical(cx), canonical(baseline)),
-                        )]
-                    }
-                    // One plane per subpixel column: each carries one channel.
-                    _ => (0..3)
-                        .map(|k| {
-                            let off = k as f32 / SUBPIXEL_SAMPLES;
-                            raster(
-                                &face,
-                                gid,
-                                scale(),
-                                point(canonical(cx) + off, canonical(baseline)),
-                            )
-                        })
-                        .collect(),
-                };
-                font.glyphs
-                    .borrow_mut()
-                    .insert(key, crate::font::GlyphBitmap { advance, planes });
-            }
-            let cache = font.glyphs.borrow();
-            let bmp = cache.get(&key).expect("inserted above");
-            let dx = cx.floor() as i32;
-            let dy = baseline.floor() as i32;
-            match subpixel {
-                Subpixel::Gray => blit_plane(buf, w, h, &bmp.planes[0], dx, dy, color, None),
-                Subpixel::Rgb => {
-                    for (k, plane) in bmp.planes.iter().enumerate() {
-                        blit_plane(buf, w, h, plane, dx, dy, color, Some(RGB_CHAN[k]));
-                    }
-                }
-                Subpixel::Bgr => {
-                    for (k, plane) in bmp.planes.iter().enumerate() {
-                        blit_plane(buf, w, h, plane, dx, dy, color, Some(BGR_CHAN[k]));
-                    }
-                }
-            }
-            cx += bmp.advance;
-            continue 'ch;
+        // The chain answers in order (primary first), so CJK and anything else
+        // the primary lacks falls back to a system font.
+        let Some((face_idx, gid, advance)) = font.glyph(ch) else {
+            continue; // no face in the chain has this glyph; skip it silently
+        };
+        if cx + advance > end {
+            break 'ch;
         }
-        // No face in the chain has this glyph; skip it silently.
+        let key: crate::font::GlyphKey = (
+            face_idx as u8,
+            gid.to_u32() as u16,
+            bucket(cx),
+            bucket(baseline),
+            mode,
+        );
+        if !font.glyphs.borrow().contains_key(&key) {
+            if font.glyphs.borrow().len() >= GLYPH_CACHE_CAP {
+                font.glyphs.borrow_mut().clear();
+            }
+            // Rasterize at the canonical pen (subpixel part only), then blit
+            // at the whole-pixel part — the two differ by an integer shift.
+            let planes = match subpixel {
+                // One neutral plane, used for every channel.
+                Subpixel::Gray => vec![plane(
+                    font,
+                    face_idx,
+                    gid,
+                    point(canonical(cx), canonical(baseline)),
+                )],
+                // One plane per subpixel column: each carries one channel.
+                _ => (0..3)
+                    .map(|k| {
+                        let off = k as f32 / SUBPIXEL_SAMPLES;
+                        plane(
+                            font,
+                            face_idx,
+                            gid,
+                            point(canonical(cx) + off, canonical(baseline)),
+                        )
+                    })
+                    .collect(),
+            };
+            font.glyphs
+                .borrow_mut()
+                .insert(key, crate::font::GlyphBitmap { advance, planes });
+        }
+        let cache = font.glyphs.borrow();
+        let bmp = cache.get(&key).expect("inserted above");
+        let dx = cx.floor() as i32;
+        let dy = baseline.floor() as i32;
+        match subpixel {
+            Subpixel::Gray => blit_plane(buf, w, h, &bmp.planes[0], dx, dy, color, None),
+            Subpixel::Rgb => {
+                for (k, plane) in bmp.planes.iter().enumerate() {
+                    blit_plane(buf, w, h, plane, dx, dy, color, Some(RGB_CHAN[k]));
+                }
+            }
+            Subpixel::Bgr => {
+                for (k, plane) in bmp.planes.iter().enumerate() {
+                    blit_plane(buf, w, h, plane, dx, dy, color, Some(BGR_CHAN[k]));
+                }
+            }
+        }
+        cx += bmp.advance;
     }
     cx
 }
@@ -213,25 +206,15 @@ pub fn draw_text(
 /// Advance width of `s` under the same face-chain rules as `draw_text`, capped
 /// at `max_w`. The layout uses it to decide where a row must break.
 pub(crate) fn measure(font: &crate::font::PanelFont, s: &str, max_w: f32) -> f32 {
-    let scale = || PxScale::from(font.size);
     let mut cx = 0.0;
-    'ch: for ch in s.chars() {
-        for face_idx in 0..font.face_count() {
-            let Some(face) = font.face(face_idx) else {
-                continue;
-            };
-            let scaled = face.as_scaled(scale());
-            let gid = scaled.glyph_id(ch);
-            if gid == GlyphId(0) {
-                continue;
-            }
-            let adv = scaled.h_advance(gid);
-            if cx + adv > max_w {
-                break 'ch;
-            }
-            cx += adv;
-            continue 'ch;
+    for ch in s.chars() {
+        let Some((_, _, adv)) = font.glyph(ch) else {
+            continue;
+        };
+        if cx + adv > max_w {
+            break;
         }
+        cx += adv;
     }
     cx
 }
@@ -241,32 +224,153 @@ pub(crate) fn row_baseline(font: &crate::font::PanelFont, row_y: u32) -> f32 {
     top + font.ascent_px
 }
 
-/// Rasterize one coverage plane of `gid` at `pos`.
-fn raster(
-    face: &ab_glyph::FontVec,
+/// Rasterize one coverage plane of `gid` for chain face `face_idx` at `pos`.
+fn plane(
+    font: &crate::font::PanelFont,
+    face_idx: usize,
     gid: GlyphId,
-    scale: PxScale,
-    pos: ab_glyph::Point,
+    pos: Point,
 ) -> crate::font::GlyphPlane {
-    let Some(outline) = face.outline_glyph(Glyph {
-        id: gid,
-        scale,
-        position: pos,
-    }) else {
+    // `PanelFont::glyph` just answered from this face, so it is loaded.
+    let Some(face) = font.face(face_idx) else {
         return crate::font::GlyphPlane::default();
     };
-    let b = outline.px_bounds();
-    // px_bounds is an f32 rect and `draw` iterates width()×height() from `min`,
-    // so both must stay in the same units.
-    let (w, h) = (b.width() as u32, b.height() as u32);
-    let mut coverage = Vec::with_capacity((w * h) as usize);
-    outline.draw(|_, _, cov| coverage.push((cov * 255.0).round() as u8));
+    let Some(face_font) = face.font() else {
+        return crate::font::GlyphPlane::default();
+    };
+    raster(&face_font, gid, face.px_per_unit(font.size), pos)
+}
+
+/// Rasterize one coverage plane of `gid` at `pos`.
+///
+/// The outline comes from skrifa in font units; the bounds, the subpixel
+/// rounding and the rasterizer are the ones `ab_glyph` used, because those are
+/// what put a glyph where the layout measured it. The bounds are the pen's point
+/// bounds, including control points — `ttf-parser` computed the same thing (it
+/// skips the glyph's declared bbox, which can be a pixel tighter and would move
+/// ink).
+fn raster(
+    font: &FontRef<'_>,
+    gid: GlyphId,
+    px_per_unit: f32,
+    pos: Point,
+) -> crate::font::GlyphPlane {
+    let mut pen = CurvePen::default();
+    let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::default())
+        .with_path_style(PathStyle::FreeType);
+    let drawn = font
+        .outline_glyphs()
+        .get(gid)
+        .is_some_and(|glyph| glyph.draw(settings, &mut pen).is_ok());
+    if !drawn {
+        return crate::font::GlyphPlane::default();
+    }
+    pen.close();
+    let Some((min, max)) = pen.bounds else {
+        return crate::font::GlyphPlane::default();
+    };
+    // The subpixel fraction takes part in the floor/ceil so identical subpixel
+    // positions round identically; the whole part is added afterwards.
+    let (x_trunc, x_fract) = (pos.x.trunc(), pos.x.fract());
+    let (y_trunc, y_fract) = (pos.y.trunc(), pos.y.fract());
+    let min_x = (min.x * px_per_unit + x_fract).floor() + x_trunc;
+    let max_x = (max.x * px_per_unit + x_fract).ceil() + x_trunc;
+    // Font y grows upwards, screen y downwards.
+    let min_y = (max.y * -px_per_unit + y_fract).floor() + y_trunc;
+    let max_y = (min.y * -px_per_unit + y_fract).ceil() + y_trunc;
+    let (w, h) = ((max_x - min_x) as u32, (max_y - min_y) as u32);
+    if w == 0 || h == 0 {
+        return crate::font::GlyphPlane::default();
+    }
+    let offset = point(pos.x - min_x, pos.y - min_y);
+    let mut rasterizer = Rasterizer::new(w as usize, h as usize);
+    for curve in &pen.curves {
+        // The scale and the y flip `ab_glyph` applied before rasterizing.
+        let at = |p: Point| point(p.x * px_per_unit, p.y * -px_per_unit) + offset;
+        match *curve {
+            Curve::Line(p0, p1) => rasterizer.draw_line(at(p0), at(p1)),
+            Curve::Quad(p0, p1, p2) => rasterizer.draw_quad(at(p0), at(p1), at(p2)),
+            Curve::Cubic(p0, p1, p2, p3) => rasterizer.draw_cubic(at(p0), at(p1), at(p2), at(p3)),
+        }
+    }
+    let mut coverage = Vec::with_capacity(w as usize * h as usize);
+    rasterizer.for_each_pixel_2d(|_, _, cov| coverage.push((cov * 255.0).round() as u8));
     crate::font::GlyphPlane {
-        min_x: b.min.x as i32,
-        min_y: b.min.y as i32,
+        min_x: min_x as i32,
+        min_y: min_y as i32,
         w,
         h,
         coverage,
+    }
+}
+
+/// One path command, in font units, as skrifa emits it.
+#[derive(Clone, Copy)]
+enum Curve {
+    Line(Point, Point),
+    Quad(Point, Point, Point),
+    Cubic(Point, Point, Point, Point),
+}
+
+/// Collects skrifa's path commands and tracks the bounds of every point it saw,
+/// control points included — the same bookkeeping `ttf-parser`'s outline builder
+/// did for `ab_glyph`, and what the pixel bounds are derived from.
+#[derive(Default)]
+struct CurvePen {
+    curves: Vec<Curve>,
+    bounds: Option<(Point, Point)>,
+    last: Point,
+    last_move: Option<Point>,
+}
+
+impl CurvePen {
+    fn include(&mut self, p: Point) {
+        let (min, max) = self.bounds.unwrap_or((p, p));
+        self.bounds = Some((
+            point(min.x.min(p.x), min.y.min(p.y)),
+            point(max.x.max(p.x), max.y.max(p.y)),
+        ));
+    }
+}
+
+impl OutlinePen for CurvePen {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let p = point(x, y);
+        self.last = p;
+        self.last_move = Some(p);
+        self.include(p);
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let p = point(x, y);
+        self.curves.push(Curve::Line(self.last, p));
+        self.last = p;
+        self.include(p);
+    }
+
+    fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
+        let (c, p) = (point(cx, cy), point(x, y));
+        self.curves.push(Curve::Quad(self.last, c, p));
+        self.last = p;
+        self.include(c);
+        self.include(p);
+    }
+
+    fn curve_to(&mut self, cx1: f32, cy1: f32, cx2: f32, cy2: f32, x: f32, y: f32) {
+        let (c1, c2, p) = (point(cx1, cy1), point(cx2, cy2), point(x, y));
+        self.curves.push(Curve::Cubic(self.last, c1, c2, p));
+        self.last = p;
+        self.include(c1);
+        self.include(c2);
+        self.include(p);
+    }
+
+    fn close(&mut self) {
+        // A last contour can end without one (Cantarell-VF.otf does), which is
+        // why this is called once more before the curves are rasterized.
+        if let Some(m) = self.last_move.take() {
+            self.curves.push(Curve::Line(self.last, m));
+        }
     }
 }
 
@@ -521,5 +625,31 @@ mod tests {
                 "{name} text contrast {r:.2}:1 is below WCAG AA (4.5:1)"
             );
         }
+    }
+
+    #[test]
+    fn a_whole_pixel_shift_does_not_change_the_plane() {
+        // The painter rasterizes at the canonical pen and blits at the whole
+        // pixel, so a plane has to be pure translation: same coverage, same
+        // canvas, one pixel over. The glyph cache is keyed on that being true.
+        let font = PanelFont::load(crate::font::SIZE).expect("system font available");
+        let (face_idx, gid, _) = font.glyph('W').expect("the primary face has W");
+        let pen = point(0.5, 0.25);
+        let here = plane(&font, face_idx, gid, pen);
+        let moved = plane(&font, face_idx, gid, point(pen.x + 1.0, pen.y + 1.0));
+        assert!(
+            here.coverage.iter().any(|c| *c > 0),
+            "W must cover something"
+        );
+        assert_eq!((here.w, here.h), (moved.w, moved.h), "same canvas size");
+        assert_eq!(
+            here.coverage, moved.coverage,
+            "same coverage, pixel for pixel"
+        );
+        assert_eq!(
+            (here.min_x + 1, here.min_y + 1),
+            (moved.min_x, moved.min_y),
+            "the canvas moved with the pen"
+        );
     }
 }

@@ -14,7 +14,8 @@ text deltas the panel can render.
 order: command-line flag, environment variable, configuration file, built-in
 default. A higher-precedence source MUST override a lower one entirely, with no
 merging. The built-in default SHALL be provider `commandcode`, base URL
-`https://api.commandcode.ai/provider/v1`, model `deepseek/deepseek-v4.1-flash`.
+`https://api.commandcode.ai/provider/v1`, model `deepseek/deepseek-v4.1-flash`,
+and no proxy.
 
 #### Scenario: Environment overrides the config file
 
@@ -31,8 +32,9 @@ merging. The built-in default SHALL be provider `commandcode`, base URL
 `aside` SHALL read `$XDG_CONFIG_HOME/aside/config.toml`, falling back to
 `~/.config/aside/config.toml`. The file SHALL never be created, written or
 appended. Its absence MUST NOT be an error. The file SHALL hold flat `key =
-"value"` lines with `#` comments; `model` and `base_url` are the keys recognised
-in this change. An unrecognised key, or any line that is not one of those forms,
+"value"` lines with `#` comments; `model`, `base_url` and `proxy` are the keys
+recognised in this change. An unrecognised key, or any line that is not one of
+those forms,
 MUST produce an error naming the path and the failing line, and MUST NOT be
 partially applied. The API key MUST NOT be read from this file: it comes from the
 environment only.
@@ -53,6 +55,8 @@ environment only.
 no key is available, `aside` MUST NOT open a connection and MUST name the variable
 it looked for. A key MUST NOT appear in any
 request header echoed to the panel, log line, error message or rendered output.
+For the same reason, any URL an error message quotes SHALL have its `user:pass@`
+part removed before it is shown.
 
 #### Scenario: Key never reaches the display
 
@@ -124,6 +128,59 @@ No failure may leave the request open or the panel blocked.
 
 - **WHEN** several deltas have arrived and then nothing arrives for longer than the stall deadline
 - **THEN** the request is abandoned, the partial answer stays visible, and the transcript says the stream stopped
+
+### Requirement: A configured proxy carries the request
+
+`aside` SHALL resolve an optional proxy for the provider request from the same
+four sources and in the same order as the model and base URL: `--proxy`,
+`ASIDE_PROXY`, the `proxy` key, and no built-in default. The value SHALL be handed
+to `curl` as its proxy, so every scheme curl accepts (`http://`, `https://`,
+`socks5h://`, …) works and no proxy handling lives in the panel. With no proxy
+configured the request MUST go direct: the sandbox runs with an empty environment,
+so no `http_proxy`, `https_proxy` or `all_proxy` can reach it. The value MUST NOT
+appear in a command line or the process table, MUST NOT be echoed in any error
+message, and SHALL be escaped for curl's configuration parser exactly as the URL
+and the credential are. Which hop a failure is attributed to SHALL follow from
+whether a proxy is configured, never from curl's wording: curl prints the same
+words whichever hop was stuck, and a provider's host name may itself read
+`proxy`. A proxy that terminates TLS sees the question and the credential, which
+is the user's own choice; the README's security section SHALL say so.
+
+#### Scenario: No proxy configured
+
+- **WHEN** no flag, environment variable or configuration key names a proxy
+- **THEN** the curl configuration carries no proxy line and the request goes direct
+
+#### Scenario: A SOCKS proxy
+
+- **WHEN** `--proxy socks5h://127.0.0.1:1080` is given
+- **THEN** the curl configuration carries that proxy, and nothing about it reaches the process table
+
+#### Scenario: The proxy is unreachable
+
+- **WHEN** the proxy cannot be resolved or refuses the connection
+- **THEN** the transcript names the proxy as the failing hop, not the provider
+
+#### Scenario: A proxy address curl will not accept
+
+- **WHEN** the configured proxy is a URL curl refuses as malformed or as an unsupported scheme
+- **THEN** the transcript reports curl's own diagnosis of the address, and not that its host name could not be resolved
+
+#### Scenario: The connect deadline passes with a proxy configured
+
+- **WHEN** a proxy is configured and curl reports a connect-phase timeout, so the request was never sent
+- **THEN** the transcript says the request never got through the proxy, and does not say the provider sent nothing
+- **AND** the same timeout with no proxy configured names the provider instead
+
+#### Scenario: The provider accepts and then says nothing, through a proxy
+
+- **WHEN** the connection is up, the request has been sent, and nothing arrives before the stall deadline
+- **THEN** the transcript names the provider, and never the proxy, whether or not one carried the request
+
+#### Scenario: A proxy that refuses with 407
+
+- **WHEN** a request through a configured proxy comes back `407`
+- **THEN** the transcript says the proxy refused it, not the provider
 
 ### Requirement: An empty question is never sent
 

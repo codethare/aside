@@ -2,9 +2,7 @@
 //! read only when a glyph actually needs them, so a Chinese answer still renders
 //! without paying for the 19 MB CJK collection on the first frame.
 
-#[cfg(test)]
-use ab_glyph::GlyphId;
-use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
+use skrifa::prelude::*;
 use std::cell::{Ref, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,9 +31,18 @@ pub struct GlyphBitmap {
 /// antialiasing mode).
 pub type GlyphKey = (u8, u16, u8, u8, u8);
 
+/// What [`PanelFont::glyph`] answers with: chain face index, glyph id, and the
+/// advance in pixels.
+pub type GlyphLookup = (usize, GlyphId, f32);
+
 /// Pixel size of the panel's text. One constant, because there is no font
 /// command-line syntax to negotiate with.
 pub const SIZE: f32 = 13.0;
+
+/// Cap on the character lookup memo. Its keys come from the provider's text, so
+/// a long session of answers full of distinct characters must not grow it with
+/// the session; past the cap it resets, which costs one re-lookup per character.
+const LOOKUP_CACHE_CAP: usize = 8192;
 
 pub struct PanelFont {
     /// Chain faces, index 0 = primary. Beyond the primary a face is only read
@@ -58,15 +65,82 @@ pub struct PanelFont {
     /// (~8.4 ms measured in wlmenu). Discarded wholesale when the font is
     /// re-derived for a new scale, so a scale change cannot serve stale bitmaps.
     pub glyphs: RefCell<HashMap<GlyphKey, GlyphBitmap>>,
+    /// `char` -> chain face index, glyph id and pixel advance, for this size.
+    /// Neither can change while the font lives, so the memo cannot go stale;
+    /// past `LOOKUP_CACHE_CAP` it is dropped wholesale instead of growing.
+    lookups: RefCell<HashMap<char, Option<GlyphLookup>>>,
 }
 
 enum FaceState {
-    Loaded(FontVec),
+    Loaded(Face),
     /// Not read yet (`chain[i - 1]`).
     Unread,
     /// Read or parse failed: never retried, or every missing glyph would pay
     /// for the failing I/O again.
     Failed,
+}
+
+/// One chain face. The bytes live here because a skrifa `FontRef` borrows them
+/// (`ab_glyph`'s `FontVec` owned them instead), so a face hands one out for as
+/// long as the borrow held by [`FaceRef`] lasts.
+struct Face {
+    bytes: Vec<u8>,
+    index: u32,
+    /// Unscaled ascender and descender. Kept because `ab_glyph` scaled every
+    /// face by `size / (ascender - descender)` rather than by units-per-em, and
+    /// every advance, baseline and outline follows from that one number.
+    ascender: f32,
+    descender: f32,
+}
+
+impl Face {
+    fn new(bytes: Vec<u8>, index: u32) -> Result<Face, String> {
+        let font = FontRef::from_index(&bytes, index).map_err(|e| e.to_string())?;
+        let metrics = font.metrics(Size::unscaled(), LocationRef::default());
+        Ok(Face {
+            bytes,
+            index,
+            ascender: metrics.ascent,
+            descender: metrics.descent,
+        })
+    }
+
+    fn font(&self) -> Option<FontRef<'_>> {
+        FontRef::from_index(&self.bytes, self.index).ok()
+    }
+}
+
+/// A chain face, borrowed from the cell that holds it: the borrow travels with
+/// the face because any `FontRef` built from it borrows the same bytes.
+pub struct FaceRef<'a> {
+    face: Ref<'a, Face>,
+}
+
+impl FaceRef<'_> {
+    /// skrifa's view of this face. Cheap, but it re-reads the table directory,
+    /// so a caller holds one for a whole run of glyphs.
+    pub fn font(&self) -> Option<FontRef<'_>> {
+        self.face.font()
+    }
+
+    /// Pixels per font unit at `size`.
+    pub fn px_per_unit(&self, size: f32) -> f32 {
+        size / (self.face.ascender - self.face.descender)
+    }
+
+    /// Glyph id and pixel advance for `c`, or `None` when this face has no
+    /// glyph for it. Glyph 0 counts as missing, as it did under `ab_glyph`.
+    pub fn glyph(&self, font: &FontRef<'_>, size: f32, c: char) -> Option<(GlyphId, f32)> {
+        let gid = font.charmap().map(c)?;
+        if gid.to_u32() == 0 {
+            return None;
+        }
+        let advance = font
+            .glyph_metrics(Size::unscaled(), LocationRef::default())
+            .advance_width(gid)
+            .unwrap_or_default();
+        Some((gid, advance * self.px_per_unit(size)))
+    }
 }
 
 /// An in-flight font load: started before the Wayland handshake, joined by the
@@ -79,9 +153,9 @@ pub(crate) fn spawn_load(size: f32) -> FontLoad {
     std::thread::spawn(move || PanelFont::load(size))
 }
 
-/// Row height incl. padding, from the size alone: ab_glyph's scaled `height()`
-/// is just the requested `PxScale`, so this is face-independent and the surface
-/// can be committed at its final size before any font is loaded.
+/// Row height incl. padding, from the size alone: a line is the requested size
+/// tall, not the face's, so this is face-independent and the surface can be
+/// committed at its final size before any font is loaded.
 /// Comfortable row height ≈1.5× font size: glyphs breathe top/bottom (the
 /// vertical pad is a quarter of the em on each side), and the highlighted band
 /// is an easier target to hit (Fitts).
@@ -147,19 +221,19 @@ impl PanelFont {
             .ok_or("no usable system font found")?;
         let bytes =
             std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let font = FontVec::try_from_vec_and_index(bytes, index)
-            .map_err(|e| format!("invalid font {}: {e}", path.display()))?;
+        let face =
+            Face::new(bytes, index).map_err(|e| format!("invalid font {}: {e}", path.display()))?;
         let rest: Vec<(PathBuf, u32)> = chain.into_iter().skip(1).collect();
-        Ok(Self::build(font, rest, size))
+        Ok(Self::build(face, rest, size))
     }
 
-    fn build(font: FontVec, chain: Vec<(PathBuf, u32)>, size: f32) -> PanelFont {
-        let scaled = font.as_scaled(PxScale::from(size));
-        let ascent_px = scaled.ascent();
-        let descent_px = scaled.descent();
-        let line_h = scaled.height(); // == size by definition of PxScale
+    fn build(face: Face, chain: Vec<(PathBuf, u32)>, size: f32) -> PanelFont {
+        let px_per_unit = face.ascender - face.descender;
+        let ascent_px = face.ascender * size / px_per_unit;
+        let descent_px = face.descender * size / px_per_unit;
+        let line_h = size; // a line is the requested size: nothing measures a font's own height
         let row_h = row_h_for(size);
-        let faces = std::iter::once(FaceState::Loaded(font))
+        let faces = std::iter::once(FaceState::Loaded(face))
             .chain(chain.iter().map(|_| FaceState::Unread))
             .collect();
         PanelFont {
@@ -171,6 +245,7 @@ impl PanelFont {
             line_h,
             row_h,
             glyphs: RefCell::new(HashMap::new()),
+            lookups: RefCell::new(HashMap::new()),
         }
     }
 
@@ -181,7 +256,7 @@ impl PanelFont {
 
     /// Chain face `i` (0 = primary, always loaded), read on first use. `None`
     /// when that face cannot be read or parsed, so the chain skips it.
-    pub fn face(&self, i: usize) -> Option<Ref<'_, FontVec>> {
+    pub fn face(&self, i: usize) -> Option<FaceRef<'_>> {
         let unread = matches!(self.faces.borrow().get(i), Some(FaceState::Unread));
         if unread {
             let read = i
@@ -196,31 +271,11 @@ impl PanelFont {
             }
         }
         Ref::filter_map(self.faces.borrow(), |faces| match faces.get(i) {
-            Some(FaceState::Loaded(font)) => Some(font),
+            Some(FaceState::Loaded(face)) => Some(face),
             _ => None,
         })
         .ok()
-    }
-
-    /// Chain index + glyph id for `ch`, reading faces on demand.
-    #[cfg(test)]
-    fn glyph_for(&self, ch: char) -> Option<(usize, GlyphId)> {
-        for i in 0..self.face_count() {
-            let Some(face) = self.face(i) else {
-                continue;
-            };
-            let gid = face.as_scaled(PxScale::from(self.size)).glyph_id(ch);
-            if gid != GlyphId(0) {
-                return Some((i, gid));
-            }
-        }
-        None
-    }
-
-    /// True if any face in the chain (primary first) has a glyph for `ch`.
-    #[cfg(test)]
-    pub fn has_glyph(&self, ch: char) -> bool {
-        self.glyph_for(ch).is_some()
+        .map(|face| FaceRef { face })
     }
 
     /// Faces not read yet (test-only): startup must read nothing but the
@@ -232,6 +287,36 @@ impl PanelFont {
             .iter()
             .filter(|f| matches!(f, FaceState::Unread))
             .count()
+    }
+
+    /// Chain face index, glyph id and pixel advance for `ch`, or `None` when no
+    /// face in the chain has it.
+    ///
+    /// The chain is asked once per character and the answer kept: the mapping
+    /// and the advance cannot change while the font lives (a new size is a new
+    /// `PanelFont`), and without the memo every frame re-walked the cmap of
+    /// every face up to the CJK one.
+    pub fn glyph(&self, ch: char) -> Option<GlyphLookup> {
+        if let Some(hit) = self.lookups.borrow().get(&ch) {
+            return *hit;
+        }
+        let found = (0..self.face_count()).find_map(|i| {
+            let face = self.face(i)?;
+            let font = face.font()?;
+            let (gid, advance) = face.glyph(&font, self.size, ch)?;
+            Some((i, gid, advance))
+        });
+        if self.lookups.borrow().len() >= LOOKUP_CACHE_CAP {
+            self.lookups.borrow_mut().clear();
+        }
+        self.lookups.borrow_mut().insert(ch, found);
+        found
+    }
+
+    /// True if any face in the chain (primary first) has a glyph for `ch`.
+    #[cfg(test)]
+    pub fn has_glyph(&self, ch: char) -> bool {
+        self.glyph(ch).is_some()
     }
 }
 
@@ -362,9 +447,9 @@ fn face_path(db: &fontdb::Database, id: fontdb::ID) -> Option<(PathBuf, u32)> {
 
 /// Read + parse one chain face. Best-effort: a font that cannot be loaded is
 /// skipped by the chain.
-fn read_face(path: &Path, index: u32) -> Option<FontVec> {
+fn read_face(path: &Path, index: u32) -> Option<Face> {
     let bytes = std::fs::read(path).ok()?;
-    FontVec::try_from_vec_and_index(bytes, index).ok()
+    Face::new(bytes, index).ok()
 }
 
 #[cfg(test)]
@@ -415,9 +500,10 @@ mod tests {
         let index =
             index_for_family(Path::new(c.path), c.family).expect("named face in collection");
         let bytes = std::fs::read(c.path).unwrap();
-        let face = FontVec::try_from_vec_and_index(bytes, index).expect("face parses");
-        let scaled = face.as_scaled(PxScale::from(SIZE));
-        assert_ne!(scaled.glyph_id('中'), GlyphId(0), "the SC face covers CJK");
+        let face = Face::new(bytes, index).expect("face parses");
+        let font = face.font().expect("face parses");
+        let gid = font.charmap().map('中').expect("CJK mapping");
+        assert_ne!(gid.to_u32(), 0, "the SC face covers CJK");
     }
 
     #[test]
@@ -445,5 +531,36 @@ mod tests {
             m.has_glyph('中'),
             "CJK must resolve via the fallback chain when the primary is latin-only"
         );
+    }
+
+    #[test]
+    fn the_glyph_memo_stays_bounded() {
+        // The keys come from the provider's text, so the memo must not grow with
+        // the session: past the cap it resets instead.
+        let m = PanelFont::load(SIZE).expect("system font available");
+        for i in 0..(LOOKUP_CACHE_CAP * 2) {
+            let ch = char::from_u32(0x4e00 + i as u32).expect("a BMP scalar");
+            let _ = m.glyph(ch);
+        }
+        let held = m.lookups.borrow().len();
+        assert!(held <= LOOKUP_CACHE_CAP, "the memo is capped, held {held}");
+    }
+
+    #[test]
+    fn the_glyph_memo_answers_what_the_chain_does() {
+        // The chain is walked once per character and the answer kept for the
+        // life of the font. A font that re-walks the chain must agree, or the
+        // memo would be hiding a face that should have answered first.
+        let m = PanelFont::load(SIZE).expect("system font available");
+        let fresh = PanelFont::load(SIZE).expect("system font available");
+        for ch in ['a', 'W', '中', '火', '😀'] {
+            let hit = m.glyph(ch);
+            assert_eq!(hit, fresh.glyph(ch), "{ch:?}: the memo changed the answer");
+            assert_eq!(hit, m.glyph(ch), "{ch:?}: asking twice is asking once");
+            if let Some((_, gid, advance)) = hit {
+                assert!(gid.to_u32() != 0, "{ch:?}: glyph 0 is not a glyph");
+                assert!(advance > 0.0, "{ch:?}: a real glyph has a real advance");
+            }
+        }
     }
 }

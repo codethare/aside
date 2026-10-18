@@ -139,20 +139,13 @@ fn break_tail(s: &str, font: &PanelFont, max_w: f32) -> Option<usize> {
     None
 }
 
-/// Advance width of one character in the first chain face that has it.
+/// Advance width of one character in the chain.
 pub fn char_advance(font: &PanelFont, c: char) -> f32 {
-    use ab_glyph::{Font, GlyphId, PxScale, ScaleFont};
-    for i in 0..font.face_count() {
-        let Some(face) = font.face(i) else { continue };
-        let scaled = face.as_scaled(PxScale::from(font.size));
-        let gid = scaled.glyph_id(c);
-        if gid != GlyphId(0) {
-            return scaled.h_advance(gid);
-        }
-    }
     // No face carries it: advance by the widest thing we can measure so the
     // layout cannot loop forever on a character nothing can draw.
-    font.size / 2.0
+    font.glyph(c)
+        .map(|(_, _, advance)| advance)
+        .unwrap_or(font.size / 2.0)
 }
 
 /// A scrollback window over the transcript's rows.

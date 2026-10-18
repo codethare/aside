@@ -27,13 +27,13 @@ Press the key again while it is open and the running panel is raised rather than
 duplicated.
 
 Configuration is optional: `~/.config/aside/config.toml` with flat `key = "value"`
-lines, `model` and `base_url` only. The credential is environment-only:
+lines, `model`, `base_url` and `proxy` only. The credential is environment-only:
 
 ```sh
 export COMMAND_CODE_API_KEY=...
 ```
 
-Flags override both: `--model`, `--base-url`. `aside --preview out.ppm` renders a
+Flags override both: `--model`, `--base-url`, `--proxy`. `aside --preview out.ppm` renders a
 scripted transcript to an image without opening a window, which is how the layout
 is checked on a machine with no compositor.
 
@@ -52,10 +52,11 @@ and `Ctrl+Left`/`Ctrl+Right` by word.
 
 ## What it depends on
 
-Five crates, 104 in the whole tree including transitive ones — the same shape as
+Six crates, 125 in the whole tree including transitive ones — the same shape as
 `wlmenu`, whose rendering core this borrows: `smithay-client-toolkit`,
-`wayland-client`, `wayland-protocols`, `ab_glyph`, `fontdb`, and nothing else. No
-HTTP or TLS crate: the provider request is one `curl` process.
+`wayland-client`, `wayland-protocols`, `skrifa`, `ab_glyph_rasterizer`,
+`fontdb`, and nothing else. No HTTP or TLS crate: the provider request is one
+`curl` process.
 
 ## Why it is built this way
 
@@ -64,8 +65,9 @@ home directory, no session socket, no writable path, no inherited environment �
 a question cannot turn into local access. The API key is handed to `curl` on stdin
 rather than in `argv`, so it is in no process table.
 
-Rendering is software (`wl_shm` plus `ab_glyph`), with the design tokens and the
-1.5×-row-height rule taken from `wlmenu` so the two read as the same product. The
+Rendering is software: `wl_shm` for the buffer, `skrifa` to read the font's
+outlines, `ab_glyph_rasterizer` to turn them into coverage. The design tokens and
+the 1.5×-row-height rule come from `wlmenu` so the two read as the same product. The
 layout core is new: wrapping, a caret inside the text, multi-line answers and a
 scrollback viewport are exactly what `wlmenu`'s single-line rows cannot do.
 
@@ -105,6 +107,10 @@ What this does **not** cover:
 
 - The network is reachable without restriction: the provider sees the question,
   and so does anything able to intercept the connection.
+- A proxy you configure (`--proxy`, `ASIDE_PROXY`, `proxy` in the config) is the
+  only way to route the request: the sandbox runs with an empty environment, so
+  `http_proxy` and friends never reach it. An HTTPS target stays a TLS tunnel the
+  proxy cannot read; a proxy that terminates TLS sees the question and the key.
 - The credential is readable by any process running as the same user.
 - The panel itself is not sandboxed; its own process reads fonts and the config.
 

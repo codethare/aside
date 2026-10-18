@@ -38,6 +38,17 @@ Ask this model.  Default
 Provider base URL.  Default
 .IR https://api.commandcode.ai/provider/v1 .
 .TP
+.BI \-\-proxy " url"
+Send the request through this proxy: any scheme
+.BR curl (1)
+accepts, for example
+.IR socks5h://127.0.0.1:1080 .
+Without it the request goes direct; the sandbox runs with an empty environment,
+so
+.I http_proxy
+and friends have no effect.  A proxy that terminates TLS sees the question and
+the credential.
+.TP
 .BI \-\-preview " file"
 Render a scripted conversation to
 .I file
@@ -82,7 +93,7 @@ The provider credential.  Required: without it
 .B aside
 writes one line to standard error and exits non-zero without opening a window.
 .TP
-.B ASIDE_MODEL ", " ASIDE_BASE_URL
+.B ASIDE_MODEL ", " ASIDE_BASE_URL ", " ASIDE_PROXY
 Overridden by the matching flag, overriding the configuration file.
 .TP
 .B XDG_CONFIG_HOME
@@ -97,9 +108,10 @@ running panel instead of opening a second window.
 Read, never written.  Flat
 .I key = "value"
 lines, with
-.I model
-and
+.IR model ,
 .I base_url
+and
+.I proxy
 recognised.  No credential may be stored here.
 .SH EXIT STATUS
 .TP

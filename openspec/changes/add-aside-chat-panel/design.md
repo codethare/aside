@@ -75,7 +75,8 @@ Not assumed; each was observed on this host or against the live provider.
 ### D1 — Port `wlmenu`'s font and render core; write a new layout core
 
 Taken from `wlmenu` almost unchanged: `font.rs` (family resolution through
-`fontdb`, lazy face loading, glyph cache, subpixel coverage planes), `render.rs`
+`fontdb`, lazy face loading, glyph cache, subpixel coverage planes — the font is
+parsed by `skrifa` rather than `ttf-parser` since see tasks 14), `render.rs`
 primitives (BGRA span painting, rounded-outline clipping, glyph blit, blend
 helpers, the WCAG contrast test), and the shape of `feed.rs` (reader thread,
 mutex queue, EOF flag, drained by the frame tick). `anim.rs` was ported and then

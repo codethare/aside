@@ -12,6 +12,7 @@ pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4.1-flash";
 pub const KEY_VAR: &str = "COMMAND_CODE_API_KEY";
 pub const MODEL_VAR: &str = "ASIDE_MODEL";
 pub const BASE_URL_VAR: &str = "ASIDE_BASE_URL";
+pub const PROXY_VAR: &str = "ASIDE_PROXY";
 
 /// Timeouts, as curl flags. curl cannot tell "no first byte" from "stopped
 /// mid-stream" — both exit 28 — so the panel distinguishes them by whether any
@@ -25,6 +26,11 @@ pub const MAX_TIME_S: u32 = 300;
 pub struct Config {
     pub base_url: String,
     pub model: String,
+    /// Where the request goes instead of direct: any scheme `curl` accepts
+    /// (`http://`, `socks5h://`, …). `None` is a direct connection, and inside
+    /// the sandbox it is the only way to use a proxy at all — `--clearenv`
+    /// keeps `http_proxy` and friends out.
+    pub proxy: Option<String>,
 }
 
 impl Default for Config {
@@ -32,6 +38,7 @@ impl Default for Config {
         Config {
             base_url: DEFAULT_BASE_URL.to_string(),
             model: DEFAULT_MODEL.to_string(),
+            proxy: None,
         }
     }
 }
@@ -73,11 +80,12 @@ pub fn pick(
         .or_else(|| file?.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()))
 }
 
-/// Resolve the model and base URL: flag, then environment, then config file,
-/// then the built-in default.
+/// Resolve the model, base URL and proxy: flag, then environment, then config
+/// file, then the built-in default.
 pub fn resolve(
     flag_model: Option<&str>,
     flag_base_url: Option<&str>,
+    flag_proxy: Option<&str>,
 ) -> Result<Config, ConfigError> {
     let file = match config_path() {
         Some(path) => read_config(&path)?,
@@ -99,6 +107,12 @@ pub fn resolve(
             "base_url",
         )
         .unwrap_or(defaults.base_url),
+        proxy: pick(
+            flag_proxy,
+            std::env::var(PROXY_VAR).ok(),
+            Some(&file),
+            "proxy",
+        ),
     })
 }
 
@@ -127,9 +141,9 @@ fn read_config(path: &std::path::Path) -> Result<Vec<(String, String)>, ConfigEr
     })
 }
 
-/// Flat `key = "value"` lines with `#` comments. `model` and `base_url` are the
-/// only known keys; anything else is an error rather than a silent shrug, so a
-/// typo cannot quietly change nothing.
+/// Flat `key = "value"` lines with `#` comments. `model`, `base_url` and `proxy`
+/// are the only known keys; anything else is an error rather than a silent shrug,
+/// so a typo cannot quietly change nothing.
 pub fn parse_config(text: &str) -> Result<Vec<(String, String)>, (usize, String)> {
     let mut out = Vec::new();
     for (i, raw) in text.lines().enumerate() {
@@ -149,7 +163,7 @@ pub fn parse_config(text: &str) -> Result<Vec<(String, String)>, (usize, String)
             }
         };
         match key {
-            "model" | "base_url" => out.push((key.to_string(), value)),
+            "model" | "base_url" | "proxy" => out.push((key.to_string(), value)),
             other => return Err((line, format!("unknown key `{other}`"))),
         }
     }
@@ -230,8 +244,13 @@ pub fn escape_curl_config(s: &str) -> String {
 /// out of the process table.
 pub fn curl_config(config: &Config, key: &str, body: &str) -> String {
     let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
+    let proxy = match &config.proxy {
+        Some(p) => format!("proxy = \"{}\"\n", escape_curl_config(p)),
+        None => String::new(),
+    };
     format!(
         "url = \"{}\"\n\
+         {proxy}\
          request = \"POST\"\n\
          header = \"Authorization: Bearer {}\"\n\
          header = \"content-type: application/json\"\n\
@@ -283,13 +302,15 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.model, "deepseek/deepseek-v4.1-flash");
         assert_eq!(c.base_url, "https://api.commandcode.ai/provider/v1");
+        assert_eq!(c.proxy, None, "a bare machine goes direct");
         assert_eq!(KEY_VAR, "COMMAND_CODE_API_KEY");
+        assert_eq!(PROXY_VAR, "ASIDE_PROXY");
     }
 
     #[test]
     fn config_parses_flat_keys_comments_and_blank_lines() {
         let parsed = parse_config(
-            "# what to ask\nmodel = \"deepseek/deepseek-v4-flash\"\n\nbase_url = \"https://x/v1\" # trailing\n",
+            "# what to ask\nmodel = \"deepseek/deepseek-v4-flash\"\n\nbase_url = \"https://x/v1\" # trailing\nproxy = \"socks5h://127.0.0.1:1080\"\n",
         )
         .expect("parses");
         assert_eq!(
@@ -300,6 +321,7 @@ mod tests {
                     "deepseek/deepseek-v4-flash".to_string()
                 ),
                 ("base_url".to_string(), "https://x/v1".to_string()),
+                ("proxy".to_string(), "socks5h://127.0.0.1:1080".to_string()),
             ]
         );
     }
@@ -336,6 +358,36 @@ mod tests {
         // one back through: the body arrives unchanged.
         assert_eq!(escape_curl_config("a\\nb"), "a\\\\nb");
         assert_eq!(escape_curl_config("say \"hi\""), "say \\\"hi\\\"");
+    }
+
+    #[test]
+    fn the_proxy_line_appears_only_when_one_is_configured() {
+        let direct = curl_config(&Config::default(), "k", "{}");
+        assert!(
+            !direct.contains("proxy"),
+            "a direct request carries no proxy line: {direct}"
+        );
+        let proxied = Config {
+            proxy: Some("socks5h://127.0.0.1:1080".to_string()),
+            ..Config::default()
+        };
+        let text = curl_config(&proxied, "k", "{}");
+        // Its own line, between the URL and the request: a formatting slip here
+        // would silently hand curl a broken configuration.
+        assert!(
+            text.contains(
+                "url = \"https://api.commandcode.ai/provider/v1/chat/completions\"\n\
+                 proxy = \"socks5h://127.0.0.1:1080\"\n\
+                 request = \"POST\"\n"
+            ),
+            "{text}"
+        );
+        // The value goes through the same escaping as the URL and the key.
+        let odd = Config {
+            proxy: Some("http://p/\"x\"".to_string()),
+            ..Config::default()
+        };
+        assert!(curl_config(&odd, "k", "{}").contains("proxy = \"http://p/\\\"x\\\"\"\n"));
     }
 
     #[test]

@@ -28,7 +28,7 @@ change.
    `render.rs`. Row height stays `size + 2 * round(size * 0.25)`.
 5. **Frame cost is per visible row**, never per transcript row. Wrapping happens
    once per delta and once per resize; re-wrapping on every frame is a bug.
-6. **Zero dependencies beyond the five in `Cargo.toml`.** Ask before adding one;
+6. **Zero dependencies beyond the six in `Cargo.toml`.** Ask before adding one;
    prefer deleting code to adding a crate.
 7. **Every failure is visible and exits.** No protocol error may become a busy
    loop, and no error path may leave a process with no way to be seen.
@@ -36,7 +36,8 @@ change.
 ## Code style
 
 - Single-file modules, pure functions and constants, BGRA colours, ASCII source.
-- Software rendering only: `wl_shm` + `ab_glyph`. No cairo, pango, skia or GTK.
+- Software rendering only: `wl_shm` + `skrifa` outlines + `ab_glyph_rasterizer`
+  coverage. No cairo, pango, skia or GTK.
 - Comment the why, in one line, beside the thing it constrains.
 - Only change what was asked; neighbouring modules are not yours to tidy.
 

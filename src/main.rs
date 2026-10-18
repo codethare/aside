@@ -57,10 +57,12 @@ const MIN_SIZE: (u32, u32) = (420, 200);
 const APP_ID: &str = "aside";
 
 const USAGE: &str = "\
-usage: aside [--model MODEL] [--base-url URL] [--preview FILE] [--help] [--version]
+usage: aside [--model MODEL] [--base-url URL] [--proxy URL] [--preview FILE] [--help] [--version]
 
   --model MODEL     model to ask (default deepseek/deepseek-v4.1-flash)
   --base-url URL    provider base URL (default https://api.commandcode.ai/provider/v1)
+  --proxy URL       proxy for the request, any scheme curl accepts
+                    (e.g. socks5h://127.0.0.1:1080); default is a direct connection
   --preview FILE    render a scripted conversation to a PPM file and exit
 ";
 
@@ -148,8 +150,11 @@ fn main() {
             exit(2);
         }
     };
-    let config = match provider::resolve(flag("--model").as_deref(), flag("--base-url").as_deref())
-    {
+    let config = match provider::resolve(
+        flag("--model").as_deref(),
+        flag("--base-url").as_deref(),
+        flag("--proxy").as_deref(),
+    ) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("aside: {e}");
