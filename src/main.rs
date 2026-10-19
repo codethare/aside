@@ -261,7 +261,6 @@ fn run(
     let shm = Shm::bind(&globals, &qh).map_err(|e| format!("wl_shm is missing: {e}"))?;
     let activation = ActivationState::bind(&globals, &qh).ok();
     let ime_manager = ime::bind(&globals, &qh);
-    let ime_available = ime_manager.is_some();
 
     let surface = compositor.create_surface(&qh);
     surface.set_buffer_scale(1);
@@ -290,6 +289,7 @@ fn run(
         scale: 1,
         phase: Phase::Idle,
         phase_start: std::time::Instant::now(),
+        focused: false,
         output_w: None,
         output_h: None,
         first_frame: true,
@@ -308,7 +308,7 @@ fn run(
         highlight: 0,
         viewport: Viewport::new(8),
         request: None,
-        ime: ime::Ime::new(ime_available),
+        ime: ime::Ime::default(),
         seat: None,
         ime_manager,
         text_input: None,
@@ -316,7 +316,6 @@ fn run(
         key,
     };
     state.adopt_font()?;
-    state.warn_if_no_ime();
 
     // The raise channel: level-triggered, and accept() never blocks the loop.
     if let Some(listener) = listener {
@@ -510,6 +509,8 @@ struct State {
     phase: Phase,
     /// When the current phase began: the ball's blink is read off this clock.
     phase_start: std::time::Instant,
+    /// Whether the compositor has handed this surface the keyboard.
+    focused: bool,
     /// Logical size of the output the panel is on, once it has reported one.
     output_w: Option<u32>,
     output_h: Option<u32>,
@@ -599,25 +600,6 @@ impl State {
         self.rewrap();
         self.dirty = true;
         Ok(())
-    }
-
-    /// Say it once, plainly, rather than leaving a CJK typist wondering why
-    /// nothing they type appears.
-    fn warn_if_no_ime(&mut self) {
-        if self.ime.available {
-            return;
-        }
-        let max_w = self.text_width();
-        let State {
-            transcript, font, ..
-        } = self;
-        if let Some(font) = font.as_ref() {
-            transcript.add_note(
-                "no input method on this compositor: typing goes straight to the panel",
-                font,
-                max_w,
-            );
-        }
     }
 
     fn buffer_height(&self) -> u32 {
@@ -954,6 +936,11 @@ impl State {
     /// Tell the input method where the caret is, and what text surrounds it, so
     /// a candidate window lands against the text rather than in the corner.
     fn report_cursor(&mut self) {
+        // A commit while the text input is disabled is a client bug (river says
+        // so by name): the compositor only applies state while it has focus.
+        if !self.focused {
+            return;
+        }
         let (Some(text_input), Some(font)) = (self.text_input.as_ref(), self.font.as_ref()) else {
             return;
         };
@@ -1208,6 +1195,7 @@ impl KeyboardHandler for State {
         if self.layer.wl_surface() == surface
             && let Some(text_input) = self.text_input.as_ref()
         {
+            self.focused = true;
             text_input.enable();
             text_input.set_content_type(ContentHint::empty(), ContentPurpose::Normal);
             text_input.commit();
@@ -1223,6 +1211,7 @@ impl KeyboardHandler for State {
         _serial: u32,
     ) {
         if self.layer.wl_surface() == surface {
+            self.focused = false;
             // Stop composing, or an input method keeps a pre-edit open while the
             // panel is not focused.
             self.ime.preedit.clear();

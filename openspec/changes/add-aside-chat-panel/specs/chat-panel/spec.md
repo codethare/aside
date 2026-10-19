@@ -77,19 +77,27 @@ never cursor movement in the input.
 
 The panel SHALL act as a `zwp_text_input_v3` client so that a running input method
 (fcitx, ibus) can deliver composed text, including multi-character and CJK
-commits, pre-edit strings and cursor position. When the compositor advertises no
-text-input manager, the panel MUST still accept directly typed keys and MUST
-state that input-method support is unavailable, rather than failing to start.
+commits, pre-edit strings and cursor position. Text-input manager being advertised
+is NOT proof that an input method is running: the panel MUST use directly typed
+keysyms as its text until the input method itself delivers something (a pre-edit,
+a commit, a deletion or a `done`), and only from then on leave text to it. It MUST
+NOT refuse to start when the manager is missing. It MUST enable the text input
+only while its surface holds keyboard focus.
 
 #### Scenario: A composed Chinese question arrives intact
 
 - **WHEN** the user composes `什么是 EAGAIN` with an IME and commits it
 - **THEN** the input line holds exactly that text and pre-edit text is rendered while it is being composed
 
-#### Scenario: No input method on the compositor
+#### Scenario: A manager with no input method behind it
 
-- **WHEN** `zwp_text_input_manager_v3` is not advertised
-- **THEN** the panel opens, accepts directly typed characters, and reports that IME input is unavailable
+- **WHEN** the compositor advertises `zwp_text_input_manager_v3` but no input method is connected, so nothing is ever committed
+- **THEN** directly typed characters still reach the input line, because the panel has heard nothing from an input method
+
+#### Scenario: An input method speaks and takes over
+
+- **WHEN** the input method delivers a pre-edit, a commit or a `done`
+- **THEN** the panel leaves subsequent text to it and does not also insert the raw key
 
 ### Requirement: Turns accumulate in one transcript
 
