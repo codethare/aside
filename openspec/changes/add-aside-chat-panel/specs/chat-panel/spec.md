@@ -244,6 +244,16 @@ scale 1, where it is legible, and grayscale antialiasing at higher scales.
 - **WHEN** the compositor reports a protocol error, including a first-commit size mismatch
 - **THEN** `aside` reports it and exits, and no failure path leaves the process burning CPU
 
+#### Scenario: No buffer before the first configure
+
+- **WHEN** the compositor has not yet sent `xdg_surface.configure`
+- **THEN** `aside` commits no buffer and paints nothing, because a strict compositor ends the connection with `xdg_surface has never been configured`
+
+#### Scenario: The compositor never configures
+
+- **WHEN** no configure arrives within the deadline
+- **THEN** `aside` reports that and exits non-zero, rather than leaving a process that is running and invisible
+
 #### Scenario: The compositor closes the connection
 
 - **WHEN** the compositor goes away while a panel is on screen, so the socket reports a broken pipe

@@ -220,6 +220,11 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
     std::fs::write(path, panel::to_ppm(&buf, w, h)).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// How long to wait for the first configure before calling the compositor's
+/// silence a failure. Compositors that configure at all do it in milliseconds;
+/// one that never does leaves a client with nothing to draw and no way to be seen.
+pub const CONFIGURE_TIMEOUT_S: u64 = 5;
+
 fn run(
     config: provider::Config,
     key: String,
@@ -276,6 +281,8 @@ fn run(
         height: INITIAL_SIZE.1,
         scale: 1,
         first_frame: true,
+        configured: false,
+        configure_wait: Some(std::time::Instant::now()),
         painted: false,
         dirty: true,
         exit: false,
@@ -339,7 +346,7 @@ fn run(
                 error.code, error.message
             ));
         }
-        state.tick();
+        state.tick()?;
     }
     Ok(())
 }
@@ -432,6 +439,14 @@ struct State {
     height: u32,
     scale: u32,
     first_frame: bool,
+    /// Whether the compositor has configured the surface yet. A buffer may not be
+    /// attached before that: the first commit is buffer-less and its only job is
+    /// to ask for the configure, and a strict compositor kills a client that
+    /// commits pixels ahead of it ("xdg_surface has never been configured").
+    configured: bool,
+    /// When the wait for that first configure started, so a compositor that never
+    /// sends one is reported instead of leaving the panel invisible forever.
+    configure_wait: Option<std::time::Instant>,
     /// Whether any frame has reached the compositor, which is what tells a
     /// refused startup from a session that ended after the panel was on screen.
     painted: bool,
@@ -609,7 +624,14 @@ impl State {
 
     /// Drain whatever the request has produced and finish it when the child
     /// exits. Runs once per event-loop turn, so the UI never blocks on a pipe.
-    fn tick(&mut self) {
+    fn tick(&mut self) -> Result<(), String> {
+        if let Some(start) = self.configure_wait
+            && start.elapsed() >= Duration::from_secs(CONFIGURE_TIMEOUT_S)
+        {
+            return Err(format!(
+                "the compositor did not configure the window within {CONFIGURE_TIMEOUT_S}s"
+            ));
+        }
         let max_w = self.text_width();
         if let Some(open) = self.request.as_mut() {
             let State {
@@ -642,9 +664,15 @@ impl State {
             self.dirty = false;
             self.draw();
         }
+        Ok(())
     }
 
     fn draw(&mut self) {
+        if !self.configured {
+            // Nothing may be attached before the first configure; the configure
+            // handler draws the first frame.
+            return;
+        }
         let (w, h) = (self.buffer_width(), self.buffer_height());
         if w == 0 || h == 0 {
             return;
@@ -929,6 +957,8 @@ impl WindowHandler for State {
         configure: WindowConfigure,
         _serial: u32,
     ) {
+        self.configured = true;
+        self.configure_wait = None;
         let (w, h) = (
             configure.new_size.0.map(|v| v.get()).unwrap_or(self.width),
             configure.new_size.1.map(|v| v.get()).unwrap_or(self.height),
