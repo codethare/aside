@@ -276,6 +276,7 @@ fn run(
         height: INITIAL_SIZE.1,
         scale: 1,
         first_frame: true,
+        painted: false,
         dirty: true,
         exit: false,
         window,
@@ -325,7 +326,12 @@ fn run(
             Duration::from_millis(250)
         };
         if let Err(e) = event_loop.dispatch(timeout, &mut state) {
-            return Err(format!("the compositor left: {e}"));
+            let protocol = conn.protocol_error().map(|e| (e.code, e.message));
+            match fate(protocol, state.painted, compositor_gone(&e)) {
+                Fate::Report(message) => return Err(message),
+                Fate::Quiet => return Ok(()),
+                Fate::Unrelated => return Err(format!("the compositor left: {e}")),
+            }
         }
         if let Some(error) = conn.protocol_error() {
             return Err(format!(
@@ -336,6 +342,80 @@ fn run(
         state.tick();
     }
     Ok(())
+}
+
+/// What a failed dispatch means.
+#[derive(Debug, PartialEq, Eq)]
+enum Fate {
+    /// The compositor's own reason, which outranks anything inferred from the
+    /// socket: it is what a rejected request looks like from here.
+    Report(String),
+    /// The session ended after the panel had been on screen: nothing to say.
+    Quiet,
+    /// Something else; the caller reports it in its own words.
+    Unrelated,
+}
+
+/// Decide a failed dispatch, apart from the event loop so each outcome can be
+/// pinned without a compositor.
+fn fate(protocol: Option<(u32, String)>, painted: bool, gone: bool) -> Fate {
+    if let Some((code, message)) = protocol {
+        return Fate::Report(format!("the compositor reported {code}: {message}"));
+    }
+    if gone && !painted {
+        // Nothing was ever drawn, so this is not a session ending: the panel was
+        // refused before it appeared, and silence would leave no trace at all.
+        return Fate::Report(
+            "the compositor closed the connection before the first frame".to_string(),
+        );
+    }
+    if gone {
+        return Fate::Quiet;
+    }
+    Fate::Unrelated
+}
+
+/// Whether a dispatch failure is the compositor closing the connection — the
+/// session ending — rather than something the panel can report on. The socket's
+/// error kind sits behind two wrappers and the outer one does not expose it
+/// through `source()`, so each wrapper is opened by type.
+fn compositor_gone(err: &(dyn std::error::Error + 'static)) -> bool {
+    use smithay_client_toolkit::reexports::calloop;
+    use smithay_client_toolkit::reexports::client::backend::WaylandError;
+
+    // `wayland-backend`'s error type implements only the deprecated `cause()` and
+    // leaves `source()` at its default, so walking the chain misses the I/O error
+    // underneath. The two wrappers this program can receive are matched by type
+    // instead, which does not depend on that link existing.
+    if let Some(e) = err.downcast_ref::<calloop::Error>() {
+        return match e {
+            calloop::Error::IoError(io) => is_closed(io.kind()),
+            calloop::Error::OtherError(inner) => compositor_gone(&**inner),
+            calloop::Error::InvalidToken => false,
+        };
+    }
+    if let Some(e) = err.downcast_ref::<WaylandError>() {
+        return match e {
+            WaylandError::Io(io) => is_closed(io.kind()),
+            WaylandError::Protocol(_) => false,
+        };
+    }
+    if let Some(e) = err.downcast_ref::<std::io::Error>() {
+        return is_closed(e.kind());
+    }
+    false
+}
+
+/// The socket being gone, as opposed to an error worth reporting.
+fn is_closed(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::UnexpectedEof
+    )
 }
 
 struct State {
@@ -352,6 +432,9 @@ struct State {
     height: u32,
     scale: u32,
     first_frame: bool,
+    /// Whether any frame has reached the compositor, which is what tells a
+    /// refused startup from a session that ended after the panel was on screen.
+    painted: bool,
     dirty: bool,
     exit: bool,
     window: Window,
@@ -619,6 +702,7 @@ impl State {
             return;
         }
         self.window.commit();
+        self.painted = true;
         self.buffer = Some(buffer);
     }
 
@@ -1051,6 +1135,90 @@ smithay_client_toolkit::delegate_dispatch2!(State);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_panel_reports_why_instead_of_going_quiet() {
+        // The reported failure: the panel never appeared and all that was left was
+        // "Broken pipe". A compositor that rejects a request sends its own reason
+        // and then closes, so the reason must win over the socket error.
+        assert_eq!(
+            fate(Some((2, "invalid buffer size".to_string())), false, true),
+            Fate::Report("the compositor reported 2: invalid buffer size".to_string())
+        );
+        // Closed before anything was drawn: a startup failure, not a session end.
+        assert_eq!(
+            fate(None, false, true),
+            Fate::Report("the compositor closed the connection before the first frame".to_string())
+        );
+        // Closed after the panel had been on screen: the session ended.
+        assert_eq!(fate(None, true, true), Fate::Quiet);
+        // Not a closed socket at all: the caller reports it.
+        assert_eq!(fate(None, false, false), Fate::Unrelated);
+        // A protocol error is reported even mid-session.
+        assert_eq!(
+            fate(Some((1, "bad surface".to_string())), true, true),
+            Fate::Report("the compositor reported 1: bad surface".to_string())
+        );
+    }
+
+    #[test]
+    fn the_compositor_leaving_is_not_reported_as_a_failure() {
+        use smithay_client_toolkit::reexports::calloop;
+        // The shape measured when a compositor exits under a running panel:
+        // calloop wraps the I/O error twice before it reaches us, so the kind is
+        // only visible down the chain.
+        let closed = calloop::Error::OtherError(Box::new(calloop::Error::IoError(
+            std::io::Error::from(std::io::ErrorKind::BrokenPipe),
+        )));
+        assert!(
+            compositor_gone(&closed),
+            "broken pipe means the session ended"
+        );
+        for kind in [
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::NotConnected,
+            std::io::ErrorKind::UnexpectedEof,
+        ] {
+            let e = calloop::Error::IoError(std::io::Error::from(kind));
+            assert!(compositor_gone(&e), "{kind:?} is the socket closing");
+        }
+        // A real failure, and an error with no I/O cause at all, must stay
+        // visible: only the socket closing is the session ending.
+        let denied =
+            calloop::Error::IoError(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(!compositor_gone(&denied));
+        assert!(!compositor_gone(&calloop::Error::InvalidToken));
+    }
+
+    #[test]
+    fn the_pipe_error_is_found_through_the_wrappers_production_uses() {
+        use smithay_client_toolkit::reexports::calloop;
+        use smithay_client_toolkit::reexports::client::backend::WaylandError;
+        // Measured off a compositor killed under a running panel: calloop wraps a
+        // `wayland-backend` I/O error, and that type implements only the deprecated
+        // `cause()`, so a `source()` walk never reaches the kind. Matching the
+        // wrappers by type is what makes this true.
+        let real = calloop::Error::OtherError(Box::new(WaylandError::Io(std::io::Error::from(
+            std::io::ErrorKind::BrokenPipe,
+        ))));
+        assert!(compositor_gone(&real), "the shape production produces");
+        assert_eq!(
+            fate(None, false, compositor_gone(&real)),
+            Fate::Report("the compositor closed the connection before the first frame".to_string())
+        );
+        assert_eq!(fate(None, true, compositor_gone(&real)), Fate::Quiet);
+        // A protocol error is the compositor objecting to us, never a closed socket.
+        let protocol = calloop::Error::OtherError(Box::new(WaylandError::Protocol(
+            smithay_client_toolkit::reexports::client::backend::protocol::ProtocolError {
+                code: 3,
+                object_id: 7,
+                object_interface: "wl_surface".to_string(),
+                message: "bad".to_string(),
+            },
+        )));
+        assert!(!compositor_gone(&protocol));
+    }
 
     #[test]
     fn the_key_table_maps_exactly_what_the_spec_says() {

@@ -92,7 +92,10 @@ pub fn draw(
 
     // Input bar: rail, then the typed text, then the caret.
     let baseline = render::row_baseline(font, top);
-    let rail_h = (font.line_h.ceil() as u32 + 2 * render::PILL_VPAD) * s;
+    // `line_h` is already in buffer pixels (the font is derived at `SIZE * scale`);
+    // only the padding is a logical constant. Scaling the whole sum again made the
+    // rail taller than the row at 2× and the subtraction below panicked.
+    let rail_h = font.line_h.ceil() as u32 + 2 * render::PILL_VPAD * s;
     let rail_y = top + (row_h - rail_h) / 2;
     render::rect(
         buf,
@@ -405,6 +408,37 @@ mod tests {
         let big = PanelFont::load(crate::font::SIZE * 2.0).expect("system font");
         assert_eq!(visible_rows(height_for_rows(8, &big, 2), &big, 2), 8);
         assert!(height_for_rows(8, &big, 2) > height_for_rows(8, &f, 1));
+    }
+
+    #[test]
+    fn every_scale_paints_instead_of_panicking() {
+        // The font is derived at `SIZE * scale`, so its metrics are already in
+        // buffer pixels. Scaling one of them a second time made the input rail
+        // taller than its row at 2x, and `row_h - rail_h` panicked before a single
+        // pixel was drawn — on a HiDPI output that means no panel at all.
+        for scale in [1u32, 2, 3] {
+            let f = PanelFont::load(crate::font::SIZE * scale as f32).expect("system font");
+            let (w, h) = (500 * scale, height_for_rows(4, &f, scale));
+            let scene = scene(&f, (w - 2 * crate::PAD * scale) as f32);
+            let mut buf = vec![0u8; (w * h * 4) as usize];
+            draw(
+                &mut buf,
+                w,
+                h,
+                &f,
+                &scene.transcript,
+                &scene.input,
+                &scene.viewport,
+                None,
+                false,
+                true,
+                scale,
+            );
+            assert!(
+                buf.as_chunks::<4>().0.iter().any(|p| p[3] == 0xff),
+                "scale {scale} painted nothing"
+            );
+        }
     }
 
     #[test]

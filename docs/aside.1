@@ -116,11 +116,13 @@ recognised.  No credential may be stored here.
 .SH EXIT STATUS
 .TP
 .B 0
-The panel closed normally.
+The panel closed normally, including when the compositor ended the session while it
+was open.
 .TP
 .B 1
-The session could not be used: no compositor, no usable font, or the sandbox
-could not start.
+The session could not be used: no compositor, no usable font, the panel was
+refused before it appeared (the compositor closed the connection, or reported an
+error of its own), or the sandbox could not start.
 .TP
 .B 2
 The configuration was refused: a missing or unreadable credential, or a

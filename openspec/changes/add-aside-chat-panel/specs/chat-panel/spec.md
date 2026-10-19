@@ -244,6 +244,18 @@ scale 1, where it is legible, and grayscale antialiasing at higher scales.
 - **WHEN** the compositor reports a protocol error, including a first-commit size mismatch
 - **THEN** `aside` reports it and exits, and no failure path leaves the process burning CPU
 
+#### Scenario: The compositor closes the connection
+
+- **WHEN** the compositor goes away while a panel is on screen, so the socket reports a broken pipe
+- **THEN** `aside` exits quietly with status 0, because the session ending is not a failure of the panel
+- **AND** every other dispatch failure, and any protocol error, is still reported and exits non-zero
+
+#### Scenario: The connection closes before the panel appeared
+
+- **WHEN** the socket reports a closed connection and no frame has reached the compositor yet
+- **THEN** `aside` reports that the compositor closed the connection before the first frame and exits non-zero, because nothing was ever drawn and silence would leave no trace
+- **AND** when the compositor sent an error of its own first, that error is what is reported, since it is the reason
+
 ### Requirement: A run with no transcript reaches the first frame quickly
 
 The first frame SHALL be drawn without waiting for the credential check, font
