@@ -35,9 +35,9 @@ pub type GlyphKey = (u8, u16, u8, u8, u8);
 /// advance in pixels.
 pub type GlyphLookup = (usize, GlyphId, f32);
 
-/// Pixel size of the panel's text. One constant, because there is no font
-/// command-line syntax to negotiate with.
-pub const SIZE: f32 = 13.0;
+/// Pixel size of the panel's text: `wlmenu`'s bar size, so the two read as one
+/// product.
+pub const SIZE: f32 = 16.0;
 
 /// Cap on the character lookup memo. Its keys come from the provider's text, so
 /// a long session of answers full of distinct characters must not grow it with

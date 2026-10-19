@@ -20,6 +20,14 @@ Typed input goes through
 so an input method (fcitx, ibus) can compose text.  Answers are plain wrapped
 text: there is no Markdown, code-block or table rendering.
 .PP
+The panel is a
+.B wlr\-layer\-shell
+surface on the overlay layer, anchored to the top of the output 32 pixels down
+and centred: a 640-pixel bar, one row tall, with the transcript below it.  While
+a request is out the surface is a 48-pixel square showing four blinking squares.
+The expanded panel never exceeds the output height less 64 pixels, and scrolls
+inside that limit.
+.PP
 The provider request is made by one
 .BR curl (1)
 process inside one

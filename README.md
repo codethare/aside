@@ -5,7 +5,8 @@ the answer stream in, ask a follow-up, take a line out to the clipboard. The
 transcript lives in this process's memory and dies with it: no history, no cache,
 no log file.
 
-Behaviour is specified in `openspec/changes/add-aside-chat-panel/`. That directory
+Behaviour is specified in `openspec/changes/add-aside-chat-panel/` and
+`openspec/changes/add-panel-states/`. Those directories
 is the source of truth for what the tool does; this file only says how to run it
 and why it is built the way it is.
 
@@ -36,6 +37,22 @@ export COMMAND_CODE_API_KEY=...
 Flags override both: `--model`, `--base-url`, `--proxy`. `aside --preview out.ppm` renders a
 scripted transcript to an image without opening a window, which is how the layout
 is checked on a machine with no compositor.
+
+## What it looks like
+
+A `wlr-layer-shell` surface on the overlay layer, anchored to the top of the
+output, 32 px down and centred: the same bar `wlmenu` draws, 640 px wide and one
+row tall (24 px at 16 px text), with the transcript below it. It has three states:
+
+| State | Size | What is drawn |
+|---|---|---|
+| idle | 640 × 24 | the bar alone |
+| thinking | 48 × 48 | a circle with four squares, one lit every 200 ms |
+| answering | 640 × (bar + rows) | the bar on top, the transcript below |
+
+The answering panel never grows past the output height minus 64 px (the margin
+above and the breathing room below); a longer answer scrolls inside it. States
+snap: there is no height tween.
 
 ## Keys
 

@@ -31,9 +31,9 @@ use smithay_client_toolkit::seat::keyboard::{
 };
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::WaylandSurface;
-use smithay_client_toolkit::shell::xdg::XdgShell;
-use smithay_client_toolkit::shell::xdg::window::{
-    Window, WindowConfigure, WindowDecorations, WindowHandler,
+use smithay_client_toolkit::shell::wlr_layer::{
+    Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
+    LayerSurfaceConfigure,
 };
 use smithay_client_toolkit::shm::Shm;
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
@@ -51,9 +51,13 @@ use transcript::Transcript;
 
 /// Content inset inside the panel (logical px).
 pub const PAD: u32 = 16;
-/// Window size before the compositor has said otherwise (logical px).
-const INITIAL_SIZE: (u32, u32) = (900, 520);
-const MIN_SIZE: (u32, u32) = (420, 200);
+/// `wlmenu`'s bar width, so the two read as one product.
+const WIDTH: u32 = 640;
+/// Gap between the top edge and the panel, and the room kept below it.
+const TOP_MARGIN: i32 = 32;
+const BOTTOM_ROOM: i32 = 32;
+/// Output height assumed for the height cap until the real one is known.
+const FALLBACK_OUTPUT_H: u32 = 1080;
 const APP_ID: &str = "aside";
 
 const USAGE: &str = "\
@@ -180,7 +184,7 @@ fn main() {
 /// how the look is checked on a machine with no compositor.
 fn preview(path: &std::path::Path) -> Result<(), String> {
     let font = PanelFont::load(font::SIZE).map_err(|e| format!("no usable font: {e}"))?;
-    let (w, h) = (INITIAL_SIZE.0, panel::height_for_rows(12, &font, 1));
+    let (w, h) = (WIDTH, panel::height_for_rows(12, &font, 1));
     let max_w = chat::answer_width(w, 1);
     let mut transcript = Transcript::default();
     transcript.ask(
@@ -250,7 +254,10 @@ fn run(
 
     let compositor = CompositorState::bind(&globals, &qh)
         .map_err(|e| format!("wl_compositor is missing: {e}"))?;
-    let xdg = XdgShell::bind(&globals, &qh).map_err(|e| format!("xdg-shell is missing: {e}"))?;
+    // A layer surface, not an ordinary window: the compositor places the panel by
+    // anchor and margin, and workspaces or tiling never move it.
+    let shell =
+        LayerShell::bind(&globals, &qh).map_err(|e| format!("wlr-layer-shell is missing: {e}"))?;
     let shm = Shm::bind(&globals, &qh).map_err(|e| format!("wl_shm is missing: {e}"))?;
     let activation = ActivationState::bind(&globals, &qh).ok();
     let ime_manager = ime::bind(&globals, &qh);
@@ -258,14 +265,15 @@ fn run(
 
     let surface = compositor.create_surface(&qh);
     surface.set_buffer_scale(1);
-    let window = xdg.create_window(surface, WindowDecorations::RequestServer, &qh);
-    window.set_title("aside");
-    window.set_app_id(APP_ID);
-    window.set_min_size(Some(MIN_SIZE));
-    // The window is mapped by the first commit with no buffer: the compositor
-    // answers with the size to use, and the first buffer must match it.
-    window.commit();
-    let pool = SlotPool::new((INITIAL_SIZE.0 * INITIAL_SIZE.1 * 4) as usize, &shm)
+    let layer = shell.create_layer_surface(&qh, surface, Layer::Overlay, Some(APP_ID), None);
+    layer.set_anchor(Anchor::TOP);
+    layer.set_margin(TOP_MARGIN, 0, 0, 0);
+    layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+    // Collapsed to the bar. The first commit is buffer-less: it asks for the
+    // configure, and nothing may be attached before that one arrives.
+    layer.set_size(WIDTH, panel::bar_height());
+    layer.commit();
+    let pool = SlotPool::new((WIDTH * FALLBACK_OUTPUT_H * 4) as usize, &shm)
         .map_err(|e| format!("cannot create the shm pool: {e}"))?;
 
     let mut state = State {
@@ -277,16 +285,20 @@ fn run(
         qh,
         pool,
         buffer: None,
-        width: INITIAL_SIZE.0,
-        height: INITIAL_SIZE.1,
+        width: WIDTH,
+        height: panel::bar_height(),
         scale: 1,
+        phase: Phase::Idle,
+        phase_start: std::time::Instant::now(),
+        output_w: None,
+        output_h: None,
         first_frame: true,
         configured: false,
         configure_wait: Some(std::time::Instant::now()),
         painted: false,
         dirty: true,
         exit: false,
-        window,
+        layer,
         keyboard: None,
         modifiers: Modifiers::default(),
         font: None,
@@ -327,7 +339,10 @@ fn run(
     while !state.exit {
         // While a request is open, a byte can arrive at any moment; when idle
         // there is nothing to poll for, so the loop sleeps.
-        let timeout = if state.request.is_some() {
+        let timeout = if state.phase == Phase::Thinking {
+            // The blink advances every 200 ms; wake often enough to show it.
+            Duration::from_millis(50)
+        } else if state.request.is_some() {
             Duration::from_millis(16)
         } else {
             Duration::from_millis(250)
@@ -425,6 +440,44 @@ fn is_closed(kind: std::io::ErrorKind) -> bool {
     )
 }
 
+/// The logical size a phase wants: idle is the bar, thinking is a ball twice the
+/// bar tall, answering is the bar plus a row per transcript row, capped so the
+/// panel never leaves the output. Pure, so the spec's numbers are testable
+/// without a surface.
+fn size_for(phase: Phase, rows: usize, output_h: Option<u32>) -> (u32, u32) {
+    let bar = panel::bar_height();
+    match phase {
+        Phase::Idle => (WIDTH, bar),
+        Phase::Thinking => (2 * bar, 2 * bar),
+        Phase::Answering => {
+            let cap = output_h
+                .unwrap_or(FALLBACK_OUTPUT_H)
+                .saturating_sub((TOP_MARGIN + BOTTOM_ROOM) as u32);
+            let want = bar + 1 + rows as u32 * bar;
+            (WIDTH, want.min(cap).max(bar))
+        }
+    }
+}
+
+/// Which of the four squares is lit, from elapsed milliseconds rather than from
+/// a frame count, so a late frame lands on the right square.
+fn blink_at(elapsed_ms: u128) -> usize {
+    const STEP_MS: u128 = 200;
+    ((elapsed_ms / STEP_MS) % 4) as usize
+}
+
+/// The panel's three states. Their sizes are fixed by the spec; this is the
+/// state machine behind them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// The bar alone: nothing asked yet.
+    Idle,
+    /// A question is out and nothing has come back: the ball.
+    Thinking,
+    /// An answer, an error or a note is on screen.
+    Answering,
+}
+
 struct State {
     registry_state: RegistryState,
     seat_state: SeatState,
@@ -452,7 +505,14 @@ struct State {
     painted: bool,
     dirty: bool,
     exit: bool,
-    window: Window,
+    layer: LayerSurface,
+    /// Which of the three states the panel is in.
+    phase: Phase,
+    /// When the current phase began: the ball's blink is read off this clock.
+    phase_start: std::time::Instant,
+    /// Logical size of the output the panel is on, once it has reported one.
+    output_w: Option<u32>,
+    output_h: Option<u32>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     modifiers: Modifiers,
     font: Option<PanelFont>,
@@ -473,6 +533,57 @@ struct State {
 
 impl State {
     /// Join the font thread once. Until then there is no text, and no frame.
+    fn target_size(&self) -> (u32, u32) {
+        size_for(self.phase, self.transcript.total_rows(), self.output_h)
+    }
+
+    fn blink_index(&self) -> usize {
+        blink_at(self.phase_start.elapsed().as_millis())
+    }
+
+    /// Give the surface the size its phase wants, centred on the output, and
+    /// re-wrap once if the width changed.
+    fn apply_size(&mut self) {
+        let (w, h) = self.target_size();
+        let left = self
+            .output_w
+            .map(|ow| ((ow as i64 - w as i64) / 2).max(0) as i32)
+            .unwrap_or(0);
+        self.layer.set_margin(TOP_MARGIN, 0, 0, left);
+        self.layer.set_size(w, h);
+        let width_changed = w != self.width;
+        if width_changed || h != self.height {
+            self.width = w;
+            self.height = h;
+            if width_changed {
+                // A different width means different wrapping: once per resize.
+                self.rewrap();
+            }
+            self.buffer = None;
+            if let Some(font) = self.font.as_ref() {
+                self.viewport.height = panel::visible_rows(h * self.scale, font, self.scale);
+            }
+            self.viewport.clamp(self.transcript.total_rows());
+            self.dirty = true;
+        }
+    }
+
+    /// Remember the output's logical size: it centres the panel and caps its height.
+    fn note_output(&mut self, output: &wl_output::WlOutput) {
+        let Some(info) = self.output_state.info(output) else {
+            return;
+        };
+        let Some((w, h)) = info.logical_size else {
+            return;
+        };
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        self.output_w = Some(w as u32);
+        self.output_h = Some(h as u32);
+        self.apply_size();
+    }
+
     fn adopt_font(&mut self) -> Result<(), String> {
         if self.font.is_some() {
             return Ok(());
@@ -541,7 +652,7 @@ impl State {
                 &self.qh,
                 RequestData {
                     seat_and_serial: None,
-                    surface: Some(self.window.wl_surface().clone()),
+                    surface: Some(self.layer.wl_surface().clone()),
                     app_id: Some(APP_ID.to_string()),
                     udata: (),
                 },
@@ -573,13 +684,26 @@ impl State {
         let Some(font) = font.as_ref() else { return };
         transcript.ask(&question, font, max_w);
         let outcome = Request::start(config, key, &transcript.request_turns());
-        match outcome {
-            Ok(started) => *request = Some(started),
-            Err(e) => transcript.fail(&e, font, max_w),
-        }
+        let started = match outcome {
+            Ok(started) => {
+                *request = Some(started);
+                true
+            }
+            Err(e) => {
+                transcript.fail(&e, font, max_w);
+                false
+            }
+        };
         let rows = transcript.total_rows();
         viewport.follow(rows);
         *highlight = rows.saturating_sub(1);
+        self.phase = if started {
+            Phase::Thinking
+        } else {
+            Phase::Answering
+        };
+        self.phase_start = std::time::Instant::now();
+        self.apply_size();
         self.dirty = true;
     }
 
@@ -596,6 +720,8 @@ impl State {
             }
             let rows = transcript.total_rows();
             viewport_follow(&mut self.viewport, rows);
+            self.phase = Phase::Answering;
+            self.apply_size();
             self.dirty = true;
         } else {
             self.exit = true;
@@ -632,7 +758,12 @@ impl State {
                 "the compositor did not configure the window within {CONFIGURE_TIMEOUT_S}s"
             ));
         }
+        if self.phase == Phase::Thinking {
+            // The blink is the only thing moving, so keep asking for frames.
+            self.dirty = true;
+        }
         let max_w = self.text_width();
+        let mut text_arrived = false;
         if let Some(open) = self.request.as_mut() {
             let State {
                 transcript,
@@ -642,6 +773,7 @@ impl State {
             } = self;
             if let Some(font) = font.as_ref() {
                 if open.poll(transcript, font, max_w) {
+                    text_arrived = true;
                     if viewport.following {
                         viewport.clamp(transcript.total_rows());
                     }
@@ -657,8 +789,14 @@ impl State {
                     }
                     viewport.follow(transcript.total_rows());
                     self.dirty = true;
+                    text_arrived = true;
                 }
             }
+        }
+        if text_arrived {
+            // The first text ends the ball; every later row may grow the panel.
+            self.phase = Phase::Answering;
+            self.apply_size();
         }
         if self.dirty {
             self.dirty = false;
@@ -681,6 +819,11 @@ impl State {
         if self.font.is_none() {
             return; // no font yet: nothing to draw and nothing to wait for
         }
+        let lit = if self.phase == Phase::Thinking {
+            Some(self.blink_index())
+        } else {
+            None
+        };
         let stride = w as i32 * 4;
         let buffer = match self.buffer.take() {
             Some(buffer) => buffer,
@@ -708,34 +851,42 @@ impl State {
         // show the previous frame through.
         canvas.fill(0);
         let streaming = self.request.is_some();
-        panel::draw(
-            canvas,
-            w,
-            h,
-            self.font.as_ref().expect("checked above"),
-            &self.transcript,
-            &self.input,
-            &self.viewport,
-            Some(self.highlight),
-            streaming,
-            true,
-            self.scale,
-        );
-        self.window
+        match lit {
+            Some(lit) => panel::draw_ball(canvas, w, h, lit, self.scale),
+            None => panel::draw(
+                canvas,
+                w,
+                h,
+                self.font.as_ref().expect("checked above"),
+                &self.transcript,
+                &self.input,
+                &self.viewport,
+                Some(self.highlight),
+                streaming,
+                true,
+                self.scale,
+            ),
+        }
+        self.layer
             .wl_surface()
             .damage_buffer(0, 0, w as i32, h as i32);
-        if let Err(e) = buffer.attach_to(self.window.wl_surface()) {
+        if let Err(e) = buffer.attach_to(self.layer.wl_surface()) {
             eprintln!("aside: cannot attach the frame: {e}");
             self.exit = true;
             return;
         }
-        self.window.commit();
+        self.layer.commit();
         self.painted = true;
         self.buffer = Some(buffer);
     }
 
     fn on_key(&mut self, event: &KeyEvent) {
         let text = event.utf8.clone();
+        // While the ball spins the question is already sent: only Esc means
+        // anything. The check sits before the key table so no text key slips in.
+        if self.phase == Phase::Thinking && event.keysym != Keysym::Escape {
+            return;
+        }
         let action = key_action(
             event.keysym,
             self.modifiers.alt,
@@ -840,8 +991,11 @@ impl State {
     fn on_text_input(&mut self, event: TextInputEvent) {
         match self.ime.handle(event) {
             ime::Action::Commit(text) => {
-                self.input.insert(&text);
-                self.after_typing();
+                // The question is already sent while the ball spins.
+                if self.phase != Phase::Thinking {
+                    self.input.insert(&text);
+                    self.after_typing();
+                }
             }
             ime::Action::Preedit(_) | ime::Action::Ignore | ime::Action::RoundTrip => {}
             // The input method asked for characters around the caret to go.
@@ -879,7 +1033,7 @@ impl CompositorHandler for State {
             return;
         }
         self.scale = scale;
-        self.window.wl_surface().set_buffer_scale(scale as i32);
+        self.layer.wl_surface().set_buffer_scale(scale as i32);
         // A different density means different glyphs and different wrapping.
         if let Ok(font) = PanelFont::load(font::SIZE * scale as f32) {
             self.font = Some(font);
@@ -943,8 +1097,8 @@ impl CompositorHandler for State {
     }
 }
 
-impl WindowHandler for State {
-    fn request_close(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _window: &Window) {
+impl LayerShellHandler for State {
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
         // The compositor closed us: exit rather than live with no way to be seen.
         self.exit = true;
     }
@@ -953,36 +1107,15 @@ impl WindowHandler for State {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _window: &Window,
-        configure: WindowConfigure,
+        _layer: &LayerSurface,
+        _configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
         self.configured = true;
         self.configure_wait = None;
-        let (w, h) = (
-            configure.new_size.0.map(|v| v.get()).unwrap_or(self.width),
-            configure.new_size.1.map(|v| v.get()).unwrap_or(self.height),
-        );
-        if (w, h) != (self.width, self.height) {
-            self.width = w;
-            self.height = h;
-            // A different width means different wrapping: once per resize.
-            self.rewrap();
-            let buffer_h = self.buffer_height();
-            let scale = self.scale;
-            let State {
-                transcript,
-                font,
-                viewport,
-                ..
-            } = self;
-            if let Some(font) = font.as_ref() {
-                viewport.height = panel::visible_rows(buffer_h, font, scale);
-                viewport.clamp(transcript.total_rows());
-            }
-            self.buffer = None;
-            self.dirty = true;
-        }
+        // The size is ours: the configure is the permission to attach, and the
+        // panel's own sizing decides what that size is.
+        self.apply_size();
         if self.first_frame {
             self.first_frame = false;
             self.draw();
@@ -998,8 +1131,19 @@ impl OutputHandler for State {
         &mut self.output_state
     }
 
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        self.note_output(&output);
+    }
+
+    fn update_output(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
+        self.note_output(&output);
+    }
+
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 }
 
@@ -1026,7 +1170,7 @@ impl SeatHandler for State {
         // The text-input object belongs to a seat, so it is created when one
         // turns up rather than at startup.
         if let Some(manager) = self.ime_manager.clone() {
-            let surface = self.window.wl_surface().clone();
+            let surface = self.layer.wl_surface().clone();
             self.text_input = Some(ime::attach(&manager, &seat, &surface, qh));
             self.report_cursor();
         }
@@ -1061,7 +1205,7 @@ impl KeyboardHandler for State {
         _raw: &[u32],
         _keysyms: &[Keysym],
     ) {
-        if self.window.wl_surface() == surface
+        if self.layer.wl_surface() == surface
             && let Some(text_input) = self.text_input.as_ref()
         {
             text_input.enable();
@@ -1078,7 +1222,7 @@ impl KeyboardHandler for State {
         surface: &wl_surface::WlSurface,
         _serial: u32,
     ) {
-        if self.window.wl_surface() == surface {
+        if self.layer.wl_surface() == surface {
             // Stop composing, or an input method keeps a pre-edit open while the
             // panel is not focused.
             self.ime.preedit.clear();
@@ -1146,7 +1290,7 @@ impl ActivationHandler for State {
 
     fn new_token(&mut self, token: String, _data: &RequestData<()>) {
         if let Some(activation) = self.activation.as_ref() {
-            activation.activate::<State>(self.window.wl_surface(), token);
+            activation.activate::<State>(self.layer.wl_surface(), token);
         }
     }
 }
@@ -1248,6 +1392,43 @@ mod tests {
             },
         )));
         assert!(!compositor_gone(&protocol));
+    }
+
+    #[test]
+    fn the_three_states_have_the_spec_s_sizes() {
+        let bar = panel::bar_height();
+        assert_eq!(bar, 24, "row_h_for(16) is 24 at 1x");
+        assert_eq!(size_for(Phase::Idle, 0, Some(1080)), (640, bar));
+        assert_eq!(size_for(Phase::Thinking, 0, Some(1080)), (48, 48));
+        // Answering: bar + divider + one row per transcript row.
+        assert_eq!(
+            size_for(Phase::Answering, 4, Some(1080)),
+            (640, bar + 1 + 4 * bar)
+        );
+        // The cap is the output less the margin above and the room below.
+        assert_eq!(
+            size_for(Phase::Answering, 1000, Some(1080)),
+            (640, 1080 - 64)
+        );
+        // Before the output reports, a 1080-pixel one is assumed.
+        assert_eq!(size_for(Phase::Answering, 1000, None), (640, 1080 - 64));
+        // An empty transcript still leaves the bar plus its divider.
+        assert_eq!(size_for(Phase::Answering, 0, Some(1080)).1, bar + 1);
+        // A tiny output cannot make the panel taller than its bar or negative.
+        assert_eq!(size_for(Phase::Answering, 100, Some(40)).1, bar);
+    }
+
+    #[test]
+    fn the_blink_comes_from_the_clock() {
+        // 200 ms a step, 800 ms a cycle, and a late frame lands where the clock
+        // says rather than where the frame count would.
+        assert_eq!(blink_at(0), 0);
+        assert_eq!(blink_at(199), 0);
+        assert_eq!(blink_at(200), 1);
+        assert_eq!(blink_at(450), 2);
+        assert_eq!(blink_at(799), 3);
+        assert_eq!(blink_at(800), 0);
+        assert_eq!(blink_at(5_000), 1, "25 steps, wrapped");
     }
 
     #[test]
