@@ -69,6 +69,10 @@ pub const LABEL_ACCENT: Bgra = bgra(0x2e, 0x4a, 0x5c, 0xff);
 /// 4.06:1 — the weakest contrast in the whole UI, on the row that matters most).
 pub const BG_SEL: Bgra = bgra(0x0b, 0x62, 0x85, 0xee);
 pub const FG_SEL: Bgra = bgra(0xff, 0xff, 0xff, 0xff);
+/// A reply's card: between the list body and the prompt band, so the card reads
+/// as a surface laid on the panel rather than as the bar again. Composited over
+/// `BG_NORMAL` before it is painted (see `panel::card`).
+pub const BG_CARD: Bgra = bgra(0x26, 0x26, 0x26, 0xd8);
 
 /// Horizontal pixel span `[x0, x1)` of the rounded panel at row `y`
 /// (x0 inclusive, x1 exclusive). Corner pixels fall outside the span;
@@ -292,16 +296,16 @@ fn div255(x: u32) -> u32 {
     (x + 1 + (x >> 8)) >> 8
 }
 
-/// Scrollbar thumb `(y, h)` for a `visible`-row viewport over `total` items at
+/// Scrollbar thumb `(y, h)` for a `visible`-pixel viewport over `total` pixels at
 /// scroll offset `top`, inside a track starting at `track_y` with height
 /// `track_h`. `None` when everything fits (or there is no track). Length tracks
 /// the visible/total ratio so the indicator reads as "list continues".
 pub(crate) fn scroll_thumb(
     track_y: u32,
     track_h: u32,
-    visible: usize,
-    total: usize,
-    top: usize,
+    visible: u32,
+    total: u32,
+    top: u32,
 ) -> Option<(u32, u32)> {
     if visible == 0 || total <= visible || track_h == 0 {
         return None;
@@ -309,7 +313,7 @@ pub(crate) fn scroll_thumb(
     let th = ((track_h as u64 * visible as u64) / total as u64).clamp(1, track_h as u64) as u32;
     let max_top = (total - visible) as u64;
     let span = track_h.saturating_sub(th) as u64;
-    let ty = track_y + ((span * top.min(max_top as usize) as u64) / max_top) as u32;
+    let ty = track_y + ((span * top.min(total - visible) as u64) / max_top) as u32;
     Some((ty, th))
 }
 
@@ -324,6 +328,52 @@ pub fn rect(buf: &mut [u8], w: u32, h: u32, x: u32, y: u32, rw: u32, rh: u32, co
         for px in row.as_chunks_mut::<4>().0 {
             // Composite, not overwrite: the panel under it may be translucent.
             blend_px(px, [color[0], color[1], color[2]], color[3] as u32);
+        }
+    }
+}
+
+/// Fill a rounded rectangle with a colour already composited over what lies
+/// beneath (the body is), clipped to the `clip` rows so a card scrolled half out
+/// of the viewport cannot paint over the bar. The outline and the edge coverage
+/// are the panel body's, which is what makes a card's corner look like every
+/// other corner in the product.
+#[allow(clippy::too_many_arguments)] // a rectangle is six numbers plus the buffer
+pub(crate) fn rounded_rect(
+    buf: &mut [u8],
+    w: u32,
+    x: u32,
+    y: u32,
+    rw: u32,
+    rh: u32,
+    r: u32,
+    color: Bgra,
+    clip: std::ops::Range<u32>,
+) {
+    if rw == 0 || rh == 0 {
+        return;
+    }
+    for by in y.max(clip.start)..(y + rh).min(clip.end) {
+        let rel = by - y;
+        let (x0, x1) = rounded_span(rw, rh, r, rel);
+        if x0 >= x1 {
+            continue;
+        }
+        set_span(buf, w, by, x + x0, x + x1, color);
+        let inset = rounded_inset(rw, rh, r, rel);
+        let cov = ((inset.ceil() - inset) * 255.0).round() as u32;
+        if cov > 0 && x0 > 0 {
+            over_pm(
+                &mut buf[((by * w + x + x0 - 1) * 4) as usize..][..4],
+                color,
+                cov,
+            );
+        }
+        if cov > 0 && x + x1 < w {
+            over_pm(
+                &mut buf[((by * w + x + x1) * 4) as usize..][..4],
+                color,
+                cov,
+            );
         }
     }
 }
@@ -867,6 +917,7 @@ mod tests {
             ("normal", FG_NORMAL, BG_NORMAL),
             ("prompt", FG_PROMPT, BG_PROMPT),
             ("selected", FG_SEL, BG_SEL),
+            ("card", FG_NORMAL, BG_CARD),
         ] {
             let r = contrast(fg, bg);
             assert!(
@@ -874,6 +925,36 @@ mod tests {
                 "{name} text contrast {r:.2}:1 is below WCAG AA (4.5:1)"
             );
         }
+    }
+
+    #[test]
+    fn a_card_fills_its_outline_and_antialiases_its_corners() {
+        let (rw, rh, r) = (120u32, 60u32, 12u32);
+        let (x, y) = (10u32, 10u32);
+        let (w, h) = (160u32, 90u32);
+        let mut buf = blank(w, h);
+        let color = premul(BG_CARD);
+        rounded_rect(&mut buf, w, x, y, rw, rh, r, color, 0..h);
+        fn px(buf: &[u8], w: u32, x: u32, y: u32) -> &[u8] {
+            &buf[((y * w + x) * 4) as usize..][..4]
+        }
+        assert_eq!(
+            px(&buf, w, x + rw / 2, y + rh / 2),
+            color,
+            "the middle is the card"
+        );
+        assert_eq!(px(&buf, w, x, y), &CLEAR, "a corner is outside the outline");
+        let edge = px(&buf, w, x + rounded_span(rw, rh, r, 1).0 - 1, y + 1);
+        assert!(
+            edge[3] > 0 && edge[3] < color[3],
+            "the corner pixel carries partial coverage: {edge:?}"
+        );
+        // Clipped rows stay untouched: a card scrolled under the bar must not
+        // paint there.
+        let mut clipped = blank(w, h);
+        rounded_rect(&mut clipped, w, x, y, rw, rh, r, color, y + 20..h);
+        assert_eq!(px(&clipped, w, x + rw / 2, y + 10), &CLEAR);
+        assert_eq!(px(&clipped, w, x + rw / 2, y + 30), color);
     }
 
     #[test]

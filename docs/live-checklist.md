@@ -21,7 +21,8 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 3. Ask a follow-up. Both turns stay on screen, and the answer takes the earlier
    exchange into account.
 4. `Up`, `Down`, `PageUp`, `PageDown` move the highlighted line and the view
-   follows it; the highlighted row keeps the blue band.
+   follows it; the highlighted line is marked by a 2 px blue rail (`#0b6285`) in
+   the left margin, not by a band across the row.
 5. `Alt+C` copies exactly the highlighted line. Paste it somewhere and check
    there is no extra whitespace or transcript around it.
 6. While an answer is streaming, run `pgrep -a bwrap` in another terminal: the

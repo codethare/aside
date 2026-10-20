@@ -24,10 +24,15 @@ The panel is a
 .B wlr\-layer\-shell
 surface on the overlay layer, anchored to the top of the output 32 pixels down
 and centred: a 640-pixel panel, one row tall, with the transcript below it.
-The frame is the same one
+The frame and the bar are the ones
 .BR wlmenu (1)
 draws: a translucent body with a hairline border inside a 24-pixel drop shadow,
 and a 3-pixel scroll indicator at the right edge while the transcript overflows.
+The transcript is a stack of blocks: a question is a bare row, while an answer, a
+failure and the panel's own notes are drawn inside a rounded card inset by the
+panel padding, with 8 pixels of padding above and below the text, and blocks are
+separated by an 8-pixel gap.  The highlighted line is marked by a 2-pixel rail in
+the left margin.
 While a request is out the panel is a 60-pixel square showing four blinking
 squares.  The expanded panel never exceeds the output height less 64 pixels, and
 scrolls inside that limit.

@@ -2,7 +2,7 @@
 //! entry, and what may be sent back to the provider.
 
 use crate::font::PanelFont;
-use crate::layout::Lines;
+use crate::layout::{Blocks, Lines};
 use crate::provider::{Role, Turn};
 
 /// Most of one answer the panel keeps. A provider can stream far more than a
@@ -23,6 +23,16 @@ pub enum Kind {
     Note,
 }
 
+impl Kind {
+    /// Whether the entry is drawn inside a card. The reply, the failures and the
+    /// panel's own notes are all blocks with a body of their own; a question is
+    /// the user's line and stays bare, which is what makes the card mean "the
+    /// model is talking".
+    pub fn is_card(self) -> bool {
+        matches!(self, Kind::Answer | Kind::Error | Kind::Note)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub kind: Kind,
@@ -36,6 +46,11 @@ pub struct Entry {
     pub complete: bool,
     /// The answer hit `REPLY_CAP` and the rest was dropped.
     pub truncated: bool,
+    /// Buffer-pixel top of this entry's block, gaps and padding included.
+    pub y: u32,
+    /// Its height. Cached because the viewport places rows by pixel and walking
+    /// the transcript to find one would cost more than the frame.
+    pub h: u32,
 }
 
 #[derive(Debug, Default)]
@@ -43,15 +58,20 @@ pub struct Transcript {
     entries: Vec<Entry>,
     /// Index of the answer being streamed into, if any.
     open: Option<usize>,
+    /// Height of the blocks on screen, gaps included. Empty blocks take no room.
+    height: u32,
 }
 
-/// One row as the painter needs it: the text, and what it belongs to.
+/// One row as the painter needs it: the text, what it belongs to, and where it
+/// goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Row<'a> {
     pub text: &'a str,
     pub kind: Kind,
-    /// First row of its entry: the painter spaces turns apart here.
-    pub first: bool,
+    /// Buffer-pixel top of this row.
+    pub y: u32,
+    /// The block this row belongs to: its top and height, card padding included.
+    pub block: (u32, u32),
 }
 
 impl Transcript {
@@ -67,40 +87,81 @@ impl Transcript {
         &self.entries
     }
 
-    fn push(&mut self, kind: Kind, complete: bool) -> usize {
+    fn push(&mut self, kind: Kind, complete: bool, blocks: Blocks) -> usize {
+        // Blocks are appended, never inserted, so the next one starts after the
+        // last inked pixel plus one gap.
+        let y = if self.height == 0 {
+            0
+        } else {
+            self.height + blocks.gap
+        };
         self.entries.push(Entry {
             kind,
             text: String::new(),
             lines: Lines::default(),
             complete,
             truncated: false,
+            y,
+            h: 0,
         });
         self.entries.len() - 1
+    }
+
+    /// Re-measure the tail entry and with it the transcript's whole height: only
+    /// the newest block can grow, because nothing is ever inserted before it.
+    fn settle(&mut self, blocks: Blocks) {
+        if let Some(entry) = self.entries.last_mut() {
+            entry.h = entry.block_h(blocks);
+            // An empty tail sits where the next block will start but must not
+            // stretch the transcript over its own gap.
+            if entry.h > 0 {
+                self.height = entry.y + entry.h;
+            }
+        }
     }
 
     /// Lay every entry out again: a resize changes the width, and the wrap is a
     /// property of the width, not of the text.
     pub fn rewrap(&mut self, font: &PanelFont, max_w: f32) {
+        let blocks = Blocks::new(font);
+        let mut y = 0;
+        let mut inked = false;
         for entry in &mut self.entries {
             entry.lines = Lines::wrap(&entry.text, font, max_w);
+            entry.h = entry.block_h(blocks);
+            if entry.h == 0 {
+                entry.y = y;
+                continue;
+            }
+            if inked {
+                y += blocks.gap;
+            }
+            entry.y = y;
+            y += entry.h;
+            inked = true;
         }
+        self.height = y;
     }
 
     /// Add a question and open an answer for it, so a delta has somewhere to go.
     pub fn ask(&mut self, question: &str, font: &PanelFont, max_w: f32) {
-        let user = self.push(Kind::Question, true);
+        let blocks = Blocks::new(font);
+        // A previous answer that never finished is closed before a new question:
+        // two open answers would have no defined meaning, and closing it first is
+        // what gives it its last row before the question is placed under it.
+        self.close_open(blocks);
+        let user = self.push(Kind::Question, true, blocks);
         self.entries[user].text.push_str(question);
         self.entries[user].lines.push(question, font, max_w);
         self.entries[user].lines.finish();
-        // A previous answer that never finished is closed before a new question:
-        // two open answers would have no defined meaning.
-        self.close_open();
-        self.open = Some(self.push(Kind::Answer, false));
+        self.settle(blocks);
+        self.open = Some(self.push(Kind::Answer, false, blocks));
     }
 
     /// Append streamed text to the open answer.
     pub fn delta(&mut self, text: &str, font: &PanelFont, max_w: f32) {
         let Some(i) = self.open else { return };
+        let blocks = Blocks::new(font);
         let entry = &mut self.entries[i];
         if entry.truncated {
             return; // the cap is reached and already marked
@@ -117,61 +178,92 @@ impl Transcript {
             entry.lines.push(" \u{2026}", font, max_w);
             entry.lines.finish();
         }
+        self.settle(blocks);
     }
 
     /// The answer ended normally.
-    pub fn finish_answer(&mut self) {
+    pub fn finish_answer(&mut self, font: &PanelFont) {
         if let Some(i) = self.open.take() {
             self.entries[i].lines.finish();
             self.entries[i].complete = true;
+            self.settle(Blocks::new(font));
         }
     }
 
     /// The answer was cancelled or the stream was cut: it stays on screen, and
     /// it is not sent back to the provider as if it were an answer.
     pub fn cancel(&mut self, note: &str, font: &PanelFont, max_w: f32) {
+        let blocks = Blocks::new(font);
         if let Some(i) = self.open.take() {
             self.entries[i].lines.finish();
+            self.settle(blocks);
             self.add_note(note, font, max_w);
         }
     }
 
     /// A failure: its own entry, distinct from answer text.
     pub fn fail(&mut self, message: &str, font: &PanelFont, max_w: f32) {
-        self.close_open();
-        let i = self.push(Kind::Error, true);
+        let blocks = Blocks::new(font);
+        self.close_open(blocks);
+        let i = self.push(Kind::Error, true, blocks);
         self.entries[i].text.push_str(message);
         self.entries[i].lines.push(message, font, max_w);
         self.entries[i].lines.finish();
+        self.settle(blocks);
     }
 
     /// Something the panel says about itself.
     pub fn add_note(&mut self, text: &str, font: &PanelFont, max_w: f32) {
-        let i = self.push(Kind::Note, true);
+        let blocks = Blocks::new(font);
+        let i = self.push(Kind::Note, true, blocks);
         self.entries[i].text.push_str(text);
         self.entries[i].lines.push(text, font, max_w);
         self.entries[i].lines.finish();
+        self.settle(blocks);
     }
 
-    fn close_open(&mut self) {
+    fn close_open(&mut self, blocks: Blocks) {
         if let Some(i) = self.open.take() {
             self.entries[i].lines.finish();
+            self.settle(blocks);
         }
     }
 
     /// Rows in display order, with the styling the painter needs.
-    pub fn rows(&self) -> Vec<Row<'_>> {
+    pub fn rows(&self, blocks: Blocks) -> Vec<Row<'_>> {
         let mut out = Vec::new();
         for entry in &self.entries {
+            let pad = if entry.kind.is_card() { blocks.pad } else { 0 };
             for (i, row) in entry.lines.visible_rows().enumerate() {
                 out.push(Row {
                     text: row,
                     kind: entry.kind,
-                    first: i == 0,
+                    y: entry.y + pad + i as u32 * blocks.row_h,
+                    block: (entry.y, entry.h),
                 });
             }
         }
         out
+    }
+
+    /// Buffer-pixel top of the `index`th row, which is what the viewport scrolls
+    /// to when the highlight moves.
+    pub fn row_y(&self, index: usize, blocks: Blocks) -> Option<u32> {
+        let mut left = index;
+        for entry in &self.entries {
+            let rows = entry.lines.total_rows();
+            if left < rows {
+                let pad = if entry.kind.is_card() { blocks.pad } else { 0 };
+                return Some(entry.y + pad + left as u32 * blocks.row_h);
+            }
+            left -= rows;
+        }
+        None
+    }
+
+    /// Height of everything the transcript draws, gaps included.
+    pub fn total_height(&self) -> u32 {
+        self.height
     }
 
     pub fn total_rows(&self) -> usize {
@@ -212,6 +304,22 @@ fn split_at_char_boundary(s: &str, at: usize) -> (&str, bool) {
 }
 
 impl Entry {
+    /// Height of this entry's block: its text rows, plus a card's padding above
+    /// and below. An entry with no text takes no room at all, so an answer that
+    /// has not started yet cannot leave a gap under its question.
+    fn block_h(&self, blocks: Blocks) -> u32 {
+        let rows = self.lines.total_rows() as u32;
+        if rows == 0 {
+            return 0;
+        }
+        rows * blocks.row_h
+            + if self.kind.is_card() {
+                2 * blocks.pad
+            } else {
+                0
+            }
+    }
+
     /// Text length of this entry's rows, which is what the cap counts. The rows
     /// are the same characters as `text` plus the row breaks, so `text` is the
     /// measure.
@@ -228,8 +336,11 @@ mod tests {
         PanelFont::load(crate::font::SIZE).expect("system font available")
     }
 
-    fn text_of(t: &Transcript) -> Vec<String> {
-        t.rows().iter().map(|r| r.text.to_string()).collect()
+    fn text_of(t: &Transcript, f: &PanelFont) -> Vec<String> {
+        t.rows(Blocks::new(f))
+            .iter()
+            .map(|r| r.text.to_string())
+            .collect()
     }
 
     #[test]
@@ -238,11 +349,11 @@ mod tests {
         let mut t = Transcript::default();
         t.ask("why", &f, 400.0);
         t.delta("because", &f, 400.0);
-        t.finish_answer();
+        t.finish_answer(&f);
         t.ask("and?", &f, 400.0);
         t.delta("this too", &f, 400.0);
-        t.finish_answer();
-        assert_eq!(text_of(&t), ["why", "because", "and?", "this too"]);
+        t.finish_answer(&f);
+        assert_eq!(text_of(&t, &f), ["why", "because", "and?", "this too"]);
         assert!(!t.is_streaming());
     }
 
@@ -252,7 +363,7 @@ mod tests {
         let mut t = Transcript::default();
         t.ask("first", &f, 400.0);
         t.delta("answer one", &f, 400.0);
-        t.finish_answer();
+        t.finish_answer(&f);
         t.ask("second", &f, 400.0);
         let turns = t.request_turns();
         assert_eq!(turns.len(), 3, "the open question is included");
@@ -272,8 +383,8 @@ mod tests {
         t.cancel("cancelled", &f, 400.0);
         t.ask("second", &f, 400.0);
         t.delta("full answer", &f, 400.0);
-        t.finish_answer();
-        let rows = text_of(&t);
+        t.finish_answer(&f);
+        let rows = text_of(&t, &f);
         assert!(rows.contains(&"half an ans".to_string()), "still visible");
         assert!(rows.contains(&"cancelled".to_string()));
         let turns = t.request_turns();
@@ -296,7 +407,7 @@ mod tests {
         let turns = t.request_turns();
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].text, "q");
-        assert!(text_of(&t).iter().any(|r| r == "connection lost"));
+        assert!(text_of(&t, &f).iter().any(|r| r == "connection lost"));
     }
 
     #[test]
@@ -304,10 +415,119 @@ mod tests {
         let f = font();
         let mut t = Transcript::default();
         t.fail("401 unauthorized: COMMAND_CODE_API_KEY", &f, 400.0);
-        let rows = t.rows();
+        let rows = t.rows(Blocks::new(&f));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, Kind::Error);
-        assert!(rows[0].first);
+        let blocks = Blocks::new(&f);
+        assert_eq!(
+            t.total_height(),
+            f.row_h + 2 * blocks.pad,
+            "a failure is a card: its row plus the padding above and below"
+        );
+    }
+
+    /// Blocks are placed by their real heights, so a card is taller than a row
+    /// and every block is separated by one gap.
+    #[test]
+    fn blocks_are_separated_by_a_gap_and_never_overlap() {
+        let f = font();
+        let blocks = Blocks::new(&f);
+        let mut t = Transcript::default();
+        t.ask("why", &f, 400.0);
+        t.delta(
+            "because the sky scatters short wavelengths more than long ones",
+            &f,
+            60.0,
+        );
+        t.finish_answer(&f);
+        t.ask("and?", &f, 400.0);
+        t.finish_answer(&f);
+
+        let rows = t.rows(blocks);
+        assert!(rows.len() > 3, "the answer must wrap to several rows");
+        // Every row is inside its own block, and the blocks are contiguous.
+        let mut end = 0;
+        for row in &rows {
+            assert!(
+                row.y >= row.block.0 && row.y + blocks.row_h <= row.block.0 + row.block.1,
+                "row outside its block"
+            );
+            end = row.block.0 + row.block.1;
+        }
+        assert_eq!(end, t.total_height(), "the last block ends the transcript");
+        // The question is bare, the answer is a card: only the card pays padding.
+        let question = rows
+            .iter()
+            .find(|r| r.kind == Kind::Question)
+            .expect("a question");
+        let answer = rows
+            .iter()
+            .find(|r| r.kind == Kind::Answer)
+            .expect("an answer");
+        assert_eq!(question.block.1, blocks.row_h, "a question is one bare row");
+        assert_eq!(
+            answer.block.0,
+            question.block.0 + question.block.1 + blocks.gap,
+            "one gap between the blocks"
+        );
+    }
+
+    /// An answer that has not started takes no room: the card appears with its
+    /// first row, not before it.
+    #[test]
+    fn an_empty_answer_occupies_nothing() {
+        let f = font();
+        let mut t = Transcript::default();
+        t.ask("why", &f, 400.0);
+        let bare = t.total_height();
+        assert_eq!(bare, f.row_h, "the question alone");
+        t.delta("x", &f, 400.0);
+        assert!(
+            t.total_height() > bare + Blocks::new(&f).gap,
+            "the card grew"
+        );
+    }
+
+    /// A row knows where it is, because the viewport scrolls in pixels.
+    #[test]
+    fn a_row_reports_the_pixel_it_starts_at() {
+        let f = font();
+        let blocks = Blocks::new(&f);
+        let mut t = Transcript::default();
+        t.ask("why", &f, 400.0);
+        t.delta("because", &f, 400.0);
+        t.finish_answer(&f);
+        t.fail("and then it broke", &f, 400.0);
+        for index in 0..t.total_rows() {
+            let y = t.row_y(index, blocks).expect("every row has a place");
+            let row = t.rows(blocks)[index];
+            assert_eq!(row.y, y, "the row and its place agree");
+        }
+        assert_eq!(t.row_y(t.total_rows(), blocks), None);
+    }
+
+    /// The line `Alt+C` names inside a card is the answer's own text, never the
+    /// padding the card puts above it.
+    #[test]
+    fn a_line_inside_a_card_is_the_line_the_highlight_names() {
+        let f = font();
+        let blocks = Blocks::new(&f);
+        let mut t = Transcript::default();
+        t.ask("why", &f, 400.0);
+        t.delta("because", &f, 400.0);
+        t.finish_answer(&f);
+        let rows = t.rows(blocks);
+        let first_answer = rows
+            .iter()
+            .position(|r| r.kind == Kind::Answer)
+            .expect("an answer row");
+        assert_eq!(rows[first_answer].text, "because");
+        assert_eq!(
+            rows[first_answer].y,
+            rows[first_answer].block.0 + blocks.pad,
+            "the answer's first row starts after the card's padding"
+        );
+        assert_eq!(t.row_y(first_answer, blocks), Some(rows[first_answer].y));
     }
 
     #[test]
@@ -320,11 +540,11 @@ mod tests {
         for _ in 0..100 {
             t.delta(&chunk, &f, 400.0);
         }
-        t.finish_answer();
-        let kept: usize = t.rows().iter().map(|r| r.text.len()).sum();
+        t.finish_answer(&f);
+        let kept: usize = t.rows(Blocks::new(&f)).iter().map(|r| r.text.len()).sum();
         assert!(kept <= REPLY_CAP + 8, "the cap held: {kept} bytes");
         assert!(
-            text_of(&t).iter().any(|r| r.contains('\u{2026}')),
+            text_of(&t, &f).iter().any(|r| r.contains('\u{2026}')),
             "the cut is visible"
         );
         assert!(t.entries()[1].truncated);
@@ -336,12 +556,12 @@ mod tests {
         let mut t = Transcript::default();
         t.ask("first question", &f, 400.0);
         t.delta("a short answer", &f, 400.0);
-        t.finish_answer();
+        t.finish_answer(&f);
         t.ask("second question", &f, 400.0);
         for _ in 0..100 {
             t.delta(&"y".repeat(1024), &f, 400.0);
         }
-        t.finish_answer();
+        t.finish_answer(&f);
         assert_eq!(t.request_turns()[0].text, "first question");
         assert_eq!(t.request_turns()[1].text, "a short answer");
     }
@@ -360,17 +580,17 @@ mod tests {
             &f,
             600.0,
         );
-        t.finish_answer();
-        let wide = text_of(&t);
+        t.finish_answer(&f);
+        let wide = text_of(&t, &f);
         t.rewrap(&f, 120.0);
-        let narrow = text_of(&t);
+        let narrow = text_of(&t, &f);
         assert!(narrow.len() > wide.len(), "narrower must mean more rows");
         for row in &narrow {
             assert!(render_width(&f, row) <= 120.0, "row overflows: {row:?}");
         }
         // The text itself is unchanged: the same request goes back out.
         t.rewrap(&f, 600.0);
-        assert_eq!(text_of(&t), wide);
+        assert_eq!(text_of(&t, &f), wide);
     }
 
     fn render_width(f: &PanelFont, s: &str) -> f32 {

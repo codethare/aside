@@ -270,11 +270,12 @@ fn strip_curl_prefix(line: &str) -> String {
     }
 }
 
-/// Where the answer text is laid out. Kept here so the caller cannot forget that
-/// the width changes with the window.
+/// Where the text is laid out: the card's inner width. A question wraps there
+/// too — one width for every block is what keeps a resize to one re-wrap.
 pub fn answer_width(panel_width: u32, scale: u32) -> f32 {
-    let pad = crate::PAD * scale.max(1);
-    panel_width.saturating_sub(pad * 2) as f32
+    let s = scale.max(1);
+    let inset = (crate::PAD + crate::render::PROMPT_GAP as u32) * s;
+    panel_width.saturating_sub(inset * 2) as f32
 }
 
 #[cfg(test)]
@@ -307,7 +308,7 @@ mod tests {
         let close = request.finish();
         assert_eq!(close, Close::Complete, "the answer must end with [DONE]");
         let answer: String = transcript
-            .rows()
+            .rows(crate::layout::Blocks::new(&font))
             .iter()
             .map(|r| r.text)
             .collect::<Vec<_>>()
@@ -661,8 +662,9 @@ mod tests {
 
     #[test]
     fn the_answer_width_follows_the_window_and_the_scale() {
-        assert_eq!(answer_width(900, 1), 900.0 - 2.0 * crate::PAD as f32);
-        assert_eq!(answer_width(1800, 2), 1800.0 - 4.0 * crate::PAD as f32);
+        let inner = 2.0 * (crate::PAD + crate::render::PROMPT_GAP as u32) as f32;
+        assert_eq!(answer_width(900, 1), 900.0 - inner);
+        assert_eq!(answer_width(1800, 2), 1800.0 - 2.0 * inner);
         assert_eq!(answer_width(10, 1), 0.0, "a tiny window still lays out");
     }
 }

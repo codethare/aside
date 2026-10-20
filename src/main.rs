@@ -187,9 +187,7 @@ fn main() {
 /// how the look is checked on a machine with no compositor.
 fn preview(path: &std::path::Path) -> Result<(), String> {
     let font = PanelFont::load(font::SIZE).map_err(|e| format!("no usable font: {e}"))?;
-    let (pw, ph) = (WIDTH, panel::height_for_rows(12, &font, 1));
-    let (w, h) = surface_size((pw, ph));
-    let max_w = chat::answer_width(pw, 1);
+    let max_w = chat::answer_width(WIDTH, 1);
     let mut transcript = Transcript::default();
     transcript.ask(
         "what does EAGAIN mean when a socket read returns it?",
@@ -203,14 +201,20 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         &font,
         max_w,
     );
-    transcript.finish_answer();
+    transcript.finish_answer(&font);
     transcript.ask("and if it never clears?", &font, max_w);
     transcript.delta("Then the peer is gone", &font, max_w);
     transcript.cancel("cancelled", &font, max_w);
     transcript.fail("the provider refused the request (401)", &font, max_w);
+    // The panel is as tall as its blocks, so the transcript comes first.
+    let (pw, ph) = (
+        WIDTH,
+        panel::height_for(transcript.total_height(), &font, 1),
+    );
+    let (w, h) = surface_size((pw, ph));
     let mut input = Input::default();
     input.insert("next question 下一个问题");
-    let viewport = Viewport::new(panel::visible_rows(ph, &font, 1));
+    let viewport = Viewport::new(panel::transcript_px(ph, &font, 1));
     let mut buf = vec![0u8; (w * h * 4) as usize];
     panel::draw(
         &mut buf,
@@ -312,7 +316,7 @@ fn run(
         transcript: Transcript::default(),
         input: Input::default(),
         highlight: 0,
-        viewport: Viewport::new(8),
+        viewport: Viewport::new(0),
         request: None,
         ime: ime::Ime::default(),
         seat: None,
@@ -464,11 +468,12 @@ fn left_margin(output_w: Option<u32>, surface_w: u32) -> i32 {
 }
 
 /// The logical size a phase wants: idle is the bar, thinking is a ball twice the
-/// bar tall, answering is the bar plus a row per transcript row, capped so the
-/// panel never leaves the output. These are the panel's sizes; `surface_size`
-/// adds the shadow margin. Pure, so the spec's numbers are testable without a
-/// surface.
-fn size_for(phase: Phase, rows: usize, output_h: Option<u32>) -> (u32, u32) {
+/// bar tall, answering is the bar plus the transcript's own height, capped so the
+/// panel never leaves the output. `content` is the transcript's height in logical
+/// pixels — its blocks are laid out in buffer pixels, so the caller divides by the
+/// scale. These are the panel's sizes; `surface_size` adds the shadow margin.
+/// Pure, so the spec's numbers are testable without a surface.
+fn size_for(phase: Phase, content: u32, output_h: Option<u32>) -> (u32, u32) {
     let bar = panel::bar_height();
     match phase {
         Phase::Idle => (WIDTH, bar),
@@ -477,7 +482,8 @@ fn size_for(phase: Phase, rows: usize, output_h: Option<u32>) -> (u32, u32) {
             let cap = output_h
                 .unwrap_or(FALLBACK_OUTPUT_H)
                 .saturating_sub((TOP_MARGIN + BOTTOM_ROOM) as u32);
-            let want = bar + 1 + rows as u32 * bar;
+            let rows = layout::MAX_ROWS as u32 * bar;
+            let want = bar + 1 + content.min(rows);
             (WIDTH, want.min(cap).max(bar))
         }
     }
@@ -560,7 +566,12 @@ struct State {
 impl State {
     /// Join the font thread once. Until then there is no text, and no frame.
     fn target_size(&self) -> (u32, u32) {
-        size_for(self.phase, self.transcript.total_rows(), self.output_h)
+        // The blocks are buffer pixels; the panel's size is logical.
+        size_for(
+            self.phase,
+            self.transcript.total_height().div_ceil(self.scale.max(1)),
+            self.output_h,
+        )
     }
 
     fn blink_index(&self) -> usize {
@@ -585,9 +596,9 @@ impl State {
             }
             self.buffer = None;
             if let Some(font) = self.font.as_ref() {
-                self.viewport.height = panel::visible_rows(h * self.scale, font, self.scale);
+                self.viewport.height = panel::transcript_px(h * self.scale, font, self.scale);
             }
-            self.viewport.clamp(self.transcript.total_rows());
+            self.viewport.clamp(self.transcript.total_height());
             self.dirty = true;
         }
     }
@@ -618,7 +629,7 @@ impl State {
         let font = load
             .join()
             .map_err(|_| "the font thread died".to_string())??;
-        self.viewport = Viewport::new(panel::visible_rows(
+        self.viewport = Viewport::new(panel::transcript_px(
             self.height * self.scale,
             &font,
             self.scale,
@@ -676,6 +687,15 @@ impl State {
         self.transcript.total_rows()
     }
 
+    /// Rows a `PageUp`/`PageDown` moves: one screenful, in the same unit the
+    /// highlight counts in.
+    fn page_rows(&self) -> i64 {
+        let Some(font) = self.font.as_ref() else {
+            return 1;
+        };
+        (self.viewport.height / font.row_h).max(1) as i64
+    }
+
     fn send(&mut self) {
         if self.request.is_some() || self.input.is_blank() {
             return;
@@ -706,7 +726,7 @@ impl State {
             }
         };
         let rows = transcript.total_rows();
-        viewport.follow(rows);
+        viewport.follow(transcript.total_height());
         *highlight = rows.saturating_sub(1);
         self.phase = if started {
             Phase::Thinking
@@ -729,8 +749,7 @@ impl State {
             if let Some(font) = font.as_ref() {
                 transcript.cancel("cancelled", font, max_w);
             }
-            let rows = transcript.total_rows();
-            viewport_follow(&mut self.viewport, rows);
+            viewport_follow(&mut self.viewport, transcript.total_height());
             self.phase = Phase::Answering;
             self.apply_size();
             self.dirty = true;
@@ -741,9 +760,12 @@ impl State {
 
     /// `Alt+C`: the only path to the clipboard, and it copies one line.
     fn copy_highlight(&mut self) {
+        let Some(font) = self.font.as_ref() else {
+            return;
+        };
         let text = self
             .transcript
-            .rows()
+            .rows(layout::Blocks::new(font))
             .get(self.highlight)
             .map(|row| row.text.to_string());
         let Some(text) = text else { return };
@@ -786,7 +808,7 @@ impl State {
                 if open.poll(transcript, font, max_w) {
                     text_arrived = true;
                     if viewport.following {
-                        viewport.clamp(transcript.total_rows());
+                        viewport.clamp(transcript.total_height());
                     }
                     self.dirty = true;
                 }
@@ -794,11 +816,11 @@ impl State {
                     let close = open.finish();
                     self.request = None;
                     match close {
-                        Close::Complete => transcript.finish_answer(),
+                        Close::Complete => transcript.finish_answer(font),
                         Close::Truncated(note) => transcript.cancel(&note, font, max_w),
                         Close::Failed(message) => transcript.fail(&message, font, max_w),
                     }
-                    viewport.follow(transcript.total_rows());
+                    viewport.follow(transcript.total_height());
                     self.dirty = true;
                     text_arrived = true;
                 }
@@ -918,8 +940,8 @@ impl State {
             Key::Cancel => self.cancel(),
             Key::Up => self.move_highlight(-1),
             Key::Down => self.move_highlight(1),
-            Key::PageUp => self.move_highlight(-(self.viewport.height as i64)),
-            Key::PageDown => self.move_highlight(self.viewport.height as i64),
+            Key::PageUp => self.move_highlight(-self.page_rows()),
+            Key::PageDown => self.move_highlight(self.page_rows()),
             Key::Copy => self.copy_highlight(),
             Key::Backspace => {
                 self.input.backspace();
@@ -1001,7 +1023,18 @@ impl State {
         }
         let next = (self.highlight as i64 + delta).clamp(0, rows as i64 - 1) as usize;
         self.highlight = next;
-        self.viewport.ensure_visible(next, rows);
+        let State {
+            transcript,
+            font,
+            viewport,
+            ..
+        } = self;
+        if let Some(font) = font.as_ref() {
+            let blocks = layout::Blocks::new(font);
+            if let Some(y) = transcript.row_y(next, blocks) {
+                viewport.ensure_visible(y, blocks.row_h, transcript.total_height());
+            }
+        }
         self.dirty = true;
     }
 
@@ -1034,8 +1067,8 @@ impl State {
 
 /// `Viewport::follow` through a reference, so callers holding split borrows can
 /// still re-pin the view to the tail.
-fn viewport_follow(viewport: &mut Viewport, rows: usize) {
-    viewport.follow(rows);
+fn viewport_follow(viewport: &mut Viewport, total: u32) {
+    viewport.follow(total);
 }
 
 impl CompositorHandler for State {
@@ -1066,8 +1099,8 @@ impl CompositorHandler for State {
         } = self;
         if let Some(font) = font.as_ref() {
             transcript.rewrap(font, max_w);
-            viewport.height = panel::visible_rows(buffer_h, font, scale);
-            viewport.clamp(transcript.total_rows());
+            viewport.height = panel::transcript_px(buffer_h, font, scale);
+            viewport.clamp(transcript.total_height());
         }
         self.buffer = None;
         self.dirty = true;
@@ -1420,22 +1453,32 @@ mod tests {
         assert_eq!(bar, 30, "row_h_for(20) is 30 at 1x");
         assert_eq!(size_for(Phase::Idle, 0, Some(1080)), (640, bar));
         assert_eq!(size_for(Phase::Thinking, 0, Some(1080)), (60, 60));
-        // Answering: bar + divider + one row per transcript row.
+        // Answering: the bar plus the transcript's own height, which is blocks
+        // and gaps rather than a count of rows.
         assert_eq!(
-            size_for(Phase::Answering, 4, Some(1080)),
+            size_for(Phase::Answering, 4 * bar, Some(1080)),
             (640, bar + 1 + 4 * bar)
+        );
+        // A card's padding counts: 8 px above and below make the panel taller
+        // than its text rows alone.
+        assert_eq!(
+            size_for(Phase::Answering, 3 * bar + 16, Some(1080)),
+            (640, bar + 1 + 3 * bar + 16)
         );
         // The cap is the output less the margin above and the room below.
         assert_eq!(
-            size_for(Phase::Answering, 1000, Some(1080)),
+            size_for(Phase::Answering, 1000 * bar, Some(1080)),
             (640, 1080 - 64)
         );
         // Before the output reports, a 1080-pixel one is assumed.
-        assert_eq!(size_for(Phase::Answering, 1000, None), (640, 1080 - 64));
+        assert_eq!(
+            size_for(Phase::Answering, 1000 * bar, None),
+            (640, 1080 - 64)
+        );
         // An empty transcript still leaves the bar plus its divider.
         assert_eq!(size_for(Phase::Answering, 0, Some(1080)).1, bar + 1);
         // A tiny output cannot make the panel taller than its bar or negative.
-        assert_eq!(size_for(Phase::Answering, 100, Some(40)).1, bar);
+        assert_eq!(size_for(Phase::Answering, 10 * bar, Some(40)).1, bar);
     }
 
     #[test]

@@ -42,15 +42,21 @@ is checked on a machine with no compositor.
 
 A `wlr-layer-shell` surface on the overlay layer, anchored to the top of the
 output, 32 px down and centred: the same panel `wlmenu` draws, 640 px wide and one
-row tall (30 px at 20 px text), with the transcript below it. The frame is
-`wlmenu`'s too: a 24 px drop shadow, a premultiplied translucent body, a hairline
-border and antialiased corners. It has three states:
+row tall (30 px at 20 px text), with the transcript below it. The frame and the
+bar are `wlmenu`'s too: a 24 px drop shadow, a premultiplied translucent body, a
+hairline border and antialiased corners. It has three states:
 
 | State | Panel size | What is drawn |
 |---|---|---|
 | idle | 640 × 30 | the bar alone |
 | thinking | 60 × 60 | a circle with four squares, one lit every 200 ms |
-| answering | 640 × (bar + rows) | the bar on top, the transcript below |
+| answering | 640 × (bar + transcript) | the bar on top, the transcript below |
+
+The transcript is a stack of blocks rather than a list of rows. A question is one
+bright row; an answer, a failure and the panel's own notes are each drawn inside a
+rounded card inset by `PAD`, with 8 px of padding above and below the text, and
+blocks are separated by an 8 px gap. `Up`/`Down` mark the highlighted line with a
+2 px rail in the left margin instead of a band across the row.
 
 The sizes are the panel's own; the layer surface adds the shadow margin on every
 side and sits 8 px from the screen edge, so the panel's visible gap stays 32 px.
@@ -89,8 +95,9 @@ rather than in `argv`, so it is in no process table.
 Rendering is software: `wl_shm` for the buffer, `skrifa` to read the font's
 outlines, `ab_glyph_rasterizer` to turn them into coverage. The design tokens and
 the 1.5×-row-height rule come from `wlmenu` so the two read as the same product. The
-layout core is new: wrapping, a caret inside the text, multi-line answers and a
-scrollback viewport are exactly what `wlmenu`'s single-line rows cannot do.
+layout core is new: wrapping, a caret inside the text, multi-line answers in
+cards and a scrollback viewport are exactly what `wlmenu`'s single-line rows
+cannot do.
 
 The transport is a child process rather than a crate because `curl -N` already
 streams, and a streaming HTTP client with TLS would be most of the dependency

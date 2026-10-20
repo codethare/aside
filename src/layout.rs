@@ -13,6 +13,29 @@ use crate::render::{self, Subpixel};
 /// viewport is too; the frame cost is per visible row.
 pub const MAX_ROWS: usize = 64;
 
+/// Block geometry in buffer pixels: one text row, the padding a card puts above
+/// and below its text, and the gap between two blocks. Both paddings are the one
+/// 8 px token, and the scale comes from the font, which is derived at `SIZE *
+/// scale` — the transcript holds buffer pixels like `row_h`, not logical ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Blocks {
+    pub row_h: u32,
+    pub pad: u32,
+    pub gap: u32,
+}
+
+impl Blocks {
+    pub fn new(font: &PanelFont) -> Blocks {
+        let s = (font.size / crate::font::SIZE).round().max(1.0) as u32;
+        let inset = render::PROMPT_GAP as u32 * s;
+        Blocks {
+            row_h: font.row_h,
+            pad: inset,
+            gap: inset,
+        }
+    }
+}
+
 /// A break is allowed between these and their neighbours: CJK ideographs, kana
 /// and full-width forms break per character, everything else at spaces.
 ///
@@ -148,35 +171,35 @@ pub fn char_advance(font: &PanelFont, c: char) -> f32 {
         .unwrap_or(font.size / 2.0)
 }
 
-/// A scrollback window over the transcript's rows.
+/// A scrollback window over the transcript, in buffer pixels: a card's padding
+/// and the gaps between blocks are not multiples of a row, so counting rows here
+/// would place every block but the first off by their remainder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Viewport {
-    /// First visible row.
-    pub top: usize,
-    /// Rows the window can show, never more than `MAX_ROWS`.
-    pub height: usize,
+    /// First visible pixel of the transcript.
+    pub top: u32,
+    /// Height of the window in buffer pixels, which the caller already capped.
+    pub height: u32,
     /// Whether the view is pinned to the newest row.
     pub following: bool,
 }
 
 impl Viewport {
-    pub fn new(height: usize) -> Viewport {
+    pub fn new(height: u32) -> Viewport {
         Viewport {
             top: 0,
-            height: height.clamp(1, MAX_ROWS),
+            height,
             following: true,
         }
     }
 
-    /// Rows currently on screen.
-    pub fn visible(&self, total: usize) -> std::ops::Range<usize> {
-        let top = self.top.min(total.saturating_sub(1));
-        let end = (top + self.height).min(total);
-        top..end
+    /// Whether a row of `row_h` starting at `y` is on screen at all.
+    pub fn shows(&self, y: u32, row_h: u32) -> bool {
+        y + row_h > self.top && y < self.top + self.height
     }
 
     /// Keep `top` inside the transcript, and stay at the tail while following.
-    pub fn clamp(&mut self, total: usize) {
+    pub fn clamp(&mut self, total: u32) {
         if self.following {
             self.top = total.saturating_sub(self.height);
         }
@@ -184,19 +207,20 @@ impl Viewport {
     }
 
     /// Re-pin to the tail, as sending a question does.
-    pub fn follow(&mut self, total: usize) {
+    pub fn follow(&mut self, total: u32) {
         self.following = true;
         self.clamp(total);
     }
 
-    /// Scroll so `row` is inside the window (the highlight must stay visible).
-    /// Moving the highlight back to the newest row resumes following.
-    pub fn ensure_visible(&mut self, row: usize, total: usize) {
-        if row < self.top {
-            self.top = row;
+    /// Scroll so the row of `row_h` at `y` is inside the window (the highlight
+    /// must stay visible). Moving the highlight back to the newest row resumes
+    /// following.
+    pub fn ensure_visible(&mut self, y: u32, row_h: u32, total: u32) {
+        if y < self.top {
+            self.top = y;
             self.following = false;
-        } else if row >= self.top + self.height {
-            self.top = row + 1 - self.height;
+        } else if y + row_h > self.top + self.height {
+            self.top = (y + row_h).saturating_sub(self.height);
             self.following = self.top + self.height >= total;
         }
         self.top = self.top.min(total.saturating_sub(1));
@@ -415,42 +439,57 @@ mod tests {
     }
 
     #[test]
-    fn the_viewport_never_holds_more_than_the_cap() {
-        let mut v = Viewport::new(1000);
-        assert_eq!(v.height, MAX_ROWS);
-        v.ensure_visible(10, 500);
-        assert!(v.visible(500).len() <= MAX_ROWS);
-        v.follow(500);
-        assert_eq!(v.visible(500), 500 - MAX_ROWS..500);
+    fn the_viewport_window_is_pixels_capped_by_its_caller() {
+        let mut v = Viewport::new(MAX_ROWS as u32 * 30);
+        v.ensure_visible(600, 30, 15_000);
+        assert!(v.shows(600, 30));
+        v.follow(15_000);
+        assert_eq!(v.top, 15_000 - MAX_ROWS as u32 * 30);
     }
 
     #[test]
     fn new_rows_do_not_drag_a_reader_who_scrolled_up() {
-        let mut v = Viewport::new(10);
-        v.clamp(100);
+        let mut v = Viewport::new(300);
+        v.clamp(3000);
         assert!(v.following);
         // A reader who moves the highlight to an older row keeps that row.
-        v.ensure_visible(50, 100);
+        v.ensure_visible(1500, 30, 3000);
         assert!(!v.following);
-        assert_eq!(v.top, 50, "the highlighted row is at the top of the window");
+        assert_eq!(
+            v.top, 1500,
+            "the highlighted row is at the top of the window"
+        );
         // Rows arriving must not pull the view back to the tail.
-        v.clamp(140);
-        assert_eq!(v.top, 50);
+        v.clamp(4200);
+        assert_eq!(v.top, 1500);
         // Coming back to the newest row resumes following.
-        v.ensure_visible(139, 140);
+        v.ensure_visible(4170, 30, 4200);
         assert!(v.following);
-        assert_eq!(v.top, 130);
+        assert_eq!(v.top, 3900);
     }
 
     #[test]
     fn ensure_visible_brings_the_highlight_into_the_window() {
-        let mut v = Viewport::new(4);
-        v.follow(40);
-        assert_eq!(v.top, 36);
-        v.ensure_visible(10, 40);
-        assert!(v.visible(40).contains(&10));
-        v.ensure_visible(39, 40);
-        assert!(v.visible(40).contains(&39));
+        let mut v = Viewport::new(120);
+        v.follow(1200);
+        assert_eq!(v.top, 1080);
+        v.ensure_visible(300, 30, 1200);
+        assert!(v.shows(300, 30));
+        assert_eq!(v.top, 300, "a row above the window pulls it up whole");
+        v.ensure_visible(1170, 30, 1200);
+        assert!(v.shows(1170, 30));
+        assert_eq!(v.top, 1080, "a row below it scrolls exactly one window");
+    }
+
+    #[test]
+    fn a_block_gap_larger_than_a_row_is_still_scrolled_past() {
+        // Padding and gaps mean a row can start at any pixel, not at a multiple
+        // of row_h: the window must follow the real offsets.
+        let mut v = Viewport::new(90);
+        v.follow(400);
+        assert_eq!(v.top, 310);
+        assert!(!v.shows(280, 30), "a row wholly above the window is hidden");
+        assert!(v.shows(310, 30), "the first row of the window shows");
     }
 
     #[test]

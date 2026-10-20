@@ -10,7 +10,7 @@
 //! squares.
 
 use crate::font::PanelFont;
-use crate::layout::{self, Input, MAX_ROWS, Viewport};
+use crate::layout::{self, Blocks, Input, MAX_ROWS, Viewport};
 use crate::render::{self, Bgra, Subpixel};
 use crate::transcript::{Kind, Row, Transcript};
 
@@ -31,7 +31,6 @@ pub fn draw(
     scale: u32,
 ) {
     let s = scale.max(1);
-    let row_h = font.row_h;
     let aa = layout::text_aa(s);
     let bar_h = font.row_h;
     let Some(panel) = panel_of(w, h, render::CORNER_RADIUS, s) else {
@@ -58,13 +57,34 @@ pub fn draw(
         }
     }
 
-    // Transcript: the rows the viewport shows, drawn top-down under the bar.
-    let rows = transcript.rows();
-    let visible = viewport.visible(rows.len());
+    // Transcript: the blocks the viewport shows. A card is filled once, when its
+    // first visible row comes up; every row then draws its own text over it.
+    let blocks = Blocks::new(font);
+    let rows = transcript.rows(blocks);
     let transcript_top = bar_h + divider_h;
-    for (i, row) in rows[visible.clone()].iter().enumerate() {
-        let index = visible.start + i;
-        let y = panel.y + transcript_top + (i as u32) * row_h;
+    let card = card_color();
+    let clip = (panel.y + transcript_top)..(panel.y + panel.h);
+    let mut filled: Option<u32> = None;
+    for (index, row) in rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| viewport.shows(row.y, blocks.row_h))
+    {
+        let y = panel.y + transcript_top + row.y;
+        if row.kind.is_card() && filled != Some(row.block.0) {
+            filled = Some(row.block.0);
+            render::rounded_rect(
+                buf,
+                w,
+                panel.x + crate::PAD * s,
+                panel.y + transcript_top + row.block.0,
+                panel.w - 2 * crate::PAD * s,
+                row.block.1,
+                render::CORNER_RADIUS * s,
+                card,
+                clip.clone(),
+            );
+        }
         draw_row(
             buf,
             w,
@@ -72,7 +92,7 @@ pub fn draw(
             font,
             row,
             y,
-            row_h,
+            blocks,
             highlight == Some(index),
             aa,
             s,
@@ -80,15 +100,12 @@ pub fn draw(
     }
 
     // Scroll position indicator: only while the transcript overflows the viewport.
-    let total = rows.len();
     let track_y = panel.y + transcript_top;
-    if let Some((ty, th)) = render::scroll_thumb(
-        track_y,
-        panel.h.saturating_sub(transcript_top),
-        visible.len(),
-        total,
-        viewport.top,
-    ) {
+    let track_h = panel.h.saturating_sub(transcript_top);
+    let total = transcript.total_height();
+    if let Some((ty, th)) =
+        render::scroll_thumb(track_y, track_h, viewport.height, total, viewport.top)
+    {
         let tw = 3 * s;
         let tx = panel.x + panel.w - (crate::PAD * s + tw) / 2;
         render::rect(buf, w, h, tx, ty, tw, th, render::LABEL_ACCENT);
@@ -273,8 +290,8 @@ pub fn draw_ball(buf: &mut [u8], w: u32, h: u32, lit: usize, scale: u32) {
     }
 }
 
-/// One transcript row: optional highlight band (clipped to the rounded outline,
-/// as the item rows are) and the text in its kind's colour.
+/// One transcript row: the rail when it is highlighted, and the text in its
+/// kind's colour, inset into its card when it is inside one.
 #[allow(clippy::too_many_arguments)] // a row is seven facts about where it goes
 fn draw_row(
     buf: &mut [u8],
@@ -283,20 +300,27 @@ fn draw_row(
     font: &PanelFont,
     row: &Row<'_>,
     y: u32,
-    row_h: u32,
+    blocks: Blocks,
     highlighted: bool,
     aa: Subpixel,
     s: u32,
 ) {
+    let pad = if row.kind.is_card() { blocks.pad } else { 0 };
     if highlighted {
-        // Inside the hairline: the ring frames the selection instead of being
-        // painted over by it.
-        for by in y..(y + row_h).min(panel.y + panel.h) {
-            let (x0, x1) = panel.span(by - panel.y);
-            if x0 + 1 < x1 {
-                render::set_span(buf, w, by, x0 + 1, x1 - 1, render::premul(render::BG_SEL));
-            }
-        }
+        // A rail in the margin, not a band across the row: the transcript is a
+        // stack of blocks, not a list. It clears a card's edge and a question's
+        // first glyph by a pixel either way.
+        let bottom = panel.y + panel.h;
+        render::rect(
+            buf,
+            w,
+            bottom,
+            panel.x + crate::PAD * s - 3 * s,
+            y,
+            2 * s,
+            (y + blocks.row_h).min(bottom) - y,
+            render::BG_SEL,
+        );
     }
     let (fg, _) = colours(row.kind, highlighted);
     // Clipped at the panel's bottom edge, so ink never runs into the shadow.
@@ -305,13 +329,21 @@ fn draw_row(
         w,
         panel.y + panel.h,
         font,
-        (panel.x + crate::PAD * s) as f32,
+        (panel.x + crate::PAD * s + pad) as f32,
         render::row_baseline(font, y),
         row.text,
         fg,
-        (panel.w - 2 * crate::PAD * s) as f32,
+        (panel.w - 2 * (crate::PAD * s + pad)) as f32,
         aa,
     );
+}
+
+/// The card's fill, composited once over the transcript's body: the card is
+/// translucent, and every card pixel sits on exactly that body.
+fn card_color() -> Bgra {
+    let mut px = render::premul(render::BG_NORMAL);
+    render::over_pm(&mut px, render::premul(render::BG_CARD), 255);
+    px
 }
 
 fn colours(kind: Kind, highlighted: bool) -> (Bgra, Bgra) {
@@ -324,19 +356,20 @@ fn colours(kind: Kind, highlighted: bool) -> (Bgra, Bgra) {
     }
 }
 
-/// Transcript rows a surface of `h` buffer pixels can show under the bar. `h`
-/// is the panel's own height, without the shadow margin.
-pub fn visible_rows(h: u32, font: &PanelFont, scale: u32) -> usize {
+/// Transcript height a panel of `h` buffer pixels can show under its bar, in
+/// buffer pixels: the rows the spec caps, expressed where the painter needs it.
+pub fn transcript_px(h: u32, font: &PanelFont, scale: u32) -> u32 {
     let s = scale.max(1);
     let bar = font.row_h + render::DIVIDER_H * s;
-    (h.saturating_sub(bar) / font.row_h).min(MAX_ROWS as u32) as usize
+    h.saturating_sub(bar).min(MAX_ROWS as u32 * font.row_h)
 }
 
-/// Surface height for a wanted number of conversation rows, in buffer pixels,
-/// without the shadow margin (which the caller adds once).
-pub fn height_for_rows(rows: usize, font: &PanelFont, scale: u32) -> u32 {
+/// Panel height, in buffer pixels without the shadow margin, for a transcript
+/// that draws `content` buffer pixels: the bar, the divider and the visible
+/// slice of the blocks.
+pub fn height_for(content: u32, font: &PanelFont, scale: u32) -> u32 {
     let s = scale.max(1);
-    (rows.min(MAX_ROWS) as u32) * font.row_h + font.row_h + render::DIVIDER_H * s
+    font.row_h + render::DIVIDER_H * s + content.min(MAX_ROWS as u32 * font.row_h)
 }
 
 /// The bar's height in logical pixels. The font's own metrics are in buffer
@@ -373,9 +406,9 @@ mod tests {
             font,
             w,
         );
-        transcript.finish_answer();
+        transcript.finish_answer(font);
         let input = Input::default();
-        let viewport = Viewport::new(MAX_ROWS);
+        let viewport = Viewport::new(MAX_ROWS as u32 * 30);
         Scene {
             transcript,
             input,
@@ -424,7 +457,7 @@ mod tests {
     fn the_panel_floats_in_a_shadow_margin() {
         let f = font();
         let scene = scene(&f, 300.0);
-        let (w, h) = (500u32, height_for_rows(8, &f, 1));
+        let (w, h) = (500u32, height_for(8 * f.row_h, &f, 1));
         let (bw, bh) = frame(w, h);
         let buf = paint(&scene, false, w, h);
         let px = |x: u32, y: u32| &buf[((y * bw + x) * 4) as usize..][..4];
@@ -436,14 +469,19 @@ mod tests {
         assert!(inside_shadow[3] > 0, "the panel casts a shadow");
         assert_eq!(inside_shadow[..3], [0, 0, 0], "shadow is black");
         // ...and the body is the translucent glass, premultiplied.
-        assert_eq!(px(bw / 2, bh / 2), render::premul(render::BG_NORMAL));
+        // Below the last block: the panel keeps the body tone to its bottom edge.
+        assert_eq!(
+            px(w - crate::PAD - 4, h - 4),
+            render::premul(render::BG_NORMAL),
+            "the body below the last block"
+        );
     }
 
     #[test]
     fn the_corner_is_antialiased_not_staircased() {
         let f = font();
         let scene = scene(&f, 300.0);
-        let (w, h) = (500u32, height_for_rows(4, &f, 1));
+        let (w, h) = (500u32, height_for(4 * f.row_h, &f, 1));
         let (bw, _bh) = frame(w, h);
         let buf = paint(&scene, false, w, h);
         // The pixel just outside the whole-pixel span carries partial coverage;
@@ -460,7 +498,7 @@ mod tests {
     fn the_input_bar_is_the_prompt_band_at_the_top() {
         let f = font();
         let scene = scene(&f, 300.0);
-        let (w, h) = (500u32, height_for_rows(4, &f, 1));
+        let (w, h) = (500u32, height_for(4 * f.row_h, &f, 1));
         let (bw, _) = frame(w, h);
         let buf = paint(&scene, false, w, h);
         let px = |x: u32, y: u32| &buf[at(bw, x, y)..][..4];
@@ -477,7 +515,7 @@ mod tests {
     fn the_label_rail_sits_in_the_bar() {
         let f = font();
         let scene = scene(&f, 300.0);
-        let (w, h) = (500u32, height_for_rows(4, &f, 1));
+        let (w, h) = (500u32, height_for(4 * f.row_h, &f, 1));
         let (bw, _) = frame(w, h);
         let buf = paint(&scene, false, w, h);
         // The rail is the accent colour, just inside PAD, mid-bar on the left.
@@ -494,7 +532,7 @@ mod tests {
     fn the_divider_is_inset_by_the_padding() {
         let f = font();
         let scene = scene(&f, 300.0);
-        let (w, h) = (500u32, height_for_rows(4, &f, 1));
+        let (w, h) = (500u32, height_for(4 * f.row_h, &f, 1));
         let (bw, _) = frame(w, h);
         let buf = paint(&scene, false, w, h);
         let px = |x: u32, y: u32| &buf[at(bw, x, y)..][..4];
@@ -510,11 +548,10 @@ mod tests {
     }
 
     #[test]
-    fn the_selection_is_clipped_inside_the_border() {
+    fn the_highlight_is_a_rail_not_a_band() {
         let f = font();
-        let mut scene = scene(&f, 300.0);
-        scene.viewport = Viewport::new(4);
-        let (w, h) = (500u32, height_for_rows(4, &f, 1));
+        let scene = scene(&f, 300.0);
+        let (w, h) = (500u32, height_for(4 * f.row_h, &f, 1));
         let (bw, bh) = frame(w, h);
         let mut buf = vec![0u8; (bw * bh * 4) as usize];
         draw(
@@ -531,22 +568,85 @@ mod tests {
             1,
         );
         let y = f.row_h + render::DIVIDER_H + f.row_h / 2;
-        let (x0, _) = render::rounded_span(w, h, render::CORNER_RADIUS, y);
         let px = |x: u32| &buf[at(bw, x, y)..][..4];
-        assert_eq!(
-            px(x0 + 1),
-            render::premul(render::BG_SEL),
-            "band starts inside the ring"
+        // The rail is the selection colour, 2 px in the margin left of the text;
+        // `rect` composites it over the body, so that is what it must match.
+        let mut rail = render::premul(render::BG_NORMAL);
+        render::blend_px(
+            &mut rail,
+            [render::BG_SEL[0], render::BG_SEL[1], render::BG_SEL[2]],
+            render::BG_SEL[3] as u32,
         );
-        assert_ne!(px(x0)[..3], render::premul(render::BG_SEL)[..3]);
+        assert_eq!(px(crate::PAD - 3), rail, "the rail sits in the margin");
+        assert_eq!(px(crate::PAD - 2), rail, "two pixels wide");
+        assert_ne!(
+            px(crate::PAD - 1)[..3],
+            rail[..3],
+            "and stops before the text"
+        );
+        // Nothing else of the row carries the selection colour: there is no band.
+        for x in crate::PAD..w - crate::PAD {
+            assert_ne!(px(x)[..3], rail[..3], "the row is not banded at x={x}");
+        }
+    }
+
+    /// The answer is drawn inside a card and the question is not: that contrast
+    /// is the whole point of the change.
+    #[test]
+    fn the_answer_is_a_card_and_the_question_is_not() {
+        let f = font();
+        let blocks = Blocks::new(&f);
+        let scene = scene(&f, 300.0);
+        let content = scene.transcript.total_height();
+        let (w, h) = (500u32, height_for(content, &f, 1));
+        let (bw, _) = frame(w, h);
+        let buf = paint(&scene, false, w, h);
+        let px = |x: u32, y: u32| &buf[at(bw, x, y)..][..4];
+        let body = render::premul(render::BG_NORMAL);
+        let rows = scene.transcript.rows(blocks);
+        let question = rows
+            .iter()
+            .find(|r| r.kind == Kind::Question)
+            .expect("a question");
+        let answer = rows
+            .iter()
+            .find(|r| r.kind == Kind::Answer)
+            .expect("an answer");
+        let top = f.row_h + render::DIVIDER_H;
+
+        // The question is a bare row: the panel's body right up to its text.
+        assert_eq!(
+            px(w / 2, top + question.y + f.row_h / 2),
+            body,
+            "no card around the question"
+        );
+
+        // The answer's block is a card inset by PAD, its padding filled, and the
+        // gap above it left as body.
+        let card_top = top + answer.block.0;
+        let mid = card_top + answer.block.1 / 2;
+        let card = card_color();
+        assert_eq!(px(crate::PAD + 2, mid), card, "the card is filled");
+        assert_eq!(px(crate::PAD - 1, mid), body, "inset by PAD");
+        assert_eq!(
+            px(crate::PAD + 2, card_top - 1),
+            body,
+            "one gap above the card"
+        );
+        // Its text is inset a further 8 px, so the left column of the card is
+        // padding and not glyph.
+        assert_eq!(
+            px(crate::PAD + 5, card_top + blocks.pad + f.row_h / 2),
+            card
+        );
     }
 
     #[test]
     fn the_scroll_thumb_shows_only_when_the_transcript_overflows() {
         let f = font();
         let mut scene = scene(&f, 300.0);
-        scene.viewport = Viewport::new(2);
-        let (w, h) = (500u32, height_for_rows(2, &f, 1));
+        scene.viewport = Viewport::new(2 * f.row_h);
+        let (w, h) = (500u32, height_for(2 * f.row_h, &f, 1));
         let (bw, _) = frame(w, h);
         let buf = paint(&scene, false, w, h);
         let tw = 3;
@@ -557,7 +657,7 @@ mod tests {
             "the overflow indicator is on the right edge"
         );
         // Everything fits once the viewport is tall enough: no indicator.
-        scene.viewport = Viewport::new(MAX_ROWS);
+        scene.viewport = Viewport::new(MAX_ROWS as u32 * 30);
         let short = paint(&scene, false, w, h);
         assert_ne!(
             &short[at(bw, tx, f.row_h + render::DIVIDER_H)..][..4][..3],
@@ -604,7 +704,7 @@ mod tests {
         // pixel was drawn — on a HiDPI output that means no panel at all.
         for scale in [1u32, 2, 3] {
             let f = PanelFont::load(crate::font::SIZE * scale as f32).expect("system font");
-            let (pw, ph) = (500 * scale, height_for_rows(4, &f, scale));
+            let (pw, ph) = (500 * scale, height_for(4 * f.row_h, &f, scale));
             let (w, h) = (
                 pw + 2 * render::SHADOW * scale,
                 ph + 2 * render::SHADOW * scale,
@@ -640,7 +740,7 @@ mod tests {
             &f,
             120.0,
         );
-        let (w, h) = (140u32, height_for_rows(8, &f, 1));
+        let (w, h) = (140u32, height_for(8 * f.row_h, &f, 1));
         let buf = paint(&scene, true, w, h);
         let ink = |p: &[u8]| p[..3] != render::premul(render::BG_NORMAL)[..3];
         // Something was painted, and all of it inside the panel.
@@ -648,17 +748,24 @@ mod tests {
     }
 
     #[test]
-    fn the_visible_row_count_follows_the_surface_and_the_cap() {
+    fn the_visible_transcript_height_follows_the_surface_and_the_cap() {
         let f = font();
-        assert_eq!(visible_rows(height_for_rows(6, &f, 1), &f, 1), 6);
+        let content = |rows: u32| rows * f.row_h;
+        assert_eq!(
+            transcript_px(height_for(content(6), &f, 1), &f, 1),
+            content(6)
+        );
         // The cap holds even for a panel taller than the viewport allows.
-        assert_eq!(visible_rows(10_000, &f, 1), MAX_ROWS);
-        assert_eq!(visible_rows(1, &f, 1), 0, "too short for a bar and a row");
+        assert_eq!(transcript_px(10_000, &f, 1), MAX_ROWS as u32 * f.row_h);
+        assert_eq!(transcript_px(1, &f, 1), 0, "too short for a bar and a row");
         // At 2x the font is re-derived twice as large, so the same eight rows
         // take twice the buffer and still fit the same panel.
         let big = PanelFont::load(crate::font::SIZE * 2.0).expect("system font");
-        assert_eq!(visible_rows(height_for_rows(8, &big, 2), &big, 2), 8);
-        assert!(height_for_rows(8, &big, 2) > height_for_rows(8, &f, 1));
+        assert_eq!(
+            transcript_px(height_for(8 * big.row_h, &big, 2), &big, 2),
+            8 * big.row_h
+        );
+        assert!(height_for(8 * big.row_h, &big, 2) > height_for(8 * f.row_h, &f, 1));
     }
 
     #[test]
@@ -673,7 +780,7 @@ mod tests {
     fn a_preview_of_a_scripted_conversation_renders() {
         let f = font();
         let w = 640u32;
-        let h = height_for_rows(12, &f, 1);
+        let h = height_for(12 * f.row_h, &f, 1);
         let (bw, bh) = frame(w, h);
         let mut scene = scene(&f, (w - 2 * crate::PAD) as f32);
         scene.transcript.fail(
