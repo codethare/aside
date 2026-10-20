@@ -127,6 +127,13 @@ impl Transcript {
         let mut y = 0;
         let mut inked = false;
         for entry in &mut self.entries {
+            if entry.kind == Kind::Question {
+                // Not drawn, so never laid out: no rows, no height, no gap.
+                entry.lines = Lines::default();
+                entry.h = 0;
+                entry.y = y;
+                continue;
+            }
             entry.lines = Lines::wrap(&entry.text, font, max_w);
             entry.h = entry.block_h(blocks);
             if entry.h == 0 {
@@ -143,18 +150,17 @@ impl Transcript {
         self.height = y;
     }
 
-    /// Add a question and open an answer for it, so a delta has somewhere to go.
-    pub fn ask(&mut self, question: &str, font: &PanelFont, max_w: f32) {
+    /// Record a question and open an answer for it, so a delta has somewhere to
+    /// go. The question is kept for the next request and laid out never: only the
+    /// reply is on screen.
+    pub fn ask(&mut self, question: &str, font: &PanelFont) {
         let blocks = Blocks::new(font);
         // A previous answer that never finished is closed before a new question:
         // two open answers would have no defined meaning, and closing it first is
-        // what gives it its last row before the question is placed under it.
+        // what gives it its last row before the answer is placed under it.
         self.close_open(blocks);
         let user = self.push(Kind::Question, true, blocks);
         self.entries[user].text.push_str(question);
-        self.entries[user].lines.push(question, font, max_w);
-        self.entries[user].lines.finish();
-        self.settle(blocks);
         self.open = Some(self.push(Kind::Answer, false, blocks));
     }
 
@@ -343,28 +349,40 @@ mod tests {
             .collect()
     }
 
+    /// The answers are the only rows on screen: a question is kept for the next
+    /// request and drawn nowhere.
     #[test]
-    fn a_question_and_its_answer_stay_in_order() {
+    fn the_answers_are_the_only_rows() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("why", &f, 400.0);
+        t.ask("why", &f);
         t.delta("because", &f, 400.0);
         t.finish_answer(&f);
-        t.ask("and?", &f, 400.0);
+        t.ask("and?", &f);
         t.delta("this too", &f, 400.0);
         t.finish_answer(&f);
-        assert_eq!(text_of(&t, &f), ["why", "because", "and?", "this too"]);
+        assert_eq!(text_of(&t, &f), ["because", "this too"]);
         assert!(!t.is_streaming());
+        // Nothing on screen is a question, and the request still has them.
+        assert!(
+            t.rows(Blocks::new(&f))
+                .iter()
+                .all(|r| r.kind != Kind::Question)
+        );
+        let turns = t.request_turns();
+        assert_eq!(turns.len(), 4, "two questions, two answers");
+        assert_eq!(turns[0].text, "why");
+        assert_eq!(turns[2].text, "and?");
     }
 
     #[test]
     fn the_request_carries_the_finished_turns_in_order() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("first", &f, 400.0);
+        t.ask("first", &f);
         t.delta("answer one", &f, 400.0);
         t.finish_answer(&f);
-        t.ask("second", &f, 400.0);
+        t.ask("second", &f);
         let turns = t.request_turns();
         assert_eq!(turns.len(), 3, "the open question is included");
         assert_eq!(turns[0].role, Role::User);
@@ -378,10 +396,10 @@ mod tests {
     fn a_cancelled_answer_is_shown_but_never_sent_back() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("first", &f, 400.0);
+        t.ask("first", &f);
         t.delta("half an ans", &f, 400.0);
         t.cancel("cancelled", &f, 400.0);
-        t.ask("second", &f, 400.0);
+        t.ask("second", &f);
         t.delta("full answer", &f, 400.0);
         t.finish_answer(&f);
         let rows = text_of(&t, &f);
@@ -401,7 +419,7 @@ mod tests {
     fn an_answer_that_never_ended_is_not_sent_after_the_stream_dies() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("q", &f, 400.0);
+        t.ask("q", &f);
         t.delta("partial", &f, 400.0);
         t.fail("connection lost", &f, 400.0);
         let turns = t.request_turns();
@@ -433,18 +451,19 @@ mod tests {
         let f = font();
         let blocks = Blocks::new(&f);
         let mut t = Transcript::default();
-        t.ask("why", &f, 400.0);
+        t.ask("why", &f);
         t.delta(
             "because the sky scatters short wavelengths more than long ones",
             &f,
             60.0,
         );
         t.finish_answer(&f);
-        t.ask("and?", &f, 400.0);
+        t.ask("and?", &f);
+        t.delta("a second answer, short", &f, 60.0);
         t.finish_answer(&f);
 
         let rows = t.rows(blocks);
-        assert!(rows.len() > 3, "the answer must wrap to several rows");
+        assert!(rows.len() > 3, "the answers must wrap to several rows");
         // Every row is inside its own block, and the blocks are contiguous.
         let mut end = 0;
         for row in &rows {
@@ -455,21 +474,18 @@ mod tests {
             end = row.block.0 + row.block.1;
         }
         assert_eq!(end, t.total_height(), "the last block ends the transcript");
-        // The question is bare, the answer is a card: only the card pays padding.
-        let question = rows
-            .iter()
-            .find(|r| r.kind == Kind::Question)
-            .expect("a question");
-        let answer = rows
-            .iter()
-            .find(|r| r.kind == Kind::Answer)
-            .expect("an answer");
-        assert_eq!(question.block.1, blocks.row_h, "a question is one bare row");
+        // Two answers, two cards: the second starts one gap below the first.
+        let mut cards = rows.iter().map(|r| r.block).collect::<Vec<_>>();
+        cards.dedup();
+        assert_eq!(cards.len(), 2, "one block per answer");
         assert_eq!(
-            answer.block.0,
-            question.block.0 + question.block.1 + blocks.gap,
+            cards[1].0,
+            cards[0].0 + cards[0].1 + blocks.gap,
             "one gap between the blocks"
         );
+        for (_, h) in cards {
+            assert!(h > blocks.row_h, "a card is taller than its bare rows");
+        }
     }
 
     /// An answer that has not started takes no room: the card appears with its
@@ -478,13 +494,13 @@ mod tests {
     fn an_empty_answer_occupies_nothing() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("why", &f, 400.0);
-        let bare = t.total_height();
-        assert_eq!(bare, f.row_h, "the question alone");
+        t.ask("why", &f);
+        assert_eq!(t.total_height(), 0, "a question alone takes no room");
+        assert_eq!(t.total_rows(), 0, "and no rows to draw");
         t.delta("x", &f, 400.0);
         assert!(
-            t.total_height() > bare + Blocks::new(&f).gap,
-            "the card grew"
+            t.total_height() > 2 * Blocks::new(&f).pad,
+            "the card appeared with its first row"
         );
     }
 
@@ -494,7 +510,7 @@ mod tests {
         let f = font();
         let blocks = Blocks::new(&f);
         let mut t = Transcript::default();
-        t.ask("why", &f, 400.0);
+        t.ask("why", &f);
         t.delta("because", &f, 400.0);
         t.finish_answer(&f);
         t.fail("and then it broke", &f, 400.0);
@@ -513,7 +529,7 @@ mod tests {
         let f = font();
         let blocks = Blocks::new(&f);
         let mut t = Transcript::default();
-        t.ask("why", &f, 400.0);
+        t.ask("why", &f);
         t.delta("because", &f, 400.0);
         t.finish_answer(&f);
         let rows = t.rows(blocks);
@@ -534,7 +550,7 @@ mod tests {
     fn a_reply_larger_than_the_cap_is_cut_and_marked() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("q", &f, 400.0);
+        t.ask("q", &f);
         // 100 KiB in 1 KiB deltas: more than the cap, and streamed in pieces.
         let chunk = "x".repeat(1024);
         for _ in 0..100 {
@@ -554,10 +570,10 @@ mod tests {
     fn the_cap_does_not_touch_earlier_turns() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("first question", &f, 400.0);
+        t.ask("first question", &f);
         t.delta("a short answer", &f, 400.0);
         t.finish_answer(&f);
-        t.ask("second question", &f, 400.0);
+        t.ask("second question", &f);
         for _ in 0..100 {
             t.delta(&"y".repeat(1024), &f, 400.0);
         }
@@ -573,7 +589,6 @@ mod tests {
         t.ask(
             "a question that is long enough to wrap at a narrow width",
             &f,
-            600.0,
         );
         t.delta(
             "and an answer that is also long enough to wrap when the panel narrows",
@@ -610,9 +625,9 @@ mod tests {
     fn a_new_question_closes_the_answer_left_open() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("one", &f, 400.0);
+        t.ask("one", &f);
         t.delta("streaming", &f, 400.0);
-        t.ask("two", &f, 400.0);
+        t.ask("two", &f);
         assert!(
             !t.entries()[1].complete,
             "the abandoned answer is not complete"

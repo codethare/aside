@@ -53,12 +53,13 @@ use transcript::Transcript;
 pub const PAD: u32 = 16;
 /// `wlmenu`'s bar width, so the two read as one product.
 const WIDTH: u32 = 640;
-/// Gap between the top edge and the panel, and the room kept below it.
-const TOP_MARGIN: i32 = 32;
-const BOTTOM_ROOM: i32 = 32;
+/// Gap between the anchored screen edge and the panel, and the room kept on the
+/// far side: the panel hangs from the bottom and grows upwards.
+const EDGE_MARGIN: i32 = 32;
+const FAR_ROOM: i32 = 32;
 // The shadow margin hangs into the screen edge, so the surface margin is the
 // panel's visible gap minus that margin.
-const _: () = assert!(TOP_MARGIN >= render::SHADOW as i32);
+const _: () = assert!(EDGE_MARGIN >= render::SHADOW as i32);
 /// Output height assumed for the height cap until the real one is known.
 const FALLBACK_OUTPUT_H: u32 = 1080;
 const APP_ID: &str = "aside";
@@ -192,7 +193,6 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
     transcript.ask(
         "what does EAGAIN mean when a socket read returns it?",
         &font,
-        max_w,
     );
     transcript.delta(
         "It means the call would block: the resource is momentarily unavailable rather than \
@@ -202,7 +202,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         max_w,
     );
     transcript.finish_answer(&font);
-    transcript.ask("and if it never clears?", &font, max_w);
+    transcript.ask("and if it never clears?", &font);
     transcript.delta("Then the peer is gone", &font, max_w);
     transcript.cancel("cancelled", &font, max_w);
     transcript.fail("the provider refused the request (401)", &font, max_w);
@@ -274,8 +274,10 @@ fn run(
     let surface = compositor.create_surface(&qh);
     surface.set_buffer_scale(1);
     let layer = shell.create_layer_surface(&qh, surface, Layer::Overlay, Some(APP_ID), None);
-    layer.set_anchor(Anchor::TOP);
-    layer.set_margin(shadow_margin(), 0, 0, 0);
+    // Bottom-anchored, so the bar keeps one place on screen while answers grow
+    // upwards out of it.
+    layer.set_anchor(Anchor::BOTTOM);
+    layer.set_margin(0, 0, shadow_margin(), 0);
     layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
     // Collapsed to the bar. The first commit is buffer-less: it asks for the
     // configure, and nothing may be attached before that one arrives.
@@ -464,10 +466,10 @@ fn surface_size(panel: (u32, u32)) -> (u32, u32) {
     (panel.0 + 2 * render::SHADOW, panel.1 + 2 * render::SHADOW)
 }
 
-/// The top margin leaves the panel `TOP_MARGIN` below the screen edge: the
-/// shadow margin already occupies part of that gap.
+/// The margin leaves the panel `EDGE_MARGIN` from the screen edge it hangs off:
+/// the shadow margin already occupies part of that gap.
 const fn shadow_margin() -> i32 {
-    TOP_MARGIN - render::SHADOW as i32
+    EDGE_MARGIN - render::SHADOW as i32
 }
 
 /// Horizontal margin that centres the surface on the output.
@@ -491,7 +493,7 @@ fn size_for(phase: Phase, content: u32, output_h: Option<u32>) -> (u32, u32) {
         Phase::Answering => {
             let cap = output_h
                 .unwrap_or(FALLBACK_OUTPUT_H)
-                .saturating_sub((TOP_MARGIN + BOTTOM_ROOM) as u32);
+                .saturating_sub((EDGE_MARGIN + FAR_ROOM) as u32);
             let rows = layout::MAX_ROWS as u32 * bar;
             let want = bar + 1 + content.min(rows);
             (WIDTH, want.min(cap).max(bar))
@@ -594,7 +596,7 @@ impl State {
         let (w, h) = self.target_size();
         let (sw, sh) = surface_size((w, h));
         self.layer
-            .set_margin(shadow_margin(), 0, 0, left_margin(self.output_w, sw));
+            .set_margin(0, 0, shadow_margin(), left_margin(self.output_w, sw));
         self.layer.set_size(sw, sh);
         let width_changed = w != self.width;
         if width_changed || h != self.height {
@@ -723,7 +725,7 @@ impl State {
             ..
         } = self;
         let Some(font) = font.as_ref() else { return };
-        transcript.ask(&question, font, max_w);
+        transcript.ask(&question, font);
         let outcome = Request::start(config, key, &transcript.request_turns());
         let started = match outcome {
             Ok(started) => {
@@ -1015,8 +1017,8 @@ impl State {
             + render::measure(font, before, max_w);
         // Both offsets are byte offsets into the surrounding text.
         let caret = self.input.caret() as i32;
-        // The bar is the first row, inside the shadow margin.
-        let bar_top = mo;
+        // The bar is the last row of the panel, inside the shadow margin.
+        let bar_top = mo + (self.height - panel::bar_height()) * s;
         text_input.set_surrounding_text(before.to_string(), caret, caret);
         text_input.set_cursor_rectangle(
             x as i32,
@@ -1515,9 +1517,9 @@ mod tests {
         let f = PanelFont::load(font::SIZE).expect("system font available");
         let w = layout_width(1);
         let mut t = Transcript::default();
-        t.ask("\u{4ec0}\u{4e48}\u{662f} EAGAIN", &f, w);
+        t.ask("\u{4ec0}\u{4e48}\u{662f} EAGAIN", &f);
         t.rewrap(&f, w);
-        assert!(t.total_rows() >= 1, "the question laid out");
+        assert_eq!(t.total_rows(), 0, "the question is not drawn, only kept");
         t.delta(
             "\u{5b83}\u{8868}\u{793a}\u{8d44}\u{6e90}\u{6682}\u{65f6}\u{4e0d}\u{53ef}\u{7528}\u{ff0c}\u{7a0d}\u{540e}\u{91cd}\u{8bd5}\u{5373}\u{53ef}\u{3002}",
             &f,
@@ -1525,7 +1527,8 @@ mod tests {
         );
         t.finish_answer(&f);
         assert_eq!(t.request_turns()[0].text, "\u{4ec0}\u{4e48}\u{662f} EAGAIN");
-        assert!(t.total_rows() > 1, "the answer wrapped into rows");
+        assert_eq!(t.total_rows(), 1, "the answer is what is on screen");
+        assert!(t.total_height() > f.row_h, "inside a card");
     }
 
     #[test]

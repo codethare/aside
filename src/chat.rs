@@ -293,7 +293,7 @@ mod tests {
         let key = provider::api_key().expect("COMMAND_CODE_API_KEY");
         let font = PanelFont::load(crate::font::SIZE).expect("font");
         let mut transcript = Transcript::default();
-        transcript.ask("Reply with the single word: pong", &font, 600.0);
+        transcript.ask("Reply with the single word: pong", &font);
         let turns = transcript.request_turns();
         let mut request =
             Request::start(&Config::default(), &key, &turns).expect("the sandbox starts");
@@ -334,7 +334,7 @@ mod tests {
         let mut request =
             Request::start(&Config::default(), "cc_bogus_key_000", &turns).expect("starts");
         let mut transcript = Transcript::default();
-        transcript.ask("hello", &font, 600.0);
+        transcript.ask("hello", &font);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while std::time::Instant::now() < deadline && request.running() {
             request.poll(&mut transcript, &font, 600.0);

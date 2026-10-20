@@ -14,12 +14,14 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 
 ## The panel
 
-1. Press the keybinding. The panel appears and takes the keyboard.
+1. Press the keybinding. The panel appears at the bottom of the output, 32 px up
+   and centred, and takes the keyboard.
 2. Type `what does EAGAIN mean` and press `Enter`. The answer streams in visibly,
    growing while the stream is open, and the 4 px rail beside the input is blue
    (`#0b6285`) until it finishes.
-3. Ask a follow-up. Both turns stay on screen, and the answer takes the earlier
-   exchange into account.
+3. Ask a follow-up. The earlier answer stays on screen (your questions are never
+   drawn), the bar does not move, the panel grows upwards, and the new answer
+   takes the earlier exchange into account.
 4. `Up`, `Down`, `PageUp`, `PageDown` move the highlighted line and the view
    follows it; the highlighted line is marked by a 2 px blue rail (`#0b6285`) in
    the left margin, not by a band across the row.

@@ -40,23 +40,26 @@ is checked on a machine with no compositor.
 
 ## What it looks like
 
-A `wlr-layer-shell` surface on the overlay layer, anchored to the top of the
-output, 32 px down and centred: the same panel `wlmenu` draws, 640 px wide and one
-row tall (30 px at 20 px text), with the transcript below it. The frame and the
-bar are `wlmenu`'s too: a 24 px drop shadow, a premultiplied translucent body, a
-hairline border and antialiased corners. It has three states:
+A `wlr-layer-shell` surface on the overlay layer, anchored to the bottom of the
+output, 32 px up and centred: the same panel `wlmenu` draws, 640 px wide and one
+row tall (30 px at 20 px text), with the replies growing upwards above the input
+bar. The bottom anchor is what keeps the bar in one place on screen; a top anchor
+would carry it downwards by a row per wrapped line. The frame and the bar are
+`wlmenu`'s too: a 24 px drop shadow, a premultiplied translucent body, a hairline
+border and antialiased corners. It has three states:
 
 | State | Panel size | What is drawn |
 |---|---|---|
 | idle | 640 × 30 | the bar alone |
 | thinking | 60 × 60 | a circle with four squares, one lit every 200 ms |
-| answering | 640 × (bar + transcript) | the bar on top, the transcript below |
+| answering | 640 × (replies + bar) | the replies above, the bar at the bottom |
 
-The transcript is a stack of blocks rather than a list of rows. A question is one
-bright row; an answer, a failure and the panel's own notes are each drawn inside a
-rounded card inset by `PAD`, with 8 px of padding above and below the text, and
-blocks are separated by an 8 px gap. `Up`/`Down` mark the highlighted line with a
-2 px rail in the left margin instead of a band across the row.
+Only the model's text is on screen: an answer, a failure and the panel's own
+notes are each drawn inside a rounded card inset by `PAD`, with 8 px of padding
+above and below the text, and blocks are separated by an 8 px gap. A question you
+sent is kept for the next request and drawn nowhere. `Up`/`Down` mark the
+highlighted line with a 2 px rail in the left margin instead of a band across the
+row.
 
 The sizes are the panel's own; the layer surface adds the shadow margin on every
 side and sits 8 px from the screen edge, so the panel's visible gap stays 32 px.

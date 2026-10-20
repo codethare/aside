@@ -27,12 +27,13 @@ change.
    radius 12, `PAD` 16, 4 px rail, 8 px gap, 2 px pill, 1 px divider, the 24 px
    shadow margin, the premultiplied translucent bodies and hairline in
    `render.rs`, and the 3 px scroll indicator. Row height stays `size + 2 *
-   round(size * 0.25)`. The panel is a top-anchored `wlr-layer-shell` surface in
-   three states — bar, ball, transcript — and the bar is the top row, not the
-   bottom. The transcript is **not** `wlmenu`'s list: it is a stack of blocks,
-   with a question as a bare row and an answer, a failure or a note inside a
-   rounded card, separated by an 8 px gap, and the highlight marked by a 2 px
-   rail in the margin rather than a band across the row.
+   round(size * 0.25)`. The panel is a bottom-anchored `wlr-layer-shell` surface
+   in three states — bar, ball, replies — with the bar on the bottom row and the
+   replies above it, because the bottom anchor is what keeps the bar still while
+   they grow. The transcript is **not** `wlmenu`'s list: it is a stack of blocks,
+   an answer, a failure or a note inside a rounded card, separated by an 8 px
+   gap, and the highlight marked by a 2 px rail in the margin rather than a band
+   across the row. A question you sent is kept for the request and drawn nowhere.
 5. **Frame cost is per visible row**, never per transcript row. Wrapping happens
    once per delta and once per resize; re-wrapping on every frame is a bug.
 6. **Zero dependencies beyond the six in `Cargo.toml`.** Ask before adding one;

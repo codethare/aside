@@ -39,46 +39,49 @@ pub fn draw(
         return;
     };
 
-    render::shadow(buf, w, h, &panel, s);
-    body(buf, w, &panel, bar_h);
-
+    // The bar is the panel's bottom row: the replies grow upwards out of it, and
+    // the bar keeps one place on screen because the surface hangs from the bottom
+    // edge.
     let divider_h = render::DIVIDER_H * s;
+    let bar_top = panel.h.saturating_sub(bar_h);
+    let divider_top = bar_top.saturating_sub(divider_h);
+
+    render::shadow(buf, w, h, &panel, s);
+    body(buf, w, &panel, bar_top, panel.h - bar_top);
+
     if panel.h > bar_h {
-        // Inset by the content padding: the hairline separates bar from list
-        // without touching the border ring.
-        let divider_y = bar_h.saturating_sub(divider_h);
-        let (x0, x1) = panel.span(divider_y);
+        // Inset by the content padding: the hairline separates the replies from
+        // the bar without touching the border ring.
+        let (x0, x1) = panel.span(divider_top);
         let mut divider = render::premul(render::BG_PROMPT);
         render::over_pm(&mut divider, render::LABEL_ACCENT, render::DIVIDER_ALPHA);
         let (dx0, dx1) = (x0 + crate::PAD * s, x1.saturating_sub(crate::PAD * s));
-        for rel in divider_y..bar_h {
-            if dx0 < dx1 {
-                render::set_span(buf, w, panel.y + rel, dx0, dx1, divider);
-            }
+        if dx0 < dx1 {
+            render::set_span(buf, w, panel.y + divider_top, dx0, dx1, divider);
         }
     }
 
-    // Transcript: the blocks the viewport shows. A card is filled once, when its
-    // first visible row comes up; every row then draws its own text over it.
+    // Transcript: the blocks the viewport shows, from the panel's top edge down to
+    // the bar. A card is filled once, when its first visible row comes up; every
+    // row then draws its own text over it.
     let blocks = Blocks::new(font);
     let rows = transcript.rows(blocks);
-    let transcript_top = bar_h + divider_h;
     let card = card_color();
-    let clip = (panel.y + transcript_top)..(panel.y + panel.h);
+    let clip = panel.y..(panel.y + divider_top);
     let mut filled: Option<u32> = None;
     for (index, row) in rows
         .iter()
         .enumerate()
         .filter(|(_, row)| viewport.shows(row.y, blocks.row_h))
     {
-        let y = panel.y + transcript_top + row.y;
+        let y = panel.y + row.y;
         if row.kind.is_card() && filled != Some(row.block.0) {
             filled = Some(row.block.0);
             render::rounded_rect(
                 buf,
                 w,
                 panel.x + crate::PAD * s,
-                panel.y + transcript_top + row.block.0,
+                panel.y + row.block.0,
                 panel.w - 2 * crate::PAD * s,
                 row.block.1,
                 render::CORNER_RADIUS * s,
@@ -101,8 +104,8 @@ pub fn draw(
     }
 
     // Scroll position indicator: only while the transcript overflows the viewport.
-    let track_y = panel.y + transcript_top;
-    let track_h = panel.h.saturating_sub(transcript_top);
+    let track_y = panel.y;
+    let track_h = divider_top;
     let total = transcript.total_height();
     if let Some((ty, th)) =
         render::scroll_thumb(track_y, track_h, viewport.height, total, viewport.top)
@@ -144,10 +147,10 @@ fn panel_of(w: u32, h: u32, radius: u32, scale: u32) -> Option<render::Panel> {
     })
 }
 
-/// The translucent body, its antialiased edge and its hairline border. `bar_h`
-/// is the height of the `BG_PROMPT` band at the top; the ball passes its whole
-/// panel height so the body is the prompt tone all the way down.
-fn body(buf: &mut [u8], w: u32, panel: &render::Panel, bar_h: u32) {
+/// The translucent body, its antialiased edge and its hairline border. `band_top`
+/// and `band_h` place the `BG_PROMPT` band: the bar's rows at the bottom of the
+/// panel, or the whole panel for the ball.
+fn body(buf: &mut [u8], w: u32, panel: &render::Panel, band_top: u32, band_h: u32) {
     let (bg_normal, bg_prompt) = (
         render::premul(render::BG_NORMAL),
         render::premul(render::BG_PROMPT),
@@ -156,7 +159,8 @@ fn body(buf: &mut [u8], w: u32, panel: &render::Panel, bar_h: u32) {
         let by = panel.y + rel;
         let inset = render::rounded_inset(panel.w, panel.h, panel.r, rel);
         let (x0, x1) = panel.span(rel);
-        let bg = if rel < bar_h { bg_prompt } else { bg_normal };
+        let in_band = rel >= band_top && rel < band_top + band_h;
+        let bg = if in_band { bg_prompt } else { bg_normal };
         render::set_span(buf, w, by, x0, x1, bg);
         // What is left of the fractional corner inset is the coverage of the
         // pixel just outside the span, which is what antialiases the edge.
@@ -181,7 +185,7 @@ fn body(buf: &mut [u8], w: u32, panel: &render::Panel, bar_h: u32) {
     }
 }
 
-/// Paints the bar alone, at the top of the panel: rail, typed text, caret.
+/// Paints the bar alone, on the panel's bottom row: rail, typed text, caret.
 #[allow(clippy::too_many_arguments)]
 fn draw_bar(
     buf: &mut [u8],
@@ -198,12 +202,15 @@ fn draw_bar(
     s: u32,
 ) {
     let p = crate::PAD * s;
-    let baseline = render::row_baseline(font, panel.y);
+    // The bar is the last row of the panel; the surface hangs from the bottom
+    // edge, so that row keeps one place on screen while replies grow above it.
+    let bar_y = panel.y + panel.h.saturating_sub(row_h);
+    let baseline = render::row_baseline(font, bar_y);
     // `line_h` is already in buffer pixels (the font is derived at `SIZE * scale`);
     // only the padding is a logical constant. Scaling the whole sum again made the
     // rail taller than the row at 2× and the subtraction below panicked.
     let rail_h = font.line_h.ceil() as u32 + 2 * render::PILL_VPAD * s;
-    let rail_y = panel.y + row_h.saturating_sub(rail_h) / 2;
+    let rail_y = bar_y + row_h.saturating_sub(rail_h) / 2;
     render::rect(
         buf,
         w,
@@ -296,9 +303,9 @@ pub fn draw_ball(buf: &mut [u8], w: u32, h: u32, lit: usize, scale: u32) {
     // A radius of half the panel makes the outline a circle; `rounded_span`
     // clamps it to half of whichever side is shorter.
     panel.r = panel.w.min(panel.h);
-    // `bar_h` is the whole height, so the body takes the prompt tone throughout.
+    // The band is the whole panel, so the body takes the prompt tone throughout.
     render::shadow(buf, w, h, &panel, s);
-    body(buf, w, &panel, panel.h);
+    body(buf, w, &panel, 0, panel.h);
     // 4 px squares, 2 px gaps: a 2×2 grid centred in the ball.
     let cell = 4 * s;
     let gap = 2 * s;
@@ -437,7 +444,7 @@ mod tests {
 
     fn scene(font: &PanelFont, w: f32) -> Scene {
         let mut transcript = Transcript::default();
-        transcript.ask("why is the sky blue?", font, w);
+        transcript.ask("why is the sky blue?", font);
         transcript.delta(
             "Rayleigh scattering: shorter wavelengths scatter more, so the sky reads blue.",
             font,
@@ -507,11 +514,11 @@ mod tests {
         assert!(inside_shadow[3] > 0, "the panel casts a shadow");
         assert_eq!(inside_shadow[..3], [0, 0, 0], "shadow is black");
         // ...and the body is the translucent glass, premultiplied.
-        // Below the last block: the panel keeps the body tone to its bottom edge.
+        // Left of the card's inset: the transcript area is the plain body.
         assert_eq!(
-            px(w - crate::PAD - 4, h - 4),
+            &buf[at(bw, crate::PAD - 2, 2)..][..4],
             render::premul(render::BG_NORMAL),
-            "the body below the last block"
+            "the body beside the card"
         );
     }
 
@@ -533,19 +540,23 @@ mod tests {
     }
 
     #[test]
-    fn the_input_bar_is_the_prompt_band_at_the_top() {
+    fn the_input_bar_is_the_prompt_band_at_the_bottom() {
         let f = font();
         let scene = scene(&f, 300.0);
         let (w, h) = (500u32, height_for(4 * f.row_h, &f, 1));
         let (bw, _) = frame(w, h);
         let buf = paint(&scene, false, w, h);
         let px = |x: u32, y: u32| &buf[at(bw, x, y)..][..4];
-        // The bar's band is the first row.
-        assert_eq!(px(w / 2, 2), render::premul(render::BG_PROMPT), "bar band");
+        // The bar's band is the last row of the panel; the replies are above it.
         assert_eq!(
-            px(w / 2, f.row_h + 2),
+            px(w / 2, h - 4),
+            render::premul(render::BG_PROMPT),
+            "bar band at the bottom"
+        );
+        assert_eq!(
+            px(crate::PAD - 2, 2),
             render::premul(render::BG_NORMAL),
-            "transcript below"
+            "the replies above the bar"
         );
     }
 
@@ -557,7 +568,7 @@ mod tests {
         let (bw, _) = frame(w, h);
         let buf = paint(&scene, false, w, h);
         // The rail is the accent colour, just inside PAD, mid-bar on the left.
-        let y = f.row_h / 2;
+        let y = h - f.row_h / 2;
         let rail = &buf[at(bw, crate::PAD + 1, y)..][..4];
         assert_eq!(
             &rail[..3],
@@ -599,7 +610,7 @@ mod tests {
         let text_x = crate::PAD + render::LABEL_RAIL_W + render::PROMPT_GAP as u32;
         let from = text_x + render::measure(&f, "why", f32::MAX).ceil() as u32 + 8;
         let ink = |buf: &[u8]| {
-            let text_rows = 0..f.row_h - render::DIVIDER_H;
+            let text_rows = h - f.row_h..h - render::DIVIDER_H;
             (from..from + 60)
                 .flat_map(|x| text_rows.clone().map(move |y| (x, y)))
                 .filter(|&(x, y)| {
@@ -619,7 +630,7 @@ mod tests {
         let (bw, _) = frame(w, h);
         let buf = paint(&scene, false, w, h);
         let px = |x: u32, y: u32| &buf[at(bw, x, y)..][..4];
-        let y = f.row_h - render::DIVIDER_H;
+        let y = h - f.row_h - render::DIVIDER_H;
         let band = px(w / 2, y - 1);
         let mut expected = render::premul(render::BG_PROMPT);
         render::over_pm(&mut expected, render::LABEL_ACCENT, render::DIVIDER_ALPHA);
@@ -651,7 +662,7 @@ mod tests {
             "",
             1,
         );
-        let y = f.row_h + render::DIVIDER_H + f.row_h / 2;
+        let y = f.row_h / 2;
         let px = |x: u32| &buf[at(bw, x, y)..][..4];
         // The rail is the selection colour, 2 px in the margin left of the text;
         // `rect` composites it over the body, so that is what it must match.
@@ -674,10 +685,10 @@ mod tests {
         }
     }
 
-    /// The answer is drawn inside a card and the question is not: that contrast
-    /// is the whole point of the change.
+    /// The arrangement the redesign is for: the reply in a card above, the bar
+    /// below it on the panel's bottom row, and no question anywhere.
     #[test]
-    fn the_answer_is_a_card_and_the_question_is_not() {
+    fn the_reply_is_a_card_above_the_bar() {
         let f = font();
         let blocks = Blocks::new(&f);
         let scene = scene(&f, 300.0);
@@ -688,41 +699,38 @@ mod tests {
         let px = |x: u32, y: u32| &buf[at(bw, x, y)..][..4];
         let body = render::premul(render::BG_NORMAL);
         let rows = scene.transcript.rows(blocks);
-        let question = rows
-            .iter()
-            .find(|r| r.kind == Kind::Question)
-            .expect("a question");
         let answer = rows
             .iter()
             .find(|r| r.kind == Kind::Answer)
             .expect("an answer");
-        let top = f.row_h + render::DIVIDER_H;
-
-        // The question is a bare row: the panel's body right up to its text.
-        assert_eq!(
-            px(w / 2, top + question.y + f.row_h / 2),
-            body,
-            "no card around the question"
+        assert!(
+            rows.iter().all(|r| r.kind != Kind::Question),
+            "the question is drawn nowhere"
         );
 
-        // The answer's block is a card inset by PAD, its padding filled, and the
-        // gap above it left as body.
-        let card_top = top + answer.block.0;
-        let mid = card_top + answer.block.1 / 2;
+        // The card starts at the panel's top edge, inset by PAD, its padding
+        // filled.
         let card = card_color();
+        let card_top = answer.block.0;
+        let mid = card_top + answer.block.1 / 2;
+        assert_eq!(card_top, 0, "the replies start at the panel's top");
         assert_eq!(px(crate::PAD + 2, mid), card, "the card is filled");
         assert_eq!(px(crate::PAD - 1, mid), body, "inset by PAD");
-        assert_eq!(
-            px(crate::PAD + 2, card_top - 1),
-            body,
-            "one gap above the card"
-        );
         // Its text is inset a further 8 px, so the left column of the card is
         // padding and not glyph.
         assert_eq!(
             px(crate::PAD + 5, card_top + blocks.pad + f.row_h / 2),
             card
         );
+
+        // The bar is the last row, in the prompt band, and no card reaches it.
+        let bar_y = h - f.row_h / 2;
+        assert_eq!(
+            px(w / 2, bar_y - f.row_h / 2 + 1),
+            render::premul(render::BG_PROMPT),
+            "the bar's band"
+        );
+        assert_ne!(px(w / 2, bar_y), card, "nothing draws a card over the bar");
     }
 
     #[test]
