@@ -227,6 +227,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         Some(0),
         false,
         true,
+        "",
         1,
     );
     std::fs::write(path, panel::to_ppm(&buf, w, h)).map_err(|e| format!("{}: {e}", path.display()))
@@ -449,6 +450,15 @@ fn is_closed(kind: std::io::ErrorKind) -> bool {
     )
 }
 
+/// The width text is laid out at, in buffer pixels: the answering panel's, never
+/// the thinking ball's. The ball is `2 × bar` wide and that is not a text width —
+/// laying the transcript out at 12 px and back would re-wrap it twice per send,
+/// and a panel narrower than one CJK character split it mid-byte.
+fn layout_width(scale: u32) -> f32 {
+    let s = scale.max(1);
+    chat::answer_width(WIDTH * s, s)
+}
+
 /// The layer surface carries the panel plus its shadow margin on both sides.
 fn surface_size(panel: (u32, u32)) -> (u32, u32) {
     (panel.0 + 2 * render::SHADOW, panel.1 + 2 * render::SHADOW)
@@ -652,7 +662,7 @@ impl State {
     /// The width text is laid out at, in buffer pixels. The panel's own width,
     /// not the surface's: the shadow margin is not content.
     fn text_width(&self) -> f32 {
-        chat::answer_width(self.width * self.scale, self.scale)
+        layout_width(self.scale)
     }
 
     /// Lay the transcript out again after a width or scale change: once per
@@ -897,6 +907,7 @@ impl State {
                 Some(self.highlight),
                 streaming,
                 true,
+                &self.ime.preedit,
                 self.scale,
             ),
         }
@@ -1040,6 +1051,9 @@ impl State {
 
     /// What the compositor's text-input events mean for the input line.
     fn on_text_input(&mut self, event: TextInputEvent) {
+        // The bar draws the pre-edit, so any change to it is a change on screen:
+        // it appearing, growing, or being cancelled by `Esc` in the input method.
+        let composed = self.ime.preedit.clone();
         match self.ime.handle(event) {
             ime::Action::Commit(text) => {
                 // The question is already sent while the ball spins.
@@ -1061,6 +1075,9 @@ impl State {
                 }
                 self.dirty = true;
             }
+        }
+        if self.ime.preedit != composed {
+            self.dirty = true;
         }
     }
 }
@@ -1479,6 +1496,36 @@ mod tests {
         assert_eq!(size_for(Phase::Answering, 0, Some(1080)).1, bar + 1);
         // A tiny output cannot make the panel taller than its bar or negative.
         assert_eq!(size_for(Phase::Answering, 10 * bar, Some(40)).1, bar);
+    }
+
+    #[test]
+    fn the_text_is_laid_out_at_the_answering_width_in_every_phase() {
+        let inner = 2 * (crate::PAD + 8);
+        assert_eq!(layout_width(1), (WIDTH - inner) as f32);
+        assert_eq!(layout_width(2), ((WIDTH * 2 - 2 * inner) as f32));
+        // The ball is 60 px wide at 1x; no text may be laid out at that width.
+        assert!(layout_width(1) > (2 * panel::bar_height()) as f32);
+    }
+
+    /// The sequence that crashed with fcitx: sending enters the thinking ball,
+    /// and the ball's 60 px panel used to become the text width - 12 px, narrower
+    /// than a single CJK character, so the re-wrap split one mid-byte and panicked.
+    #[test]
+    fn a_sent_chinese_question_survives_the_thinking_ball() {
+        let f = PanelFont::load(font::SIZE).expect("system font available");
+        let w = layout_width(1);
+        let mut t = Transcript::default();
+        t.ask("\u{4ec0}\u{4e48}\u{662f} EAGAIN", &f, w);
+        t.rewrap(&f, w);
+        assert!(t.total_rows() >= 1, "the question laid out");
+        t.delta(
+            "\u{5b83}\u{8868}\u{793a}\u{8d44}\u{6e90}\u{6682}\u{65f6}\u{4e0d}\u{53ef}\u{7528}\u{ff0c}\u{7a0d}\u{540e}\u{91cd}\u{8bd5}\u{5373}\u{53ef}\u{3002}",
+            &f,
+            w,
+        );
+        t.finish_answer(&f);
+        assert_eq!(t.request_turns()[0].text, "\u{4ec0}\u{4e48}\u{662f} EAGAIN");
+        assert!(t.total_rows() > 1, "the answer wrapped into rows");
     }
 
     #[test]

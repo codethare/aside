@@ -28,6 +28,7 @@ pub fn draw(
     highlight: Option<usize>,
     streaming: bool,
     caret_visible: bool,
+    preedit: &str,
     scale: u32,
 ) {
     let s = scale.max(1);
@@ -121,6 +122,7 @@ pub fn draw(
         bar_h,
         streaming,
         caret_visible,
+        preedit,
         aa,
         s,
     );
@@ -191,6 +193,7 @@ fn draw_bar(
     row_h: u32,
     streaming: bool,
     caret_visible: bool,
+    preedit: &str,
     aa: Subpixel,
     s: u32,
 ) {
@@ -215,7 +218,7 @@ fn draw_bar(
     let text_x = (panel.x + p) as f32 + (render::LABEL_RAIL_W * s) as f32 + gap;
     let limit = (panel.x + panel.w) as f32 - p as f32 - text_x;
     let typed = input.text();
-    let end = render::draw_text(
+    let mut end = render::draw_text(
         buf,
         w,
         h,
@@ -227,12 +230,46 @@ fn draw_bar(
         limit.max(0.0),
         aa,
     );
+    // A composition in flight is not committed text: it is drawn where it will
+    // land, underlined, so the line shows what the input method still owns. With
+    // no pre-edit the bar is exactly what it was.
+    if !preedit.is_empty() {
+        let end_x = render::draw_text(
+            buf,
+            w,
+            h,
+            font,
+            end,
+            baseline,
+            preedit,
+            render::FG_PROMPT,
+            (text_x + limit.max(0.0) - end).max(0.0),
+            aa,
+        );
+        let underline = (baseline - font.descent_px).round().max(0.0) as u32;
+        render::rect(
+            buf,
+            w,
+            h,
+            end as u32,
+            underline,
+            (end_x - end).max(1.0) as u32,
+            s,
+            render::FG_PROMPT,
+        );
+        end = end_x;
+    }
     let caret_w = 2 * s;
     let caret_bottom = (baseline - font.descent_px).round().max(0.0) as u32;
     let caret_h = font.line_h.ceil() as u32;
     if caret_visible && caret_bottom > 0 {
         let caret_top = caret_bottom.saturating_sub(caret_h);
-        let caret_x = if typed.is_empty() { text_x } else { end } as u32 + s;
+        let caret_x = if typed.is_empty() && preedit.is_empty() {
+            text_x
+        } else {
+            end
+        } as u32
+            + s;
         let right = (panel.x + panel.w).saturating_sub(caret_w);
         render::rect(
             buf,
@@ -448,6 +485,7 @@ mod tests {
             None,
             streaming,
             true,
+            "",
             1,
         );
         buf
@@ -528,6 +566,51 @@ mod tests {
         );
     }
 
+    /// Composing with an input method has to be visible: the pre-edit is what
+    /// tells the user their keystrokes went somewhere, before anything commits.
+    #[test]
+    fn a_pre_edit_is_drawn_after_the_typed_text() {
+        let f = font();
+        let mut scene = scene(&f, 300.0);
+        scene.input.insert("why");
+        let (w, h) = (500u32, height_for(4 * f.row_h, &f, 1));
+        let (bw, bh) = frame(w, h);
+        let paint_with = |preedit: &str| {
+            let mut buf = vec![0u8; (bw * bh * 4) as usize];
+            draw(
+                &mut buf,
+                bw,
+                bh,
+                &f,
+                &scene.transcript,
+                &scene.input,
+                &scene.viewport,
+                None,
+                false,
+                true,
+                preedit,
+                1,
+            );
+            buf
+        };
+        let bare = paint_with("");
+        let composing = paint_with("zhong");
+        // Right of the typed text the bar is empty until the input method speaks.
+        let text_x = crate::PAD + render::LABEL_RAIL_W + render::PROMPT_GAP as u32;
+        let from = text_x + render::measure(&f, "why", f32::MAX).ceil() as u32 + 8;
+        let ink = |buf: &[u8]| {
+            let text_rows = 0..f.row_h - render::DIVIDER_H;
+            (from..from + 60)
+                .flat_map(|x| text_rows.clone().map(move |y| (x, y)))
+                .filter(|&(x, y)| {
+                    buf[at(bw, x, y)..][..4][..3] != render::premul(render::BG_PROMPT)[..3]
+                })
+                .count()
+        };
+        assert_eq!(ink(&bare), 0, "nothing is drawn after the typed text");
+        assert!(ink(&composing) > 0, "the composition is visible");
+    }
+
     #[test]
     fn the_divider_is_inset_by_the_padding() {
         let f = font();
@@ -565,6 +648,7 @@ mod tests {
             Some(0),
             false,
             true,
+            "",
             1,
         );
         let y = f.row_h + render::DIVIDER_H + f.row_h / 2;
@@ -722,6 +806,7 @@ mod tests {
                 None,
                 false,
                 true,
+                "",
                 scale,
             );
             assert!(
@@ -800,6 +885,7 @@ mod tests {
             None,
             false,
             true,
+            "",
             1,
         );
         assert!(buf.as_chunks::<4>().0.iter().any(|p| p[3] > 0));

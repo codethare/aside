@@ -143,10 +143,17 @@ fn break_tail(s: &str, font: &PanelFont, max_w: f32) -> Option<usize> {
     while let Some((i, c)) = chars.next() {
         let adv = char_advance(font, c);
         if width + adv > max_w {
-            // This character would overflow. Break at the last opportunity; if
-            // there was none, break here so an over-wide character (or a very
-            // narrow panel) still makes progress.
-            return Some(last.unwrap_or(i).max(1).min(s.len()));
+            // This character would overflow. Break at the last opportunity; with
+            // none, cut before this character — and when it is the first one and
+            // does not fit at all, take it whole, so a panel narrower than one
+            // glyph still makes progress. Every arm is a character boundary, or
+            // `split_off` panics on the byte it lands inside.
+            let at = match last {
+                Some(at) => at,
+                None if i > 0 => i,
+                None => s.chars().next().map_or(0, char::len_utf8),
+            };
+            return Some(at.min(s.len()));
         }
         width += adv;
         let next = chars.peek().map(|(_, c)| *c);
@@ -416,6 +423,18 @@ mod tests {
         }
         incremental.finish();
         assert_eq!(incremental.rows(), once.rows());
+    }
+
+    #[test]
+    fn a_character_wider_than_the_panel_breaks_on_a_boundary() {
+        let f = font();
+        // A CJK character is about 20 px wide, so a 12 px panel cannot hold one.
+        // The thinking ball is 60 px wide and its text width used to be 12 px:
+        // the fallback break then split the character at byte 1 and panicked.
+        for text in ["\u{4e2d}", "\u{4e2d}\u{6587}\u{5b57}", "a\u{4e2d}"] {
+            let lines = Lines::wrap(text, &f, 12.0);
+            assert_eq!(lines.rows().concat(), text, "no character may be lost");
+        }
     }
 
     #[test]
