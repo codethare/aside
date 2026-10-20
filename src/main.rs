@@ -56,6 +56,9 @@ const WIDTH: u32 = 640;
 /// Gap between the top edge and the panel, and the room kept below it.
 const TOP_MARGIN: i32 = 32;
 const BOTTOM_ROOM: i32 = 32;
+// The shadow margin hangs into the screen edge, so the surface margin is the
+// panel's visible gap minus that margin.
+const _: () = assert!(TOP_MARGIN >= render::SHADOW as i32);
 /// Output height assumed for the height cap until the real one is known.
 const FALLBACK_OUTPUT_H: u32 = 1080;
 const APP_ID: &str = "aside";
@@ -184,8 +187,9 @@ fn main() {
 /// how the look is checked on a machine with no compositor.
 fn preview(path: &std::path::Path) -> Result<(), String> {
     let font = PanelFont::load(font::SIZE).map_err(|e| format!("no usable font: {e}"))?;
-    let (w, h) = (WIDTH, panel::height_for_rows(12, &font, 1));
-    let max_w = chat::answer_width(w, 1);
+    let (pw, ph) = (WIDTH, panel::height_for_rows(12, &font, 1));
+    let (w, h) = surface_size((pw, ph));
+    let max_w = chat::answer_width(pw, 1);
     let mut transcript = Transcript::default();
     transcript.ask(
         "what does EAGAIN mean when a socket read returns it?",
@@ -206,7 +210,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
     transcript.fail("the provider refused the request (401)", &font, max_w);
     let mut input = Input::default();
     input.insert("next question 下一个问题");
-    let viewport = Viewport::new(panel::visible_rows(h, &font, 1));
+    let viewport = Viewport::new(panel::visible_rows(ph, &font, 1));
     let mut buf = vec![0u8; (w * h * 4) as usize];
     panel::draw(
         &mut buf,
@@ -266,13 +270,15 @@ fn run(
     surface.set_buffer_scale(1);
     let layer = shell.create_layer_surface(&qh, surface, Layer::Overlay, Some(APP_ID), None);
     layer.set_anchor(Anchor::TOP);
-    layer.set_margin(TOP_MARGIN, 0, 0, 0);
+    layer.set_margin(shadow_margin(), 0, 0, 0);
     layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
     // Collapsed to the bar. The first commit is buffer-less: it asks for the
     // configure, and nothing may be attached before that one arrives.
-    layer.set_size(WIDTH, panel::bar_height());
+    let (sw, sh) = surface_size((WIDTH, panel::bar_height()));
+    layer.set_size(sw, sh);
     layer.commit();
-    let pool = SlotPool::new((WIDTH * FALLBACK_OUTPUT_H * 4) as usize, &shm)
+    let pool_size = surface_size((WIDTH, FALLBACK_OUTPUT_H));
+    let pool = SlotPool::new((pool_size.0 * pool_size.1 * 4) as usize, &shm)
         .map_err(|e| format!("cannot create the shm pool: {e}"))?;
 
     let mut state = State {
@@ -439,10 +445,29 @@ fn is_closed(kind: std::io::ErrorKind) -> bool {
     )
 }
 
+/// The layer surface carries the panel plus its shadow margin on both sides.
+fn surface_size(panel: (u32, u32)) -> (u32, u32) {
+    (panel.0 + 2 * render::SHADOW, panel.1 + 2 * render::SHADOW)
+}
+
+/// The top margin leaves the panel `TOP_MARGIN` below the screen edge: the
+/// shadow margin already occupies part of that gap.
+const fn shadow_margin() -> i32 {
+    TOP_MARGIN - render::SHADOW as i32
+}
+
+/// Horizontal margin that centres the surface on the output.
+fn left_margin(output_w: Option<u32>, surface_w: u32) -> i32 {
+    output_w
+        .map(|ow| ((ow as i64 - surface_w as i64) / 2).max(0) as i32)
+        .unwrap_or(0)
+}
+
 /// The logical size a phase wants: idle is the bar, thinking is a ball twice the
 /// bar tall, answering is the bar plus a row per transcript row, capped so the
-/// panel never leaves the output. Pure, so the spec's numbers are testable
-/// without a surface.
+/// panel never leaves the output. These are the panel's sizes; `surface_size`
+/// adds the shadow margin. Pure, so the spec's numbers are testable without a
+/// surface.
 fn size_for(phase: Phase, rows: usize, output_h: Option<u32>) -> (u32, u32) {
     let bar = panel::bar_height();
     match phase {
@@ -546,12 +571,10 @@ impl State {
     /// re-wrap once if the width changed.
     fn apply_size(&mut self) {
         let (w, h) = self.target_size();
-        let left = self
-            .output_w
-            .map(|ow| ((ow as i64 - w as i64) / 2).max(0) as i32)
-            .unwrap_or(0);
-        self.layer.set_margin(TOP_MARGIN, 0, 0, left);
-        self.layer.set_size(w, h);
+        let (sw, sh) = surface_size((w, h));
+        self.layer
+            .set_margin(shadow_margin(), 0, 0, left_margin(self.output_w, sw));
+        self.layer.set_size(sw, sh);
         let width_changed = w != self.width;
         if width_changed || h != self.height {
             self.width = w;
@@ -595,7 +618,11 @@ impl State {
         let font = load
             .join()
             .map_err(|_| "the font thread died".to_string())??;
-        self.viewport = Viewport::new(panel::visible_rows(self.buffer_height(), &font, self.scale));
+        self.viewport = Viewport::new(panel::visible_rows(
+            self.height * self.scale,
+            &font,
+            self.scale,
+        ));
         self.font = Some(font);
         self.rewrap();
         self.dirty = true;
@@ -603,16 +630,18 @@ impl State {
     }
 
     fn buffer_height(&self) -> u32 {
-        self.height * self.scale
+        // The surface carries the shadow margin: the panel is inside it.
+        surface_size((self.width, self.height)).1 * self.scale
     }
 
     fn buffer_width(&self) -> u32 {
-        self.width * self.scale
+        surface_size((self.width, self.height)).0 * self.scale
     }
 
-    /// The width text is laid out at, in buffer pixels.
+    /// The width text is laid out at, in buffer pixels. The panel's own width,
+    /// not the surface's: the shadow margin is not content.
     fn text_width(&self) -> f32 {
-        chat::answer_width(self.buffer_width(), self.scale)
+        chat::answer_width(self.width * self.scale, self.scale)
     }
 
     /// Lay the transcript out again after a width or scale change: once per
@@ -947,12 +976,14 @@ impl State {
         let s = self.scale;
         let before = self.input.text();
         let max_w = self.text_width();
-        let x = (PAD * s + render::LABEL_RAIL_W * s) as f32
+        let mo = render::SHADOW * s;
+        let x = (mo + PAD * s + render::LABEL_RAIL_W * s) as f32
             + render::PROMPT_GAP * s as f32
             + render::measure(font, before, max_w);
         // Both offsets are byte offsets into the surrounding text.
         let caret = self.input.caret() as i32;
-        let bar_top = self.buffer_height().saturating_sub(font.row_h);
+        // The bar is the first row, inside the shadow margin.
+        let bar_top = mo;
         text_input.set_surrounding_text(before.to_string(), caret, caret);
         text_input.set_cursor_rectangle(
             x as i32,
@@ -1026,7 +1057,7 @@ impl CompositorHandler for State {
             self.font = Some(font);
         }
         let max_w = self.text_width();
-        let buffer_h = self.buffer_height();
+        let buffer_h = self.height * self.scale;
         let State {
             transcript,
             font,
@@ -1386,9 +1417,9 @@ mod tests {
     #[test]
     fn the_three_states_have_the_spec_s_sizes() {
         let bar = panel::bar_height();
-        assert_eq!(bar, 24, "row_h_for(16) is 24 at 1x");
+        assert_eq!(bar, 30, "row_h_for(20) is 30 at 1x");
         assert_eq!(size_for(Phase::Idle, 0, Some(1080)), (640, bar));
-        assert_eq!(size_for(Phase::Thinking, 0, Some(1080)), (48, 48));
+        assert_eq!(size_for(Phase::Thinking, 0, Some(1080)), (60, 60));
         // Answering: bar + divider + one row per transcript row.
         assert_eq!(
             size_for(Phase::Answering, 4, Some(1080)),

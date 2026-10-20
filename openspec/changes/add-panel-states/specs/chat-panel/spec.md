@@ -14,29 +14,32 @@ The panel SHALL be a `wlr-layer-shell` surface on the overlay layer, anchored to
 the top edge with a 32 px margin, horizontally centred on its output, with
 exclusive keyboard interactivity. It SHALL have exactly three states:
 
-| State | Size (logical px, 1×) | Content |
+| State | Panel size (logical px, 1×) | Content |
 |---|---|---|
-| idle | 640 × 24 | the input bar alone |
-| thinking | 48 × 48 | a filled circle with four blinking squares |
+| idle | 640 × 30 | the input bar alone |
+| thinking | 60 × 60 | a filled circle with four blinking squares |
 | answering | 640 × (24 + 1 + rows × row_h), capped | the bar on top, the transcript below it |
 
-`row_h` is `row_h_for(16)` (24 at 1×) and `rows × row_h` is the transcript's own
-height. A size change SHALL be committed before the frame that uses it.
+`row_h` is `row_h_for(20)` (30 at 1×) and `rows × row_h` is the transcript's own
+height. A size change SHALL be committed before the frame that uses it. These are
+the panel's sizes: the surface carries the frame margin below, so its size is
+`panel + 2 × 24` on each axis and its top margin is 8 px — the panel keeps a
+32 px visible gap to the screen edge.
 
 #### Scenario: Summoned idle
 
 - **WHEN** the panel opens with nothing asked
-- **THEN** only the bar is on screen: 640 wide, one row tall, no transcript area
+- **THEN** only the bar is on screen: a 640 × 30 panel, no transcript area, inside a 688 × 78 surface
 
 #### Scenario: Enter starts the ball
 
 - **WHEN** the user presses `Enter` with a non-empty input
-- **THEN** the request starts and the surface becomes a 48 × 48 square centred on the bar, painting a circle
+- **THEN** the request starts and the panel becomes a 60 × 60 square centred on the bar, painting a circle
 
 #### Scenario: The first delta expands the panel
 
 - **WHEN** the answer's first text arrives
-- **THEN** the surface returns to 640 wide, keeps the bar as its top row, and grows by one row per transcript row
+- **THEN** the panel returns to 640 wide, keeps the bar as its top row, and grows by one row per transcript row
 
 #### Scenario: Typing during the ball is ignored
 
@@ -45,8 +48,8 @@ height. A size change SHALL be committed before the frame that uses it.
 
 ### Requirement: The bar matches wlmenu's bar
 
-The bar SHALL use `wlmenu`'s metrics unchanged: width 640, text size 16 px,
-row height `row_h_for(16)`, `PAD` 16, corner radius 12, an 8 px gap after a 4 px
+The bar SHALL use `wlmenu`'s metrics unchanged: width 640, text size 20 px,
+row height `row_h_for(20)`, `PAD` 16, corner radius 12, an 8 px gap after a 4 px
 `LABEL_ACCENT` rail, and a 1 px divider at 25 % alpha separating it from the
 transcript. The bar SHALL be the top row of the surface, with the transcript
 below it, because the surface grows downwards from a top anchor.
@@ -55,6 +58,27 @@ below it, because the surface grows downwards from a top anchor.
 
 - **WHEN** the idle panel and `wlmenu`'s bar are compared at the same scale
 - **THEN** their widths, heights, padding, radius, rail and divider are identical
+
+### Requirement: The frame matches wlmenu's frame
+
+Outside the bar, the panel SHALL be drawn exactly as `wlmenu` draws its panel: a
+premultiplied translucent body (`BG_NORMAL` at 83 % alpha, `BG_PROMPT` at 86 %),
+a 24 px shadow margin around it holding both drop-shadow layers, a one-pixel
+hairline border lit at the top and dark underneath, antialiased corners, the
+divider inset by `PAD`, the selection band inset one pixel inside the border,
+and a 3 px `LABEL_ACCENT` scroll indicator at the right edge while the
+transcript overflows the viewport. The thinking ball SHALL use the same body,
+border and shadow inside its circle.
+
+#### Scenario: One panel, two products
+
+- **WHEN** a screenshot of `aside`'s answering panel and one of `wlmenu` are laid side by side
+- **THEN** their shadow falloff, body translucency, border, corner shape, divider inset and selection inset agree
+
+#### Scenario: A long transcript scrolls with an indicator
+
+- **WHEN** the transcript has more rows than the capped panel shows
+- **THEN** a 3 px `LABEL_ACCENT` thumb sits at the right edge, its length in proportion to the visible rows
 
 ### Requirement: The thinking ball blinks without moving
 
@@ -77,9 +101,10 @@ ball's geometry SHALL NOT change while it is displayed.
 ### Requirement: The answer's height is capped by the output
 
 The surface height in the answering state SHALL NOT exceed
-`output_height − 32 (top margin) − 32 (bottom breathing room)`. When the
-transcript needs more, the panel SHALL stay at the cap and scroll inside it,
-keeping the existing highlight and `PageUp`/`PageDown`/`Alt+C` behaviour.
+`output_height − 32 (top margin) − 32 (bottom breathing room)` for the panel
+itself; the shadow margin hangs inside that gap. When the transcript needs more,
+the panel SHALL stay at the cap and scroll inside it, keeping the existing
+highlight and `PageUp`/`PageDown`/`Alt+C` behaviour.
 
 #### Scenario: A long answer hits the cap and scrolls
 

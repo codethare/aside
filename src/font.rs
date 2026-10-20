@@ -36,8 +36,9 @@ pub type GlyphKey = (u8, u16, u8, u8, u8);
 pub type GlyphLookup = (usize, GlyphId, f32);
 
 /// Pixel size of the panel's text: `wlmenu`'s bar size, so the two read as one
-/// product.
-pub const SIZE: f32 = 16.0;
+/// product. 15 pt at 96 dpi; `row_h_for` keeps the 1.5× line height and `PAD`
+/// stays 0.8 em, so the proportions follow from it.
+pub const SIZE: f32 = 20.0;
 
 /// Cap on the character lookup memo. Its keys come from the provider's text, so
 /// a long session of answers full of distinct characters must not grow it with

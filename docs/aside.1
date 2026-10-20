@@ -23,10 +23,14 @@ text: there is no Markdown, code-block or table rendering.
 The panel is a
 .B wlr\-layer\-shell
 surface on the overlay layer, anchored to the top of the output 32 pixels down
-and centred: a 640-pixel bar, one row tall, with the transcript below it.  While
-a request is out the surface is a 48-pixel square showing four blinking squares.
-The expanded panel never exceeds the output height less 64 pixels, and scrolls
-inside that limit.
+and centred: a 640-pixel panel, one row tall, with the transcript below it.
+The frame is the same one
+.BR wlmenu (1)
+draws: a translucent body with a hairline border inside a 24-pixel drop shadow,
+and a 3-pixel scroll indicator at the right edge while the transcript overflows.
+While a request is out the panel is a 60-pixel square showing four blinking
+squares.  The expanded panel never exceeds the output height less 64 pixels, and
+scrolls inside that limit.
 .PP
 The provider request is made by one
 .BR curl (1)

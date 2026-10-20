@@ -41,18 +41,22 @@ is checked on a machine with no compositor.
 ## What it looks like
 
 A `wlr-layer-shell` surface on the overlay layer, anchored to the top of the
-output, 32 px down and centred: the same bar `wlmenu` draws, 640 px wide and one
-row tall (24 px at 16 px text), with the transcript below it. It has three states:
+output, 32 px down and centred: the same panel `wlmenu` draws, 640 px wide and one
+row tall (30 px at 20 px text), with the transcript below it. The frame is
+`wlmenu`'s too: a 24 px drop shadow, a premultiplied translucent body, a hairline
+border and antialiased corners. It has three states:
 
-| State | Size | What is drawn |
+| State | Panel size | What is drawn |
 |---|---|---|
-| idle | 640 × 24 | the bar alone |
-| thinking | 48 × 48 | a circle with four squares, one lit every 200 ms |
+| idle | 640 × 30 | the bar alone |
+| thinking | 60 × 60 | a circle with four squares, one lit every 200 ms |
 | answering | 640 × (bar + rows) | the bar on top, the transcript below |
 
+The sizes are the panel's own; the layer surface adds the shadow margin on every
+side and sits 8 px from the screen edge, so the panel's visible gap stays 32 px.
 The answering panel never grows past the output height minus 64 px (the margin
-above and the breathing room below); a longer answer scrolls inside it. States
-snap: there is no height tween.
+above and the breathing room below); a longer answer scrolls inside it and shows
+a 3 px scroll indicator on the right edge. States snap: there is no height tween.
 
 ## Keys
 

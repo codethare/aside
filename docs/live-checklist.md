@@ -51,8 +51,9 @@ bind=SUPER,A   # substitute your compositor's binding syntax
     should be well under 50 ms after the compositor has the surface.
 15. Put a `wlmenu` frame next to an `aside --preview out.ppm` frame and check the
     shared tokens against each other: radius, padding, rail width, gap, divider,
-    row height, and the four colours. This is the side-by-side check the design
-    asks for, and it needs a real `wlmenu` frame from your session.
+    row height, the four colours, the shadow falloff, body translucency, the
+    hairline border and the corner antialiasing. This is the side-by-side check
+    the design asks for, and it needs a real `wlmenu` frame from your session.
 14. Scroll back while an answer is streaming: the view stays where it was put.
 
 ## Failure paths (optional, each costs one request)

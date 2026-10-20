@@ -23,11 +23,12 @@ change.
    `argv`. See `specs/chat-sandbox`.
 3. **Keyboard first.** One meaning per key; every action reachable without a
    pointer. The key table in `specs/chat-panel` is the contract.
-4. **The UI is `wlmenu`'s UI.** Tokens are copied exactly: radius 12, `PAD` 16,
-   4 px rail, 8 px gap, 2 px pill, 1 px divider, the colour constants in
-   `render.rs`. Row height stays `size + 2 * round(size * 0.25)`. The panel is a
-   top-anchored `wlr-layer-shell` surface in three states — bar, ball, transcript
-   — and the bar is the top row, not the bottom.
+4. **The UI is `wlmenu`'s UI.** Tokens and frame are copied exactly: radius 12,
+   `PAD` 16, 4 px rail, 8 px gap, 2 px pill, 1 px divider, the 24 px shadow
+   margin, the premultiplied translucent bodies and hairline in `render.rs`, and
+   the 3 px scroll indicator. Row height stays `size + 2 * round(size * 0.25)`.
+   The panel is a top-anchored `wlr-layer-shell` surface in three states — bar,
+   ball, transcript — and the bar is the top row, not the bottom.
 5. **Frame cost is per visible row**, never per transcript row. Wrapping happens
    once per delta and once per resize; re-wrapping on every frame is a bug.
 6. **Zero dependencies beyond the six in `Cargo.toml`.** Ask before adding one;

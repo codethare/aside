@@ -14,11 +14,31 @@ pub const fn bgra(r: u8, g: u8, b: u8, a: u8) -> Bgra {
 /// Spotlight panel corner radius (logical px), clamped to half the panel size.
 pub const CORNER_RADIUS: u32 = 12;
 
+/// Space reserved around the panel for its drop shadow (logical px). The buffer
+/// and the layer surface grow by it; the panel keeps its size and position.
+pub const SHADOW: u32 = 24;
+
+/// Shadow layers as (blur radius, alpha at the panel edge, vertical offset),
+/// logical px and 0-255. A tight contact shadow under a wide ambient one; the
+/// offset is positive because the light comes from above.
+const SHADOW_TIGHT: (u32, u32, u32) = (7, 170, 2);
+const SHADOW_WIDE: (u32, u32, u32) = (17, 130, 6);
+// The margin must fit the widest layer, or its falloff is cut off at the buffer edge.
+const _: () = assert!(SHADOW >= SHADOW_WIDE.0 + SHADOW_WIDE.2);
+
+/// Hairline on the panel's outermost pixel — the seam between the translucent
+/// body and the shadow. Lit along the top, dark underneath, like window chrome.
+pub(crate) const BORDER_LIGHT_ALPHA: u32 = 34;
+pub(crate) const BORDER_DARK_ALPHA: u32 = 60;
+
 // Eye-comfort rules, checked at compile time (clippy: assertions on constants
 // belong here): the content inset must clear the corner radius so text never
 // grazes the curve, and the panel must float off the screen edge rather than
 // hug it.
 const _: () = assert!(crate::PAD >= CORNER_RADIUS);
+
+/// Fully transparent pixel: what the shadow margin holds every frame.
+const CLEAR: Bgra = [0, 0, 0, 0];
 
 /// Fixed gap between the prompt label and the typed input (8px grid).
 pub(crate) const PROMPT_GAP: f32 = 8.0;
@@ -32,11 +52,13 @@ pub(crate) const LABEL_RAIL_W: u32 = 4;
 pub(crate) const DIVIDER_H: u32 = 1;
 pub(crate) const DIVIDER_ALPHA: u32 = 64;
 
-pub const BG_NORMAL: Bgra = bgra(0x22, 0x22, 0x22, 0xff);
+/// Translucent glass body: the alpha is what the compositor blends with the
+/// wallpaper, so the buffer is premultiplied (`panel::draw` does that).
+pub const BG_NORMAL: Bgra = bgra(0x1e, 0x1e, 0x1e, 0xd4);
 pub const FG_NORMAL: Bgra = bgra(0xbb, 0xbb, 0xbb, 0xff);
 /// Input bar: a subtly lighter tone than the list, so bar and list read as
 /// separate pieces of one panel.
-pub const BG_PROMPT: Bgra = bgra(0x2e, 0x2e, 0x2e, 0xff);
+pub const BG_PROMPT: Bgra = bgra(0x2c, 0x2c, 0x2c, 0xdc);
 pub const FG_PROMPT: Bgra = bgra(0xee, 0xee, 0xee, 0xff);
 /// Prompt label accent: a 4px rail on the input bar's left edge (option F); a
 /// deep slate blue that carries the emphasis while staying harmonious with the
@@ -45,7 +67,7 @@ pub const LABEL_ACCENT: Bgra = bgra(0x2e, 0x4a, 0x5c, 0xff);
 /// Selected row. The background is darker than the old `0f7ca6` so white text
 /// clears WCAG AA: `#ffffff` on `#0b6285` is 6.77:1 (the previous pair was
 /// 4.06:1 — the weakest contrast in the whole UI, on the row that matters most).
-pub const BG_SEL: Bgra = bgra(0x0b, 0x62, 0x85, 0xff);
+pub const BG_SEL: Bgra = bgra(0x0b, 0x62, 0x85, 0xee);
 pub const FG_SEL: Bgra = bgra(0xff, 0xff, 0xff, 0xff);
 
 /// Horizontal pixel span `[x0, x1)` of the rounded panel at row `y`
@@ -68,6 +90,229 @@ pub fn rounded_span(w: u32, h: u32, r: u32, y: u32) -> (u32, u32) {
     (inset.min(w), w.saturating_sub(inset))
 }
 
+/// Fractional horizontal inset of the rounded outline at row `y`. Rounding it
+/// up gives the whole-pixel span; the fraction left over is the coverage of the
+/// pixel just outside that span, which is what antialiases the edge.
+pub(crate) fn rounded_inset(w: u32, h: u32, r: u32, y: u32) -> f64 {
+    let r = r.min(w / 2).min(h / 2);
+    if r == 0 || y >= h {
+        return 0.0;
+    }
+    let rr = (r * r) as f64;
+    let py = y as f64 + 0.5;
+    let top = r as f64;
+    let bottom = h as f64 - r as f64;
+    if py >= top && py <= bottom {
+        return 0.0;
+    }
+    let dy = if py < top { top - py } else { py - bottom };
+    r as f64 - (rr - dy * dy).max(0.0).sqrt()
+}
+
+/// The panel inside the shadow margin: origin and size in buffer px, plus the
+/// rounded outline that the body, its antialiased edge, the hairline and the
+/// shadow are all derived from. One outline for all four is what keeps the
+/// border and the shadow from leaving a seam between them.
+#[derive(Clone, Copy)]
+pub(crate) struct Panel {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub r: u32,
+}
+
+impl Panel {
+    /// Whole-pixel span `[x0, x1)` of panel-relative row `rel` in buffer coords.
+    pub(crate) fn span(&self, rel: u32) -> (u32, u32) {
+        let (x0, x1) = rounded_span(self.w, self.h, self.r, rel);
+        (self.x + x0, self.x + x1)
+    }
+}
+
+/// Premultiply a straight colour: wl_shm ARGB8888 is premultiplied, so a
+/// translucent body has to be written as `rgb * a`, not as `rgb` next to an
+/// alpha byte (the compositor would blend a too-bright panel).
+pub(crate) fn premul(c: Bgra) -> Bgra {
+    let a = c[3] as u32;
+    [
+        (c[0] as u32 * a / 255) as u8,
+        (c[1] as u32 * a / 255) as u8,
+        (c[2] as u32 * a / 255) as u8,
+        c[3],
+    ]
+}
+
+/// Composite an already premultiplied source over a premultiplied destination
+/// with `cov` (0-255) attenuating it — edge coverage, or a border layer.
+#[inline]
+pub(crate) fn over_pm(dst: &mut [u8], src: Bgra, cov: u32) {
+    let sa = src[3] as u32 * cov / 255;
+    let inv = 255 - sa;
+    for c in 0..3 {
+        dst[c] = ((src[c] as u32 * cov / 255) + dst[c] as u32 * inv / 255) as u8;
+    }
+    dst[3] = (sa + dst[3] as u32 * inv / 255) as u8;
+}
+
+pub(crate) fn set_span(buf: &mut [u8], w: u32, y: u32, x0: u32, x1: u32, color: Bgra) {
+    let row = &mut buf[(y * w + x0) as usize * 4..(y * w + x1) as usize * 4];
+    for px in row.as_chunks_mut::<4>().0 {
+        *px = color;
+    }
+}
+
+/// Both drop-shadow layers in one pass. They share the panel outline, so each
+/// pixel gets its alpha from both LUTs and is written once: no read-modify-write
+/// between layers, and the band needs no clear (which is why the frame does not
+/// start with a full-buffer memset).
+pub(crate) fn shadow(buf: &mut [u8], w: u32, h: u32, panel: &Panel, scale: u32) {
+    // (blur, vertical offset, alpha by squared distance)
+    let s = scale.max(1);
+    let layers: [(u32, i64, Vec<u32>); 2] =
+        [SHADOW_WIDE, SHADOW_TIGHT].map(|(blur, a0, offset)| {
+            let b = (blur * s).max(1);
+            let offset = (offset * s) as i64;
+            let lut = (0..=b * b)
+                .map(|d2| {
+                    // A blurred edge starts at half the peak and eases out: a ramp
+                    // from the full value leaves a visible cusp where it begins.
+                    let t = (d2 as f64).sqrt() / b as f64;
+                    (a0 as f64 * 0.5 * (1.0 + (std::f64::consts::PI * t).cos())).round() as u32
+                })
+                .collect();
+            (b, offset, lut)
+        });
+    let reach = layers.iter().map(|l| l.0).max().unwrap_or(1);
+    // Alpha by horizontal distance, rebuilt per row: the two LUTs are combined
+    // once per column distance instead of once per shadow pixel.
+    let mut band = vec![0u8; reach as usize + 1];
+    // Rows inside the panel all share dv = 0, so the band is usually built once.
+    let mut cached = [u32::MAX; 2];
+    for by in 0..h {
+        let y = by as i64;
+        // Per layer: squared row distance from the shifted body, clamped to the
+        // layer's blur (the offset is what hangs the shadow below the panel).
+        let dv: [u32; 2] = [0, 1].map(|k| {
+            let (b, offset, _) = &layers[k];
+            let top = panel.y as i64 + *offset;
+            let bottom = top + panel.h as i64;
+            let d = if y < top {
+                top - y
+            } else if y >= bottom {
+                y - bottom + 1
+            } else {
+                0
+            };
+            let d = d.min(*b as i64) as u32;
+            d * d
+        });
+        // The outline row comes from the body itself, not from the offset shape:
+        // both layers must see the same span, or their falloffs leave a stripe
+        // where one starts further out than the other.
+        let rel = (y - panel.y as i64).clamp(0, panel.h as i64 - 1) as u32;
+        let (x0, x1) = panel.span(rel);
+        let start = x0.saturating_sub(reach);
+        let end = (x1 + reach).min(w);
+        // Everything the band does not cover is emptied: a reused buffer slot
+        // still holds the previous frame.
+        if start > 0 {
+            set_span(buf, w, by, 0, start, CLEAR);
+        }
+        if end < w {
+            set_span(buf, w, by, end, w, CLEAR);
+        }
+        let visible = (0..2).any(|k| dv[k] < layers[k].0 * layers[k].0);
+        if !visible {
+            if start < end {
+                set_span(buf, w, by, start, end, CLEAR);
+            }
+            continue;
+        }
+        if dv != cached {
+            cached = dv;
+            for (dx, out) in band.iter_mut().enumerate() {
+                let dx2 = (dx * dx) as u32;
+                let mut a = 0u32;
+                for (k, (b, _, lut)) in layers.iter().enumerate() {
+                    let la = lut[(dx2 + dv[k]).min(b * b) as usize];
+                    a = la + div255(a * (255 - la));
+                }
+                *out = a as u8;
+            }
+        }
+        // Two bands outside the outline; the body itself is painted later, so
+        // it is stepped over rather than tested per pixel.
+        if by >= panel.y && by < panel.y + panel.h {
+            put_band(buf, w, by, start..x0.min(end), (x0, x1), Side::Left, &band);
+            put_band(buf, w, by, x1.max(start)..end, (x0, x1), Side::Right, &band);
+        } else {
+            put_band(buf, w, by, start..end, (x0, x1), Side::Row, &band);
+        }
+    }
+}
+
+/// Which part of an outline row a shadow band covers.
+#[derive(Clone, Copy)]
+enum Side {
+    Left,
+    Right,
+    /// The whole row: the body is not there, so the middle is shadow too.
+    Row,
+}
+
+/// Writes one row's shadow band: premultiplied black, so only the alpha byte.
+fn put_band(
+    buf: &mut [u8],
+    w: u32,
+    by: u32,
+    xs: std::ops::Range<u32>,
+    (x0, x1): (u32, u32),
+    side: Side,
+    band: &[u8],
+) {
+    for x in xs {
+        let dx = match side {
+            Side::Left => x0 - 1 - x,
+            Side::Right => x - x1,
+            Side::Row if x < x0 => x0 - 1 - x,
+            Side::Row if x >= x1 => x - x1,
+            Side::Row => 0,
+        };
+        let a = band[(dx as usize).min(band.len() - 1)];
+        let dst = &mut buf[((by * w + x) * 4) as usize..][..4];
+        dst.copy_from_slice(&[0, 0, 0, a]);
+    }
+}
+
+/// `x / 255` without the hardware divide: this runs once per shadow pixel per
+/// layer, where the compiler's `/ 255` costs more than the rest of the pixel.
+#[inline]
+fn div255(x: u32) -> u32 {
+    (x + 1 + (x >> 8)) >> 8
+}
+
+/// Scrollbar thumb `(y, h)` for a `visible`-row viewport over `total` items at
+/// scroll offset `top`, inside a track starting at `track_y` with height
+/// `track_h`. `None` when everything fits (or there is no track). Length tracks
+/// the visible/total ratio so the indicator reads as "list continues".
+pub(crate) fn scroll_thumb(
+    track_y: u32,
+    track_h: u32,
+    visible: usize,
+    total: usize,
+    top: usize,
+) -> Option<(u32, u32)> {
+    if visible == 0 || total <= visible || track_h == 0 {
+        return None;
+    }
+    let th = ((track_h as u64 * visible as u64) / total as u64).clamp(1, track_h as u64) as u32;
+    let max_top = (total - visible) as u64;
+    let span = track_h.saturating_sub(th) as u64;
+    let ty = track_y + ((span * top.min(max_top as usize) as u64) / max_top) as u32;
+    Some((ty, th))
+}
+
 #[allow(clippy::too_many_arguments)] // a rectangle is six numbers plus the buffer
 pub fn rect(buf: &mut [u8], w: u32, h: u32, x: u32, y: u32, rw: u32, rh: u32, color: Bgra) {
     let x0 = (x as i64).clamp(0, w as i64) as u32;
@@ -77,7 +322,8 @@ pub fn rect(buf: &mut [u8], w: u32, h: u32, x: u32, y: u32, rw: u32, rh: u32, co
     for py in y0..y1 {
         let row = &mut buf[(py * w + x0) as usize * 4..(py * w + x1) as usize * 4];
         for px in row.as_chunks_mut::<4>().0 {
-            *px = color;
+            // Composite, not overwrite: the panel under it may be translucent.
+            blend_px(px, [color[0], color[1], color[2]], color[3] as u32);
         }
     }
 }
@@ -418,7 +664,10 @@ pub(crate) fn blend_px(dst: &mut [u8], src: [u8; 3], a: u32) {
     dst[0] = ((src[0] as u32 * a + dst[0] as u32 * inv) / 255) as u8;
     dst[1] = ((src[1] as u32 * a + dst[1] as u32 * inv) / 255) as u8;
     dst[2] = ((src[2] as u32 * a + dst[2] as u32 * inv) / 255) as u8;
-    // dst alpha stays 255 (fully opaque menu)
+    // src is opaque here (its alpha is already folded into `a`), so "src over"
+    // in premultiplied space also moves the destination alpha towards opaque —
+    // without this, ink over a translucent panel would stay translucent.
+    dst[3] = (a + dst[3] as u32 * inv / 255) as u8;
 }
 
 #[cfg(test)]
