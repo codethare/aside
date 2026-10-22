@@ -68,13 +68,18 @@ delta otherwise — and does nothing over the bar.
 
 The sizes are the panel's own; the layer surface adds the shadow margin on every
 side and sits that margin inside the visible gap. The answering panel is a
-**fixed** size: the bar, the 12 px between the cards, and a box as tall as the
+**fixed** size: the bar, the 16 px between the cards, and a box as tall as the
 bar's own gap above the screen's bottom edge (38 % of the output, clamped by the
 room left above it). It does not grow as the answer does — a longer answer scrolls
 inside the box and shows a 3 px scroll indicator on the right edge. Holding the
 left button for a quarter of a second and moving drags the panel, in both axes;
 it stays on the output, keeps its size, and where it was is never written down.
-States snap: there is no height tween other than the first card's reveal.
+Opening is animated: the bar rises out of the bottom edge over 120 ms, `Enter`
+morphs it into the thinking ball over 200 ms on a spring, and the first text grows
+that ball into the answering panel over 240 ms — one card changing shape, painted
+inside one buffer, so the surface is resized once per state and never per frame.
+Inside the panel, the replies card grows out of the bar in 160 ms once the ball has
+finished becoming the panel.
 
 ## Keys
 

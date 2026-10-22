@@ -159,7 +159,7 @@ pub(crate) fn rounded_inset(w: u32, h: u32, r: u32, y: u32) -> f64 {
 /// rounded outline that the body, its antialiased edge, the hairline and the
 /// shadow are all derived from. One outline for all four is what keeps the
 /// border and the shadow from leaving a seam between them.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Panel {
     pub x: u32,
     pub y: u32,
@@ -174,6 +174,17 @@ impl Panel {
         let (x0, x1) = rounded_span(self.w, self.h, self.r, rel);
         (self.x + x0, self.x + x1)
     }
+}
+
+/// A colour at `t` of its own alpha: how a fading glyph, rim or body is drawn.
+/// Premultiply after this, not before.
+pub fn dim(c: Bgra, t: f32) -> Bgra {
+    [
+        c[0],
+        c[1],
+        c[2],
+        (c[3] as f32 * t.clamp(0.0, 1.0)).round() as u8,
+    ]
 }
 
 /// Premultiply a straight colour: wl_shm ARGB8888 is premultiplied, so a

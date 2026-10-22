@@ -65,6 +65,12 @@ const EDGE_SHARE: i32 = 38;
 const REPLY_SHARE: u32 = 1;
 /// How long the replies card takes to grow out of the bar.
 const REVEAL_MS: u128 = 160;
+/// How long the bar takes to shrink into the thinking ball.
+const MORPH_IN_MS: u128 = 200;
+/// How long the ball takes to grow into the answering panel.
+const MORPH_OUT_MS: u128 = 240;
+/// How long the panel takes to rise out of the bottom edge when it opens.
+const ENTER_MS: u128 = 120;
 /// How long the left button is held before moving the panel starts: a click on
 /// the panel must not be a one-pixel jump.
 const DRAG_HOLD_MS: u64 = 250;
@@ -242,6 +248,8 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         "",
         "",
         1.0,
+        panel::Look::settled(panel::State::Replies),
+        0,
         1,
     );
     std::fs::write(path, panel::to_ppm(&buf, w, h)).map_err(|e| format!("{}: {e}", path.display()))
@@ -322,6 +330,9 @@ fn run(
         pointer_at: (0.0, 0.0),
         dragging: None,
         pointer: None,
+        morph: None,
+        enter_start: None,
+        reveal_pending: false,
         reveal_start: None,
         revealed: false,
         phase_start: std::time::Instant::now(),
@@ -384,7 +395,7 @@ fn run(
         }
         let timeout = if state.holding() {
             Duration::from_millis(30)
-        } else if state.revealing() {
+        } else if state.morphing() || state.rising() || state.revealing() {
             // The card is growing: a frame every step of the ease.
             Duration::from_millis(16)
         } else if state.phase == Phase::Thinking {
@@ -594,6 +605,14 @@ fn size_for(phase: Phase, output_h: Option<u32>) -> (u32, u32) {
     }
 }
 
+/// The size a shape change is painted at: the larger of its two shapes, so the
+/// surface is resized once per transition and never per frame.
+fn morph_size(from: Phase, to: Phase, output_h: Option<u32>) -> (u32, u32) {
+    let (fw, fh) = size_for(from, output_h);
+    let (tw, th) = size_for(to, output_h);
+    (fw.max(tw), fh.max(th))
+}
+
 /// How tall the replies card always is: the anchored gap, clamped by the room left
 /// above the bar and by the 64 rows the frame may draw.
 fn room_for_replies(output_h: Option<u32>) -> u32 {
@@ -608,6 +627,54 @@ fn room_for_replies(output_h: Option<u32>) -> u32 {
 pub fn reveal_at(elapsed_ms: u128) -> f32 {
     let t = (elapsed_ms as f32 / REVEAL_MS as f32).clamp(0.0, 1.0);
     1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
+}
+
+/// How far the panel has risen out of the bottom edge: the same ease-out, over
+/// `ENTER_MS`.
+pub fn enter_at(elapsed_ms: u128) -> f32 {
+    let t = (elapsed_ms as f32 / ENTER_MS as f32).clamp(0.0, 1.0);
+    1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
+}
+
+/// How far a shape change has got after `elapsed_ms` of `over`: a damped spring,
+/// normalised so it lands on exactly 1 at the deadline. That way a late frame is at
+/// the right shape and the frame after the last one is the settled one.
+pub fn morph_at(elapsed_ms: u128, over: u128) -> f32 {
+    let t = (elapsed_ms as f32 / over.max(1) as f32).clamp(0.0, 1.0);
+    // Under-damped: one visible overshoot of a few percent, then rest.
+    const DAMPING: f32 = 5.0;
+    const FREQ: f32 = 1.6 * std::f32::consts::PI;
+    let spring = 1.0 - (-DAMPING * t).exp() * (FREQ * t).cos();
+    // Normalise the spring's own landing value to 1, so the deadline is exact.
+    let end = 1.0 - (-DAMPING).exp() * FREQ.cos();
+    (spring / end).clamp(0.0, 1.0)
+}
+
+/// The shape the panel paints itself as, for a phase.
+fn state_of(phase: Phase) -> panel::State {
+    match phase {
+        Phase::Idle => panel::State::Bar,
+        Phase::Thinking => panel::State::Ball,
+        Phase::Answering => panel::State::Replies,
+    }
+}
+
+/// A shape change in progress: where it started and when.
+#[derive(Debug, Clone, Copy)]
+struct Morph {
+    from: Phase,
+    to: Phase,
+    start: std::time::Instant,
+}
+
+impl Morph {
+    /// How long this change runs for, which depends on how far the shape travels.
+    fn duration_ms(self) -> u128 {
+        match (self.from, self.to) {
+            (Phase::Thinking, Phase::Answering) => MORPH_OUT_MS,
+            _ => MORPH_IN_MS,
+        }
+    }
 }
 
 /// Which of the four squares is lit, from elapsed milliseconds rather than from
@@ -743,6 +810,13 @@ struct State {
     /// The pointer position a drag started from, once the hold has elapsed.
     dragging: Option<(f64, f64)>,
     pointer: Option<wl_pointer::WlPointer>,
+    /// The shape change in progress, if any.
+    morph: Option<Morph>,
+    /// When the panel started rising out of the bottom edge, once per run.
+    enter_start: Option<std::time::Instant>,
+    /// A reply arrived while the ball was still morphing out: the card's own
+    /// reveal waits for the shape change to end instead of running on top of it.
+    reveal_pending: bool,
     /// When the replies card started growing out of the bar, once per run.
     reveal_start: Option<std::time::Instant>,
     /// Whether this run has already revealed its first card.
@@ -773,10 +847,95 @@ struct State {
 }
 
 impl State {
-    /// The size the phase wants. The replies' box is fixed, so this does not read
-    /// the transcript at all: an answer arriving never resizes the panel.
+    /// The size the surface needs. The replies' box is fixed, so this does not read
+    /// the transcript at all: an answer arriving never resizes the panel. A shape
+    /// change is painted inside the larger of the two shapes, so the surface is
+    /// resized once per transition rather than per frame.
     fn target_size(&self) -> (u32, u32) {
-        size_for(self.phase, self.output_h)
+        match self.morph.filter(|_| self.morphing()) {
+            Some(m) => morph_size(m.from, m.to, self.output_h),
+            None => size_for(self.phase, self.output_h),
+        }
+    }
+
+    /// How far the shape change has got, if one is running.
+    fn morph_progress(&self) -> f32 {
+        match self.morph {
+            Some(m) => morph_at(m.start.elapsed().as_millis(), m.duration_ms()),
+            None => 1.0,
+        }
+    }
+
+    /// Whether a frame is needed for a shape change or the rise into place.
+    fn morphing(&self) -> bool {
+        match self.morph {
+            Some(m) => m.start.elapsed().as_millis() < m.duration_ms(),
+            None => false,
+        }
+    }
+
+    /// How far the panel has risen out of the bottom edge.
+    fn rise(&self) -> f32 {
+        match self.enter_start {
+            Some(start) => enter_at(start.elapsed().as_millis()),
+            None => 1.0,
+        }
+    }
+
+    /// Whether the panel is still rising, which needs frames of its own.
+    fn rising(&self) -> bool {
+        self.rise() < 1.0
+    }
+
+    /// What the panel paints itself as in this frame.
+    fn look(&self) -> panel::Look {
+        let rise = self.rise();
+        match self.morph.filter(|_| self.morphing()) {
+            Some(m) => panel::Look::moving(
+                state_of(m.to),
+                state_of(m.from),
+                self.morph_progress(),
+                rise,
+            ),
+            None => panel::Look {
+                rise,
+                ..panel::Look::settled(state_of(self.phase))
+            },
+        }
+    }
+
+    /// Move to another phase, morphing into it: the surface takes the larger of the
+    /// two shapes for the duration, and settles into the new one when it ends.
+    fn set_phase(&mut self, to: Phase) {
+        if self.phase == to {
+            return;
+        }
+        self.morph = Some(Morph {
+            from: self.phase,
+            to,
+            start: std::time::Instant::now(),
+        });
+        self.phase = to;
+        self.phase_start = std::time::Instant::now();
+        self.apply_size();
+        self.dirty = true;
+    }
+
+    /// A shape change that has run its course is dropped, and the surface takes the
+    /// size of the shape it became: one resize, on the frame after the last one.
+    fn settle_morph(&mut self) {
+        if self.morph.is_some() && !self.morphing() {
+            self.morph = None;
+            self.apply_size();
+            self.dirty = true;
+            // The replies card grows out of the bar once the panel is the panel,
+            // so a reply is seen as one motion and then as its own content.
+            if self.reveal_pending {
+                self.reveal_pending = false;
+                self.revealed = true;
+                self.reveal_start = Some(std::time::Instant::now());
+            }
+        }
     }
 
     fn blink_index(&self) -> usize {
@@ -953,14 +1112,12 @@ impl State {
         let rows = transcript.total_rows();
         viewport.follow(transcript.total_height());
         *highlight = rows.saturating_sub(1);
-        self.phase = if started {
+        self.morph = None;
+        self.set_phase(if started {
             Phase::Thinking
         } else {
             Phase::Answering
-        };
-        self.phase_start = std::time::Instant::now();
-        self.apply_size();
-        self.dirty = true;
+        });
     }
 
     fn cancel(&mut self) {
@@ -975,9 +1132,15 @@ impl State {
                 transcript.cancel("cancelled", font, max_w);
             }
             viewport_follow(&mut self.viewport, transcript.total_height());
-            self.phase = Phase::Answering;
-            self.apply_size();
-            self.dirty = true;
+            // Cancelling settles the panel now: no one waits for a morph to watch a
+            // stream that has already stopped.
+            self.morph = None;
+            self.reveal_pending = false;
+            if !self.revealed {
+                self.revealed = true;
+                self.reveal_start = None;
+            }
+            self.set_phase(Phase::Answering);
         } else {
             self.exit = true;
         }
@@ -1163,10 +1326,16 @@ impl State {
             // The blink is the only thing moving, so keep asking for frames.
             self.dirty = true;
         }
+        if self.morphing() || self.rising() {
+            // A shape change or the rise into place: every frame has to be painted.
+            self.dirty = true;
+        }
         if self.revealing() {
             // The card is growing: every frame of the ease has to be painted.
             self.dirty = true;
         }
+        // A finished shape change hands the surface its new size, once.
+        self.settle_morph();
         // The round is over: keys the input method never claimed are the panel's own
         // text. This is what keeps letters and digits working once the input method
         // is switched off or gone. Never while a mode owns the keyboard: there, a
@@ -1209,15 +1378,13 @@ impl State {
             }
         }
         if text_arrived {
-            // The first card of a run grows out of the bar; a later answer does not
-            // replay it, because its card is already there.
+            // The first text ends the ball: the ball grows into the panel, and the
+            // replies card's own reveal waits until that shape change is over, so a
+            // reply is seen as one motion and then as its content.
             if !self.revealed && self.transcript.total_height() > 0 {
-                self.revealed = true;
-                self.reveal_start = Some(std::time::Instant::now());
+                self.reveal_pending = true;
             }
-            // The first text ends the ball; every later row may grow the panel.
-            self.phase = Phase::Answering;
-            self.apply_size();
+            self.set_phase(Phase::Answering);
         }
         if self.dirty {
             self.dirty = false;
@@ -1240,11 +1407,9 @@ impl State {
         if self.font.is_none() {
             return; // no font yet: nothing to draw and nothing to wait for
         }
-        let lit = if self.phase == Phase::Thinking {
-            Some(self.blink_index())
-        } else {
-            None
-        };
+        // The shape this frame paints, and how far into it the panel has morphed.
+        let look = self.look();
+        let lit = self.blink_index();
         let stride = w as i32 * 4;
         // Read before the canvas borrows the pool: the reveal moves every frame.
         let reveal = self.reveal();
@@ -1276,25 +1441,24 @@ impl State {
         // Every pixel is written: the shm slots rotate, so a partial paint would
         // show the previous frame through.
         canvas.fill(0);
-        match lit {
-            Some(lit) => panel::draw_ball(canvas, w, h, lit, self.scale),
-            None => panel::draw(
-                canvas,
-                w,
-                h,
-                self.font.as_ref().expect("checked above"),
-                &self.transcript,
-                &self.input,
-                &self.viewport,
-                Some(self.highlight),
-                typing,
-                &self.ime.preedit,
-                hint,
-                label,
-                reveal,
-                self.scale,
-            ),
-        }
+        panel::draw(
+            canvas,
+            w,
+            h,
+            self.font.as_ref().expect("checked above"),
+            &self.transcript,
+            &self.input,
+            &self.viewport,
+            Some(self.highlight),
+            typing,
+            &self.ime.preedit,
+            hint,
+            label,
+            reveal,
+            look,
+            lit,
+            self.scale,
+        );
         self.layer
             .wl_surface()
             .damage_buffer(0, 0, w as i32, h as i32);
@@ -1603,6 +1767,8 @@ impl LayerShellHandler for State {
         self.apply_size();
         if self.first_frame {
             self.first_frame = false;
+            // The panel rises out of the bottom edge on its first frame.
+            self.enter_start = Some(std::time::Instant::now());
             self.draw();
         } else if self.dirty {
             self.dirty = false;
@@ -2102,6 +2268,55 @@ mod tests {
             over_replies(panel_h, bar_top - 0.5),
             "just above the bar is replies"
         );
+    }
+
+    /// The shape changes are springs that land on exactly 1 at their deadline, and
+    /// the rise into place is an ease-out, so a late frame is at the right shape and
+    /// the frame after the last one is the settled one.
+    #[test]
+    fn a_shape_change_is_read_off_the_clock() {
+        for over in [MORPH_IN_MS, MORPH_OUT_MS] {
+            assert_eq!(morph_at(0, over), 0.0);
+            assert_eq!(morph_at(over, over), 1.0, "the deadline is exact");
+            assert_eq!(morph_at(over * 10, over), 1.0, "a late frame is done");
+            let mut previous = 0.0;
+            for ms in 0..=over {
+                let at = morph_at(ms, over);
+                assert!(at >= previous - 1e-6, "the spring never goes backwards");
+                assert!((0.0..=1.0).contains(&at), "and stays inside its ends");
+                previous = at;
+            }
+            // A spring is not an ease: it overtakes its target on the way.
+            assert!(
+                (0..=over).any(|ms| morph_at(ms, over) > 0.98),
+                "it arrives before the deadline"
+            );
+        }
+        // The rise is the reveal's ease-out: quick, then settling.
+        assert_eq!(enter_at(0), 0.0);
+        assert_eq!(enter_at(ENTER_MS), 1.0);
+        assert!(enter_at(ENTER_MS / 2) > 0.5);
+    }
+
+    /// A transition needs the larger of its two shapes, which is what the surface is
+    /// given for its duration.
+    #[test]
+    fn a_transition_runs_on_the_larger_shape() {
+        let (bw, bh) = size_for(Phase::Idle, Some(1080));
+        let (_, th) = size_for(Phase::Thinking, Some(1080));
+        let (aw, ah) = size_for(Phase::Answering, Some(1080));
+        // Bar to ball: the ball is narrow but taller than the bar's band.
+        assert_eq!(
+            morph_size(Phase::Idle, Phase::Thinking, Some(1080)),
+            (bw, th)
+        );
+        // Ball to panel: the panel is the larger one in both directions.
+        assert_eq!(
+            morph_size(Phase::Thinking, Phase::Answering, Some(1080)),
+            (aw, ah)
+        );
+        // A no-op change is the shape itself.
+        assert_eq!(morph_size(Phase::Idle, Phase::Idle, Some(1080)), (bw, bh));
     }
 
     /// The reveal is a deadline: two frames at the same elapsed time paint the

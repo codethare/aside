@@ -16,9 +16,10 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 
 1. Press the keybinding. The panel appears in the lower half of the output,
    centred, its field just below the vertical centre, and takes the keyboard.
-2. Type `what does EAGAIN mean` and press `Enter`. The ball spins, then the
-   reply card is seen to rise out of the bar, streaming as it grows; the bar
-   itself does not move.
+2. Type `what does EAGAIN mean` and press `Enter`. The bar is seen to shrink into
+   the ball, the ball to grow into the panel, and only then does the reply card
+   rise out of the bar; the bar itself does not move. Opening the panel is a rise
+   out of the bottom edge, not a snap.
 3. Ask a follow-up. The box holds the new answer alone — the earlier one is not on
    screen — the bar does not move, and the answer still takes the earlier exchange
    into account.
