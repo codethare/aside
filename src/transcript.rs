@@ -110,13 +110,42 @@ impl Transcript {
         }
     }
 
+    /// Index of the first entry that is on screen: the turn the last question
+    /// opened. Everything before it is kept for the request and laid out never.
+    fn current_start(&self) -> usize {
+        self.entries
+            .iter()
+            .rposition(|e| e.kind == Kind::Question)
+            .map_or(0, |i| i + 1)
+    }
+
+    /// Drop the layout of a turn that is no longer on screen, keeping its text:
+    /// the provider still gets it, the box does not.
+    fn retire(entries: &mut [Entry], start: usize) {
+        for entry in &mut entries[..start] {
+            entry.lines = Lines::default();
+            entry.h = 0;
+            entry.y = 0;
+        }
+    }
+
+    /// Retire everything before the question just pushed, and restart the block
+    /// chain: the previous turn is no longer on screen.
+    fn retire_current(&mut self) {
+        let start = self.entries.len();
+        Self::retire(&mut self.entries, start);
+        self.height = 0;
+    }
+
     /// Lay every entry out again: a resize changes the width, and the wrap is a
     /// property of the width, not of the text.
     pub fn rewrap(&mut self, font: &PanelFont, max_w: f32) {
         let blocks = Blocks::new(font);
+        let start = self.current_start();
+        Self::retire(&mut self.entries, start);
         let mut y = 0;
         let mut inked = false;
-        for entry in &mut self.entries {
+        for entry in &mut self.entries[start..] {
             if entry.kind == Kind::Question {
                 // Not drawn, so never laid out: no rows, no height, no gap.
                 entry.lines = Lines::default();
@@ -149,6 +178,9 @@ impl Transcript {
         // two open answers would have no defined meaning, and closing it first is
         // what gives it its last row before the answer is placed under it.
         self.close_open(blocks);
+        // Only the turn being asked is on screen: the previous one keeps its text
+        // for the request and gives up its layout, so the block chain restarts.
+        self.retire_current();
         let user = self.push(Kind::Question, true, blocks);
         self.entries[user].text.push_str(question);
         self.open = Some(self.push(Kind::Answer, false, blocks));
@@ -225,10 +257,11 @@ impl Transcript {
         }
     }
 
-    /// Rows in display order, with the styling the painter needs.
+    /// Rows in display order, with the styling the painter needs. The current
+    /// turn's, because that is what is on screen.
     pub fn rows(&self, blocks: Blocks) -> Vec<Row<'_>> {
         let mut out = Vec::new();
-        for entry in &self.entries {
+        for entry in &self.entries[self.current_start()..] {
             for (i, row) in entry.lines.visible_rows().enumerate() {
                 out.push(Row {
                     text: row,
@@ -245,7 +278,7 @@ impl Transcript {
     /// to when the highlight moves.
     pub fn row_y(&self, index: usize, blocks: Blocks) -> Option<u32> {
         let mut left = index;
-        for entry in &self.entries {
+        for entry in &self.entries[self.current_start()..] {
             let rows = entry.lines.total_rows();
             if left < rows {
                 return Some(entry.y + left as u32 * blocks.row_h);
@@ -261,7 +294,10 @@ impl Transcript {
     }
 
     pub fn total_rows(&self) -> usize {
-        self.entries.iter().map(|e| e.lines.total_rows()).sum()
+        self.entries[self.current_start()..]
+            .iter()
+            .map(|e| e.lines.total_rows())
+            .sum()
     }
 
     /// What the next request carries: this run's questions and the answers that
@@ -337,10 +373,14 @@ mod tests {
         t.ask("why", &f);
         t.delta("because", &f, 400.0);
         t.finish_answer(&f);
+        assert_eq!(text_of(&t, &f), ["because"], "the first answer, alone");
         t.ask("and?", &f);
         t.delta("this too", &f, 400.0);
         t.finish_answer(&f);
-        assert_eq!(text_of(&t, &f), ["because", "this too"]);
+        // The box holds the current turn only: the first answer is kept for the
+        // request and is not on screen.
+        assert_eq!(text_of(&t, &f), ["this too"]);
+        assert_eq!(t.total_height(), f.row_h, "one line of room, not two");
         assert!(!t.is_streaming());
         // Nothing on screen is a question, and the request still has them.
         assert!(
@@ -378,12 +418,15 @@ mod tests {
         t.ask("first", &f);
         t.delta("half an ans", &f, 400.0);
         t.cancel("cancelled", &f, 400.0);
-        t.ask("second", &f);
-        t.delta("full answer", &f, 400.0);
-        t.finish_answer(&f);
+        // While it is the current turn, the half answer and its note are on screen.
         let rows = text_of(&t, &f);
         assert!(rows.contains(&"half an ans".to_string()), "still visible");
         assert!(rows.contains(&"cancelled".to_string()));
+        t.ask("second", &f);
+        t.delta("full answer", &f, 400.0);
+        t.finish_answer(&f);
+        // The new turn is what the box holds now.
+        assert_eq!(text_of(&t, &f), ["full answer"]);
         let turns = t.request_turns();
         assert!(
             turns
@@ -436,12 +479,12 @@ mod tests {
             60.0,
         );
         t.finish_answer(&f);
-        t.ask("and?", &f);
-        t.delta("a second answer, short", &f, 60.0);
-        t.finish_answer(&f);
+        // A note belongs to this turn, so the box holds two blocks: the answer,
+        // then one gap, then the note.
+        t.add_note("and that is that", &f, 60.0);
 
         let rows = t.rows(blocks);
-        assert!(rows.len() > 3, "the answers must wrap to several rows");
+        assert!(rows.len() > 3, "the answer must wrap to several rows");
         // Every row is inside its own block, and the blocks are contiguous.
         let mut end = 0;
         for row in &rows {
@@ -452,10 +495,10 @@ mod tests {
             end = row.block.0 + row.block.1;
         }
         assert_eq!(end, t.total_height(), "the last block ends the transcript");
-        // Two answers, two cards: the second starts one gap below the first.
+        // Two blocks: the note starts one gap below the answer.
         let mut cards = rows.iter().map(|r| r.block).collect::<Vec<_>>();
         cards.dedup();
-        assert_eq!(cards.len(), 2, "one block per answer");
+        assert_eq!(cards.len(), 2, "the answer and the note");
         assert_eq!(
             cards[1].0,
             cards[0].0 + cards[0].1 + blocks.gap,
@@ -481,6 +524,46 @@ mod tests {
             Blocks::new(&f).row_h,
             "the card appeared with its first row"
         );
+    }
+
+    /// The whole point of keeping the older turns: the provider sees them even
+    /// though the box does not, and the box starts at zero for each new turn.
+    #[test]
+    fn a_retired_turn_keeps_its_text_and_loses_its_room() {
+        let f = font();
+        let blocks = Blocks::new(&f);
+        let mut t = Transcript::default();
+        t.ask("first", &f);
+        t.delta(
+            "an answer long enough to wrap at a narrow width, twice over",
+            &f,
+            80.0,
+        );
+        t.finish_answer(&f);
+        assert!(t.total_rows() > 2, "the first turn wrapped");
+        t.ask("second", &f);
+        // Nothing of the first turn is laid out now, and the new answer starts at 0.
+        assert_eq!(t.total_rows(), 0, "the new turn has no text yet");
+        assert_eq!(t.total_height(), 0);
+        t.delta("second answer", &f, 80.0);
+        t.finish_answer(&f);
+        let rows = t.rows(blocks);
+        assert_eq!(
+            rows[0].y, 0,
+            "the current turn starts at the top of the box"
+        );
+        assert_eq!(rows[0].text, "second", "the current turn's own text");
+        // The request still has every turn, in order.
+        let turns = t.request_turns();
+        assert_eq!(turns.len(), 4, "two questions, two answers");
+        assert_eq!(turns[0].text, "first");
+        assert!(turns[1].text.starts_with("an answer long enough"));
+        assert_eq!(turns[2].text, "second");
+        assert_eq!(turns[3].text, "second answer");
+        // A resize rewraps the current turn only, and it still starts at 0.
+        t.rewrap(&f, 40.0);
+        assert_eq!(t.rows(blocks)[0].y, 0);
+        assert_eq!(t.request_turns().len(), 4, "nothing was lost");
     }
 
     /// A row knows where it is, because the viewport scrolls in pixels.

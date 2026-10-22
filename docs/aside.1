@@ -37,9 +37,9 @@ box of fixed height -- as tall as the field's gap above the screen's bottom edge
 so a longer answer scrolls inside it instead of growing the panel.  With the
 pointer over the replies, the wheel and a two-finger slide scroll them: a notch is
 three lines, a continuous delta is taken as pixels.
-Only the model's text is drawn -- answers, failures and the panel's own notes,
-8 pixels apart.  A question you sent is kept for the next request and drawn
-nowhere.  The highlighted line is marked by brighter ink, two pixels in from its
+Only the model's text about the question just asked is drawn -- its answer, and a
+failure or note that belongs to it, 8 pixels apart.  Earlier turns are kept for
+the request and drawn nowhere, and so is the question you typed.  The highlighted line is marked by brighter ink, two pixels in from its
 neighbours.  The first reply of a run grows out of the bar in 160 milliseconds.
 While a request is out the panel is a 60-pixel square showing four blinking
 squares.  The expanded panel never exceeds the output height less 64 pixels, and

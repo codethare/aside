@@ -19,9 +19,9 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 2. Type `what does EAGAIN mean` and press `Enter`. The ball spins, then the
    reply card is seen to rise out of the bar, streaming as it grows; the bar
    itself does not move.
-3. Ask a follow-up. The earlier answer stays on screen (your questions are never
-   drawn), the bar does not move, the panel grows upwards, and the new answer
-   takes the earlier exchange into account.
+3. Ask a follow-up. The box holds the new answer alone — the earlier one is not on
+   screen — the bar does not move, and the answer still takes the earlier exchange
+   into account.
 4. `Up`, `Down`, `PageUp`, `PageDown` move the highlighted line and the view
    follows it; the highlighted line is brighter than its neighbours and starts
    2 px further right, and nothing is drawn in the left margin.

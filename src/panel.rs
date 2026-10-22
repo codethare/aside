@@ -873,10 +873,13 @@ mod tests {
     fn the_scroll_thumb_shows_only_when_the_transcript_overflows() {
         let f = font();
         let mut scene = scene(&f, 300.0);
-        // A second turn, so the replies are taller than the panel can show.
-        scene.transcript.ask("and at night?", &f);
+        // One answer taller than the box can show: the box is fixed, so this is
+        // what makes it scroll. A new turn, so it is the one on screen.
+        scene.transcript.ask("and at dusk?", &f);
         scene.transcript.delta(
-            "The same scattering leaves only the long wavelengths, so the sky reads red.",
+            " The same scattering leaves only the long wavelengths at dusk, which is\
+             why the sky reads red, and why the sea reads grey, and why a fire reads\
+             orange from a mile away.",
             &f,
             300.0,
         );
