@@ -603,9 +603,11 @@ mod tests {
         let composing = paint_with("zhong");
         // Right of the typed text the bar is empty until the input method speaks.
         let from = crate::PAD + render::measure(&f, "why", f32::MAX).ceil() as u32 + 8;
+        // Inside the rim's bands: the bar's own text rows.
+        let rows = (h - f.row_h + 2)..(h - 2);
         let ink = |buf: &[u8]| {
             (from..from + 60)
-                .flat_map(|x| (h - f.row_h..h).map(move |y| (x, y)))
+                .flat_map(|x| rows.clone().map(move |y| (x, y)))
                 .filter(|&(x, y)| buf[at(bw, x, y)..][..4][..3] != glass()[..3])
                 .count()
         };
@@ -696,9 +698,11 @@ mod tests {
         let plain = paint_with("", true);
         let vim = paint_with("-- VIM --", false);
         // The label's ink is in the bar's right half, and only there.
+        // Inside the rim's bands: the bar's own text rows.
+        let rows = (h - f.row_h + 2)..(h - 2);
         let ink = |buf: &[u8], from: u32, to: u32| {
             (from..to)
-                .flat_map(|x| (h - f.row_h..h).map(move |y| (x, y)))
+                .flat_map(|x| rows.clone().map(move |y| (x, y)))
                 .filter(|&(x, y)| buf[at(bw, x, y)..][..4][..3] != glass()[..3])
                 .count()
         };
@@ -869,6 +873,33 @@ mod tests {
         assert_ne!(head, tail, "the view offset is applied to the lines");
     }
 
+    /// The gap between the two cards clears the shadow one throws up onto the other:
+    /// `SEPARATION` is 16, and the wide layer reaches 14 px above a card.
+    #[test]
+    fn the_card_gap_clears_the_shadow() {
+        let f = font();
+        let scene = scene(&f, 300.0);
+        let (w, h) = sized(&scene, &f);
+        let (bw, _) = frame(w, h);
+        let buf = paint(&scene, w, h);
+        let px = |x: u32, y: u32| &buf[at(bw, x, y)..][..4];
+        let glass = glass();
+        let gap_top = h - f.row_h - render::SEPARATION;
+        // Every row of the gap is shadow, never a card's body...
+        for y in gap_top..(h - f.row_h) {
+            for x in crate::PAD..(w - crate::PAD) {
+                assert_ne!(px(x, y), glass, "body inside the gap at ({x},{y})");
+            }
+        }
+        // ...and the gap really is the separation, not one pixel more or less.
+        assert_eq!(
+            px(w / 2, gap_top - 1),
+            glass,
+            "the replies end above the gap"
+        );
+        assert_eq!(px(w / 2, h - f.row_h), glass, "the bar starts below it");
+    }
+
     #[test]
     fn the_scroll_thumb_shows_only_when_the_transcript_overflows() {
         let f = font();
@@ -931,7 +962,10 @@ mod tests {
         fn px(buf: &[u8], w: u32, x: u32, y: u32) -> &[u8] {
             &buf[at(w, x, y)..][..4]
         }
-        assert!(px(&a, w, 0, 0)[3] <= 1, "corner stays all but clear");
+        assert!(
+            px(&a, w, 0, 0)[3] < render::BG_PROMPT[3],
+            "the corner is shadow, not the body"
+        );
         assert_eq!(
             px(&a, w, panel / 2, panel / 2)[3],
             render::BG_PROMPT[3],

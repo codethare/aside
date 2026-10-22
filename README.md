@@ -45,17 +45,18 @@ output and centred, its bottom edge 38 % of the output height above the screen's
 bottom edge: the field lands just below the vertical centre, where the eye already
 is, and the replies grow upwards out of it. The bottom anchor is what keeps the
 bar in one place on screen; a top anchor would carry it downwards by a row per
-wrapped line. The chrome is `wlmenu`'s: a 20 px drop shadow measured from each
-card's outline, a premultiplied translucent body, a hairline whose lit and dark
-profiles cross-fade down the card, and antialiased corners. It has three states:
+wrapped line. The chrome is `plush`'s: a 26 px drop shadow measured from each
+card's outline, a premultiplied translucent body, a rim made of a lit top edge
+fading out by four fifths of the card, a dark underside at the bottom and a dark
+band one pixel inside it, and antialiased corners. It has three states:
 
 | State | Panel size | What is drawn |
 |---|---|---|
 | idle | 640 × 30 | the bar alone |
 | thinking | 60 × 60 | a circle with four squares, one lit every 200 ms |
-| answering | 640 × (replies + 12 + bar) | the replies above, the bar below |
+| answering | 640 × (replies + 16 + bar) | the replies above, the bar below |
 
-Two cards of one glass, 12 px apart: the replies in the upper one, the field in
+Two cards of one glass, 16 px apart: the replies in the upper one, the field in
 the lower one, and nothing but their shadows between them. Only the model's text
 is on screen: an answer, a failure and the panel's own notes, separated by 8 px
 gaps. A question you sent is kept for the next request and drawn nowhere.
@@ -127,7 +128,8 @@ rather than in `argv`, so it is in no process table.
 
 Rendering is software: `wl_shm` for the buffer, `skrifa` to read the font's
 outlines, `ab_glyph_rasterizer` to turn them into coverage. The design tokens and
-the 1.5×-row-height rule come from `wlmenu` so the two read as the same product. The
+the 1.5×-row-height rule come from `plush` (through `wlmenu`, whose rendering core
+this started as) so they read as the same product. The
 layout core is new: wrapping, a caret inside the text, multi-line answers in
 cards and a scrollback viewport are exactly what `wlmenu`'s single-line rows
 cannot do.

@@ -71,9 +71,9 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 14. Time the first frame on a cold start (`time aside` with no transcript): it
     should be well under 50 ms after the compositor has the surface.
 15. Put a `wlmenu` frame next to an `aside --preview out.ppm` frame and check the
-    shared tokens against each other: radius, padding, the 12 px card separation,
-    row height, the glass tone, the shadow falloff, the hairline profiles and the
-    corner antialiasing. This is the side-by-side check the design asks for, and
+    shared tokens against each other: radius, padding, the 16 px card separation,
+    row height, the glass tone, the 26 px shadow falloff, the rim's lit top edge, its
+    dark band inside, and the corner antialiasing. This is the side-by-side check the design asks for, and
     it needs a real `wlmenu` frame from your session.
 14. Scroll back while an answer is streaming: the view stays where it was put.
 

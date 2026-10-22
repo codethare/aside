@@ -1986,7 +1986,7 @@ mod tests {
         assert_eq!(bottom_margin(Some(10), 0), 0);
         // Dragged so high that the gap is most of the screen: the room above the
         // bar clamps the cap instead, and the panel still fits.
-        let gap = edge_gap(Some(1080), 600);
+        let gap = edge_gap(Some(1080), 500);
         let cap = reply_cap(Some(1080), gap);
         let chrome = panel::bar_height() + render::SEPARATION;
         assert_eq!(

@@ -25,11 +25,12 @@ change.
    pointer. The key table in `specs/chat-panel` is the contract, and it is
    per-mode: typing, the `Ctrl+T` prefix (one key wide), and vim mode. A key
    consumed by the prefix or by vim mode never reaches the input line.
-4. **The chrome is `wlmenu`'s.** Copied exactly: radius 12, `PAD` 16, 8 px gap,
-   `SEPARATION` 12, the 20 px shadow margin with the tight and wide layers, the
-   lit and dark hairline profiles, the plush inks, and the 3 px scroll indicator
-   in `render.rs`. Row height stays `size + 2 * round(size * 0.25)`. No accent
-   rail: `wlmenu` draws one only for a prompt label. The panel is a bottom-
+4. **The chrome is `plush`'s.** Copied exactly: radius 12, `PAD` 16, 8 px gap,
+   `SEPARATION` 16 (which must clear `SHADOW_REACH_UP`), the 26 px shadow margin
+   with the tight and wide layers, the rim's lit and dark profiles with the band one
+   pixel inside it, the plush inks, and the 3 px scroll indicator in `render.rs`.
+   Row height stays `size + 2 * round(size * 0.25)`. No accent rail: `plush` and
+   `wlmenu` draw one only for a prompt label. The panel is a bottom-
    anchored `wlr-layer-shell` surface in three states — bar, ball, replies — with
    the bar on the bottom card and the replies in the card above it, its bottom
    edge 38 % of the output height up the screen, because the bottom anchor is

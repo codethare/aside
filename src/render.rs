@@ -16,33 +16,51 @@ pub const CORNER_RADIUS: u32 = 12;
 
 /// Space reserved around the panel for its drop shadow (logical px). The buffer
 /// and the layer surface grow by it; the panel keeps its size and position.
-/// `wlmenu`'s current margin: plush's shadow is tighter than the old one.
-pub const SHADOW: u32 = 20;
+/// `plush`'s current margin.
+pub const SHADOW: u32 = 26;
 
 /// Shadow layers as (blur radius, alpha at the panel edge, vertical offset),
 /// logical px and 0-255. A tight contact shadow under a wide ambient one; the
 /// offset is positive because the light comes from above.
-const SHADOW_TIGHT: (u32, u32, u32) = (6, 155, 1);
-const SHADOW_WIDE: (u32, u32, u32) = (13, 115, 4);
+const SHADOW_TIGHT: (u32, u32, u32) = (9, 120, 2);
+const SHADOW_WIDE: (u32, u32, u32) = (20, 95, 6);
 // The margin must fit the widest layer, or its falloff is cut off at the buffer edge.
 const _: () = assert!(SHADOW >= SHADOW_WIDE.0 + SHADOW_WIDE.2);
 
-/// Hairline on a card's outermost pixel — the seam between the translucent body
-/// and the shadow. Its lit ink is solid along the top edge and gone by the lower
-/// third; its dark underside starts past the middle and is whole at the bottom.
-/// Between them the edge carries a little of both, which is what keeps it visible
-/// against the wallpaper without drawing a line around the card. (The profiles are
-/// `wlmenu`'s, so both panels share one chrome.)
-pub(crate) const BORDER_LIGHT_ALPHA: u32 = 34;
-pub(crate) const BORDER_DARK_ALPHA: u32 = 60;
+/// How far the shadow reaches above a card, in logical px: the widest layer's blur
+/// less the downward offset that keeps it out of the card itself. The gap between
+/// the two cards has to clear it, or one card's shadow smears onto the other.
+pub const SHADOW_REACH_UP: u32 = SHADOW_WIDE.0 - SHADOW_WIDE.2;
+
+/// The rim on a card's outermost pixel — the seam between the translucent body and
+/// the shadow — and the dark band one pixel inside it, which is what makes the lit
+/// edge read as glass with thickness rather than as a line drawn on the card.
+/// (The profiles and the inks are `plush`'s, so both panels share one chrome.)
+pub(crate) const BORDER_LIGHT_ALPHA: u32 = 90;
+pub(crate) const BORDER_DARK_ALPHA: u32 = 90;
+/// The band's shape at the bottom edge, where the body shadows its own lower wall;
+/// absent at the top, where there is no wall below the edge.
+const BORDER_INNER: [(f32, f32); 5] =
+    [(0.0, 0.0), (0.3, 0.05), (0.6, 0.3), (0.85, 0.8), (1.0, 1.0)];
+const BORDER_INNER_ALPHA: u32 = 130;
+/// The lit half holds its strength down the top corner arcs and then dies quickly,
+/// so it reads as a specular on glass rather than a wash over the upper half.
 const BORDER_LIT: [(f32, f32); 5] = [
     (0.0, 1.0),
-    (0.28, 0.62),
-    (0.55, 0.21),
-    (0.85, 0.0),
+    (0.16, 0.9),
+    (0.42, 0.55),
+    (0.78, 0.0),
     (1.0, 0.0),
 ];
-const BORDER_DARK: [(f32, f32); 4] = [(0.0, 0.0), (0.5, 0.1), (0.82, 0.63), (1.0, 1.0)];
+/// The dark half stays out of the way until the lower third and is whole at the
+/// bottom edge.
+const BORDER_DARK: [(f32, f32); 5] = [
+    (0.0, 0.08),
+    (0.45, 0.15),
+    (0.72, 0.4),
+    (0.9, 0.85),
+    (1.0, 1.0),
+];
 
 /// Share down a piecewise-linear profile at `t` (0 = top of the card, 1 = bottom).
 fn profile(table: &[(f32, f32)], t: f32) -> f32 {
@@ -83,8 +101,10 @@ pub const BG_PROMPT: Bgra = bgra(0x2c, 0x2c, 0x2c, 0xdc);
 pub const FG_NORMAL: Bgra = bgra(0xeb, 0xeb, 0xf5, 0x9b);
 pub const FG_PROMPT: Bgra = bgra(0xff, 0xff, 0xff, 0xf5);
 /// Gap between the replies card and the bar card (logical px): they are two cards,
-/// the way `wlmenu` floats its field below its list.
-pub const SEPARATION: u32 = 12;
+/// the way `plush` floats its own apart, and the gap has to clear the shadow one
+/// card throws up onto the other.
+pub const SEPARATION: u32 = 16;
+const _: () = assert!(SEPARATION > SHADOW_REACH_UP);
 /// The bar while the prefix mode waits: the field's tone pushed towards the accent,
 /// so a mode that swallows the next key is visible before it is read.
 pub const BG_MODE: Bgra = bgra(0x2e, 0x4a, 0x5c, 0xdc);
@@ -419,8 +439,8 @@ pub(crate) fn body(buf: &mut [u8], w: u32, panel: &Panel, tone: Bgra) {
         if cov > 0 && x1 < w {
             over_pm(&mut buf[(by * w + x1) as usize * 4..][..4], bg, cov);
         }
-        // Hairline on the outermost pixel: the seam where the body meets the
-        // shadow — lit along the top, dark underneath, cross-fading between.
+        // The rim on the outermost pixel: the seam where the body meets the shadow,
+        // dark underneath and lit on top.
         let t = rel as f32 / panel.h.max(1) as f32;
         let dark = (BORDER_DARK_ALPHA as f32 * profile(&BORDER_DARK, t)).round() as u32;
         let light = (BORDER_LIGHT_ALPHA as f32 * profile(&BORDER_LIT, t)).round() as u32;
@@ -433,6 +453,23 @@ pub(crate) fn body(buf: &mut [u8], w: u32, panel: &Panel, tone: Bgra) {
                 if light > 0 {
                     over_pm(dst, [0xff, 0xff, 0xff, 0xff], light);
                 }
+            }
+        }
+        // The band one pixel inside it, on the two columns and, on the rows where the
+        // band's own edges lie — one below the top edge, one above the bottom — across
+        // the whole inner span.
+        let band = (BORDER_INNER_ALPHA as f32 * profile(&BORDER_INNER, t)).round() as u32;
+        if band > 0 && x1 > x0 + 2 {
+            let edge_row = rel == 1 || rel + 2 == panel.h;
+            for x in (x0 + 1)..(x1 - 1) {
+                if !edge_row && x != x0 + 1 && x != x1 - 2 {
+                    continue;
+                }
+                over_pm(
+                    &mut buf[(by * w + x) as usize * 4..][..4],
+                    [0, 0, 0, 0xff],
+                    band,
+                );
             }
         }
     }
@@ -1031,6 +1068,45 @@ mod tests {
         px
     }
 
+    /// The band one pixel inside the rim is what makes the lit edge read as glass
+    /// with thickness: under the bottom edge where the body shadows its lower wall,
+    /// and absent at the top where there is no wall below it.
+    #[test]
+    fn a_dark_band_sits_inside_the_bottom_rim() {
+        let (rw, rh, r) = (120u32, 90u32, 12u32);
+        let (x, y, w) = (10u32, 10u32, 160u32);
+        let mut buf = blank(w, 100);
+        let panel = Panel {
+            x,
+            y,
+            w: rw,
+            h: rh,
+            r,
+        };
+        body(&mut buf, w, &panel, BG_PROMPT);
+        fn px(buf: &[u8], w: u32, x: u32, y: u32) -> &[u8] {
+            &buf[((y * w + x) * 4) as usize..][..4]
+        }
+        // A column level with the straight part of the card, so the rim and the band
+        // are the two outermost pixels of the row.
+        let column = x + rw / 2;
+        // One row above the bottom edge: the band's own edge, across the inner span.
+        let band = px(&buf, w, column, y + rh - 2);
+        let inside = px(&buf, w, column, y + rh - 6);
+        assert!(
+            band[0] < inside[0],
+            "the band is darker than the body: {band:?} against {inside:?}"
+        );
+        // ...and the left column has it too, on every row.
+        let band = px(&buf, w, x + 1, y + rh - 6);
+        let inside = px(&buf, w, x + 3, y + rh - 6);
+        assert!(band[0] < inside[0], "the band runs down the side too");
+        // At the top there is no band: the pixel inside the rim is the body.
+        let top_in = px(&buf, w, column, y + 2);
+        let top_deeper = px(&buf, w, column, y + 6);
+        assert_eq!(top_in, top_deeper, "no band under the top edge");
+    }
+
     #[test]
     fn default_palette_meets_wcag_aa_for_text() {
         for (name, fg) in [
@@ -1084,9 +1160,11 @@ mod tests {
             edge[3] > 0 && edge[3] < glass[3],
             "the corner pixel carries partial coverage: {edge:?}"
         );
-        // The rim: lighter than the row just inside it at the top, darker at the
-        // bottom, and neither where the profile has faded it out.
-        let rim = |row: u32| (px(&buf, w, x, y + row), px(&buf, w, x + 1, y + row));
+        // The rim: lighter than the inside at the top, darker at the bottom, and the
+        // dark band one pixel in at the bottom edge.
+        // The rim, against three pixels inside it: the band occupies the pixel next
+        // to the rim and would pass for the body's own edge.
+        let rim = |row: u32| (px(&buf, w, x, y + row), px(&buf, w, x + 3, y + row));
         // A row or two inside the flat band: within the corner radius the span is
         // inset, and the pixel at the panel edge is edge coverage, not the rim.
         let (top_rim, top_in) = rim(r + 2);
