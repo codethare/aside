@@ -81,10 +81,11 @@ height tween other than the first card's reveal.
 | `Esc` | vim, prefix | leave the mode, cancelling nothing |
 | `Ctrl+T` | typing | enter the prefix mode; the next key is a settings command |
 | `[` | prefix | enter vim mode |
-| `j` / `k` | vim | move the highlighted line down / up |
-| `n` / `p` | vim | move it a page down / up |
-| `h` / `l` | vim | move it to the first / last line |
-| `Ctrl+j` / `Ctrl+k` | vim | move it a page |
+| `h` / `j` / `k` / `l` | vim | move the **panel** 16 px left / down / up / right |
+| `Ctrl+h` / `Ctrl+j` / `Ctrl+k` / `Ctrl+l` | vim | the same, 160 px |
+| `n` / `p` | vim | move the highlighted line a page down / up |
+| `Ctrl+n` / `Ctrl+p` | vim | move it one line |
+| `g` / `G` | vim | move it to the first / last line |
 | `Up` / `Down` | typing | move the highlighted transcript line |
 | `PageUp` / `PageDown` | typing | move it a page |
 | `Alt+C` | typing, vim | copy the highlighted line to the clipboard |
@@ -93,7 +94,8 @@ height tween other than the first card's reveal.
 key, and `[` is the only command it has so far — later settings commands belong
 there. Vim mode takes the keyboard from the input line and from the input method,
 draws `-- VIM --` in the bar and hides the caret, so a swallowed keystroke is
-never a mystery.
+never a mystery. Its spatial keys move the panel rather than the text: the
+transcript keeps `n`/`p`, `Ctrl+n`/`Ctrl+p` and `g`/`G` for reading.
 
 Editing is the usual set: `Left`, `Right`, `Home`, `End`, `Backspace`, `Delete`,
 and `Ctrl+Left`/`Ctrl+Right` by word.

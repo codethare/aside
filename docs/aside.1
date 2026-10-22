@@ -104,10 +104,12 @@ key.  In this release that key is
 .B [
 which enters vim control mode; any other key leaves the prefix and does nothing.
 .TP
-.B "[", j ", " k ", " n ", " p ", " h ", " l ", " Ctrl+j ", " Ctrl+k
-In vim control mode: move the highlighted line down or up (\fBj\fP/\fBk\fP), a
-page down or up (\fBn\fP/\fBp\fP, also \fBCtrl+j\fP/\fBCtrl+k\fP), or to the
-first or last line (\fBh\fP/\fBl\fP).  Letters do not type while the mode is on.
+.B "[", h ", " j ", " k ", " l ", " n ", " p ", " g ", " G
+In vim control mode the spatial keys move the panel on the output: 16 pixels left,
+down, up or right (\fBh\fP, \fBj\fP, \fBk\fP, \fBl\fP), and ten times that with
+\fBCtrl\fP held, always kept on the output.  The transcript keeps its own keys:
+\fBn\fP/\fBp\fP a page down or up, \fBCtrl+n\fP/\fBCtrl+p\fP one line, and
+\fBg\fP/\fBG\fP the first or last line.  Letters do not type while the mode is on.
 .TP
 .B Esc
 In vim control mode, or in the prefix mode, leave it without cancelling anything.

@@ -508,8 +508,7 @@ struct Drag {
 /// The visible gap under the panel, in logical px: a share of the output height,
 /// plus whatever the user dragged it by. Negative drags are clamped by the caller.
 fn edge_gap(output_h: Option<u32>, drag: i32) -> u32 {
-    let h = output_h.unwrap_or(FALLBACK_OUTPUT_H) as i32;
-    (h * EDGE_SHARE / 100 + drag).max(render::SHADOW as i32) as u32
+    (base_gap(output_h) + drag).max(render::SHADOW as i32) as u32
 }
 
 /// The layer surface's bottom margin: the visible gap minus the shadow margin it
@@ -525,6 +524,26 @@ fn dragged_left(output_w: Option<u32>, sw: u32, drag: i32) -> i32 {
         .map(|ow| (ow as i32 - sw as i32).max(0))
         .unwrap_or(i32::MAX / 2);
     (left_margin(output_w, sw) + drag).clamp(0, room)
+}
+
+/// The bottom margin a drag asks for, clamped so the whole surface stays on the
+/// output: it cannot go under the bar's own shadow, nor above the top edge.
+fn dragged_bottom(output_h: Option<u32>, sh: u32, drag: i32) -> i32 {
+    let room = output_h
+        .map(|oh| (oh as i32 - sh as i32).max(0))
+        .unwrap_or(i32::MAX / 2);
+    bottom_margin(output_h, drag).clamp(0, room)
+}
+
+/// The drag offset that produces a bottom margin: the inverse of `dragged_bottom`,
+/// so `edge_gap` — and the cap derived from it — matches what is on screen.
+fn drag_for_bottom(output_h: Option<u32>, bottom: i32) -> i32 {
+    bottom + render::SHADOW as i32 - base_gap(output_h)
+}
+
+/// The gap the anchor asks for, before any drag.
+fn base_gap(output_h: Option<u32>) -> i32 {
+    output_h.unwrap_or(FALLBACK_OUTPUT_H) as i32 * EDGE_SHARE / 100
 }
 
 /// The tallest the replies may get: the gap below the bar, or the room left above
@@ -624,14 +643,32 @@ enum Move {
 /// screenful, in the unit the highlight counts in.
 fn vim_move(keysym: Keysym, ctrl: bool, page: i64) -> Option<Move> {
     match (keysym, ctrl) {
-        // `n`/`p` page; `Ctrl+j`/`Ctrl+k` are the same jump on the line axis.
-        (Keysym::n, _) | (Keysym::j, true) => Some(Move::Lines(page)),
-        (Keysym::p, _) | (Keysym::k, true) => Some(Move::Lines(-page)),
-        (Keysym::j, false) => Some(Move::Lines(1)),
-        (Keysym::k, false) => Some(Move::Lines(-1)),
-        // One column has no horizontal axis: `h`/`l` are the far ends of it.
-        (Keysym::h, _) => Some(Move::First),
-        (Keysym::l, _) => Some(Move::Last),
+        // `n`/`p` page; `Ctrl+n`/`Ctrl+p` are the same movement one line at a time,
+        // which is where `j`/`k` used to be before they moved the window.
+        (Keysym::n, false) => Some(Move::Lines(page)),
+        (Keysym::p, false) => Some(Move::Lines(-page)),
+        (Keysym::n, true) => Some(Move::Lines(1)),
+        (Keysym::p, true) => Some(Move::Lines(-1)),
+        // The ends of the transcript, vim's own keys for them.
+        (Keysym::g, false) => Some(Move::First),
+        (Keysym::G, false) => Some(Move::Last),
+        _ => None,
+    }
+}
+
+/// How far one vim-mode keypress moves the panel, in logical px: one padding step,
+/// and ten of them when `Ctrl` is held, so the keyboard can cross the screen.
+const WINDOW_STEP: i32 = 16;
+
+/// The panel movement a vim-mode key asks for, in logical px: `dx` right, `dy` up.
+/// `hjkl` are spatial here, which is why the transcript's own keys moved.
+fn window_move(keysym: Keysym, ctrl: bool) -> Option<(i32, i32)> {
+    let step = if ctrl { WINDOW_STEP * 10 } else { WINDOW_STEP };
+    match keysym {
+        Keysym::h => Some((-step, 0)),
+        Keysym::l => Some((step, 0)),
+        Keysym::j => Some((0, -step)),
+        Keysym::k => Some((0, step)),
         _ => None,
     }
 }
@@ -752,7 +789,7 @@ impl State {
     fn apply_size(&mut self) {
         let (w, h) = self.target_size();
         let (sw, sh) = surface_size((w, h));
-        let (left, bottom) = self.margins(sw);
+        let (left, bottom) = self.margins(sw, sh);
         self.layer.set_margin(0, 0, bottom, left);
         self.layer.set_size(sw, sh);
         let width_changed = w != self.width;
@@ -773,9 +810,9 @@ impl State {
     }
 
     /// Where the surface goes: centred plus the drag, kept on the output.
-    fn margins(&self, sw: u32) -> (i32, i32) {
+    fn margins(&self, sw: u32, sh: u32) -> (i32, i32) {
         let left = dragged_left(self.output_w, sw, self.drag.left);
-        let bottom = bottom_margin(self.output_h, self.drag.bottom);
+        let bottom = dragged_bottom(self.output_h, sh, self.drag.bottom);
         (left, bottom)
     }
 
@@ -955,14 +992,25 @@ impl State {
     /// anchored place, clamped to the output by `margins`.
     fn drag_to(&mut self, position: (f64, f64)) {
         let Some(from) = self.dragging else { return };
-        let (dx, dy) = (position.0 - from.0, position.1 - from.1);
-        // Dragged up means further from the bottom edge, so the bottom margin grows
+        // Up on screen is further from the bottom edge, so the bottom margin grows
         // as the pointer's y shrinks.
-        self.drag.left = self.drag.left.saturating_add(dx.round() as i32);
-        self.drag.bottom = self.drag.bottom.saturating_sub(dy.round() as i32);
+        let (dx, dy) = (position.0 - from.0, from.1 - position.1);
+        self.move_panel(dx.round() as i32, dy.round() as i32);
         self.dragging = Some(position);
-        // The cap is a share of the gap, so a drag can change how tall the panel
-        // may grow: size it again before the margins go out.
+    }
+
+    /// Move the panel by `(dx, dy)` logical px, clamped to the output. The one path
+    /// for both the pointer and the keyboard: the clamped margins are turned back
+    /// into an offset, so the gap the cap is derived from is the gap on screen.
+    fn move_panel(&mut self, dx: i32, dy: i32) {
+        let (sw, sh) = surface_size((self.width, self.height));
+        let centred = left_margin(self.output_w, sw);
+        let left = dragged_left(self.output_w, sw, self.drag.left.saturating_add(dx));
+        self.drag.left = left - centred;
+        let bottom = dragged_bottom(self.output_h, sh, self.drag.bottom.saturating_add(dy));
+        self.drag.bottom = drag_for_bottom(self.output_h, bottom);
+        // The cap is a share of the gap, so a move can change how tall the panel may
+        // grow: size it again before the margins go out.
         self.apply_size();
         self.dirty = true;
     }
@@ -976,12 +1024,20 @@ impl State {
             Keysym::Escape => self.leave_vim(),
             Keysym::Return | Keysym::KP_Enter => self.send(),
             Keysym::c if alt && !ctrl => self.copy_highlight(),
-            keysym => match vim_move(keysym, ctrl, self.page_rows()) {
-                Some(Move::Lines(delta)) => self.move_highlight(delta),
-                Some(Move::First) => self.move_to(0),
-                Some(Move::Last) => self.move_to(usize::MAX),
-                None => {}
-            },
+            keysym => {
+                // The spatial pair moves the panel; the transcript keeps its own
+                // keys, one step further out of the way.
+                if let Some((dx, dy)) = window_move(keysym, ctrl) {
+                    self.move_panel(dx, dy);
+                    return;
+                }
+                match vim_move(keysym, ctrl, self.page_rows()) {
+                    Some(Move::Lines(delta)) => self.move_highlight(delta),
+                    Some(Move::First) => self.move_to(0),
+                    Some(Move::Last) => self.move_to(usize::MAX),
+                    None => {}
+                }
+            }
         }
     }
 
@@ -1931,21 +1987,32 @@ mod tests {
         }
     }
 
-    /// The vim table: `j`/`k` a line, `n`/`p` a page, `h`/`l` the ends, `Ctrl+j`/
-    /// `Ctrl+k` a page, and nothing else moves.
+    /// The vim tables: `hjkl` step the window, and the transcript keeps its own
+    /// keys for the line, the page and the ends.
     #[test]
-    fn vim_keys_move_the_highlight_and_nothing_else() {
+    fn vim_keys_move_the_window_and_the_highlight() {
         let page = 7;
-        assert_eq!(vim_move(Keysym::j, false, page), Some(Move::Lines(1)));
-        assert_eq!(vim_move(Keysym::k, false, page), Some(Move::Lines(-1)));
+        // The spatial pair moves the panel, `Ctrl` ten times as far.
+        assert_eq!(window_move(Keysym::h, false), Some((-16, 0)));
+        assert_eq!(window_move(Keysym::l, false), Some((16, 0)));
+        assert_eq!(window_move(Keysym::j, false), Some((0, -16)));
+        assert_eq!(window_move(Keysym::k, false), Some((0, 16)));
+        assert_eq!(window_move(Keysym::h, true), Some((-160, 0)));
+        assert_eq!(window_move(Keysym::k, true), Some((0, 160)));
+        for keysym in [Keysym::n, Keysym::p, Keysym::g, Keysym::a, Keysym::Escape] {
+            assert_eq!(window_move(keysym, false), None, "{keysym:?}");
+        }
+
+        // The transcript: `n`/`p` page, `Ctrl+n`/`Ctrl+p` a line, `g`/`G` the ends.
         assert_eq!(vim_move(Keysym::n, false, page), Some(Move::Lines(page)));
         assert_eq!(vim_move(Keysym::p, false, page), Some(Move::Lines(-page)));
-        assert_eq!(vim_move(Keysym::j, true, page), Some(Move::Lines(page)));
-        assert_eq!(vim_move(Keysym::k, true, page), Some(Move::Lines(-page)));
-        assert_eq!(vim_move(Keysym::h, false, page), Some(Move::First));
-        assert_eq!(vim_move(Keysym::l, false, page), Some(Move::Last));
-        // A letter that is not in the table cannot type either: nothing happens.
-        for keysym in [Keysym::a, Keysym::x, Keysym::space, Keysym::Escape] {
+        assert_eq!(vim_move(Keysym::n, true, page), Some(Move::Lines(1)));
+        assert_eq!(vim_move(Keysym::p, true, page), Some(Move::Lines(-1)));
+        assert_eq!(vim_move(Keysym::g, false, page), Some(Move::First));
+        assert_eq!(vim_move(Keysym::G, false, page), Some(Move::Last));
+        // `hjkl` no longer move the highlight, and a letter outside the table does
+        // nothing at all.
+        for keysym in [Keysym::h, Keysym::j, Keysym::k, Keysym::l, Keysym::a] {
             assert_eq!(vim_move(keysym, false, page), None, "{keysym:?}");
         }
     }
@@ -1968,6 +2035,21 @@ mod tests {
         // still cannot go negative.
         assert_eq!(dragged_left(None, surface, 100), 100);
         assert_eq!(dragged_left(None, surface, -50), 0);
+        // Vertically: the surface cannot be pushed off the top either.
+        let sh = 200u32;
+        assert_eq!(dragged_bottom(Some(1080), sh, 10_000), 1080 - sh as i32);
+        assert_eq!(dragged_bottom(Some(1080), sh, -10_000), 0);
+        // The offset and the painted margin always agree, clamped or not: the cap is
+        // derived from the gap the user can see.
+        for drag in [-500, -20, 0, 40, 400, 5000] {
+            let bottom = dragged_bottom(Some(1080), sh, drag);
+            let offset = drag_for_bottom(Some(1080), bottom);
+            assert_eq!(
+                bottom_margin(Some(1080), offset),
+                bottom,
+                "drag {drag} disagrees with its margin"
+            );
+        }
         // A drag up grows the gap, and with it the cap; a drag down shrinks both.
         let base = bottom_margin(Some(1080), 0);
         assert_eq!(bottom_margin(Some(1080), -100), base - 100);
