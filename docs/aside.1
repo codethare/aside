@@ -34,7 +34,9 @@ both directions; it stays on the output and keeps its size, and where it was is
 never written down.
 Two cards of one tone, 12 pixels apart: the replies above, the field below, in a
 box of fixed height -- as tall as the field's gap above the screen's bottom edge --
-so a longer answer scrolls inside it instead of growing the panel.
+so a longer answer scrolls inside it instead of growing the panel.  With the
+pointer over the replies, the wheel and a two-finger slide scroll them: a notch is
+three lines, a continuous delta is taken as pixels.
 Only the model's text is drawn -- answers, failures and the panel's own notes,
 8 pixels apart.  A question you sent is kept for the next request and drawn
 nowhere.  The highlighted line is marked by brighter ink, two pixels in from its
@@ -106,6 +108,8 @@ Enter the prefix mode, the way a terminal multiplexer does: it takes exactly one
 key.  In this release that key is
 .B [
 which enters vim control mode; any other key leaves the prefix and does nothing.
+While the prefix waits the bar takes no input, changes tone and reads
+\fBpress [ to enter vim mode\fP.
 .TP
 .B "[", h ", " j ", " k ", " l ", " n ", " p ", " g ", " G
 In vim control mode the spatial keys move the panel on the output: 16 pixels left,

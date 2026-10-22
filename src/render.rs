@@ -85,6 +85,9 @@ pub const FG_PROMPT: Bgra = bgra(0xff, 0xff, 0xff, 0xf5);
 /// Gap between the replies card and the bar card (logical px): they are two cards,
 /// the way `wlmenu` floats its field below its list.
 pub const SEPARATION: u32 = 12;
+/// The bar while the prefix mode waits: the field's tone pushed towards the accent,
+/// so a mode that swallows the next key is visible before it is read.
+pub const BG_MODE: Bgra = bgra(0x2e, 0x4a, 0x5c, 0xdc);
 /// Prompt label accent: a 4px rail on the input bar's left edge (option F); a
 /// deep slate blue that carries the emphasis while staying harmonious with the
 /// gray bar and apart from the selection blue.
@@ -398,10 +401,10 @@ fn outline_gap(qx: f32, qy: f32, radius: f32) -> f32 {
 }
 
 /// One card: rounded body fill, 1 px coverage antialiasing on both sides, and the
-/// hairline rim that makes its edge read as glass against the shadow. Every card in
-/// the panel takes the same body tone.
-pub(crate) fn body(buf: &mut [u8], w: u32, panel: &Panel) {
-    let bg = premul(BG_PROMPT);
+/// hairline rim that makes its edge read as glass against the shadow. Every card
+/// takes the same tone except the bar in the prefix mode.
+pub(crate) fn body(buf: &mut [u8], w: u32, panel: &Panel, tone: Bgra) {
+    let bg = premul(tone);
     for by in panel.y..panel.y + panel.h {
         let rel = by - panel.y;
         let (x0, x1) = panel.span(rel);
@@ -1034,9 +1037,15 @@ mod tests {
             ("normal", FG_NORMAL),
             ("prompt", FG_PROMPT),
             ("selected", FG_SEL),
+            // The hint the bar shows while the prefix mode waits.
+            ("mode", FG_PROMPT),
         ] {
-            let seen = ink_over(fg, BG_PROMPT);
-            let r = contrast(seen, BG_PROMPT);
+            let bg = match name {
+                "mode" => BG_MODE,
+                _ => BG_PROMPT,
+            };
+            let seen = ink_over(fg, bg);
+            let r = contrast(seen, bg);
             assert!(
                 r >= 4.5,
                 "{name} text contrast {r:.2}:1 is below WCAG AA (4.5:1)"
@@ -1059,7 +1068,7 @@ mod tests {
             h: rh,
             r,
         };
-        body(&mut buf, w, &panel);
+        body(&mut buf, w, &panel, BG_PROMPT);
         fn px(buf: &[u8], w: u32, x: u32, y: u32) -> &[u8] {
             &buf[((y * w + x) * 4) as usize..][..4]
         }

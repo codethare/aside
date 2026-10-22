@@ -27,7 +27,10 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    2 px further right, and nothing is drawn in the left margin.
 5. `Alt+C` copies exactly the highlighted line. Paste it somewhere and check
    there is no extra whitespace or transcript around it.
-5b. `Ctrl+T` then `[`: the bar reads `-- VIM --` and the caret is gone. `hjkl`
+5b. `Ctrl+T`: the bar changes tone, takes no input and reads `press [ to enter vim
+   mode`, with no caret; any other key leaves it and types nothing, and the bar
+   returns exactly as it was. Then `Ctrl+T` then `[`: the bar reads `-- VIM --` and
+   the caret is gone. `hjkl`
    move the panel (16 px), `Ctrl+hjkl` move it 160 px, and it stops at the screen
    edges; `n`/`p` page the transcript, `Ctrl+n`/`Ctrl+p` move one line, `g`/`G` go
    to the first/last line. No letter reaches the input line. `Esc` leaves the
@@ -36,6 +39,9 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    the pointer in both directions, stays on screen, and does not change size while
    it moves. A short click moves nothing, and a new run starts where the anchor
    puts it.
+5d0. Put the pointer over the replies and turn the wheel (and slide two fingers):
+   the transcript scrolls, three lines a notch, and it stops at both ends. Over the
+   bar, nothing scrolls.
 5d. Ask something long enough to overflow the box: the panel is the same size it
    was, the newest lines are the ones on screen, and scrolling reaches the older
    ones.

@@ -28,6 +28,8 @@ pub fn draw(
     highlight: Option<usize>,
     caret_visible: bool,
     preedit: &str,
+    // What the bar says instead of the input line: the prefix mode's instruction.
+    hint: &str,
     // The bar's right-hand label: `-- VIM --` while vim mode owns the keyboard.
     label: &str,
     // How much of the replies card has grown out of the bar: 1 is fully shown.
@@ -66,8 +68,15 @@ pub fn draw(
         None => vec![bar],
     };
     render::shadow(buf, w, h, &cards, s);
+    // The bar takes the mode tone while the prefix waits, so a key that will be
+    // swallowed is visible before it is pressed.
+    let bar_tone = if hint.is_empty() {
+        render::BG_PROMPT
+    } else {
+        render::BG_MODE
+    };
     if let Some(replies) = replies.as_ref() {
-        render::body(buf, w, replies);
+        render::body(buf, w, replies, render::BG_PROMPT);
         // Rows are painted against the card's own origin, so the text travels up
         // out of the bar with it instead of being wiped in place.
         let clip = replies.y..(replies.y + replies.h);
@@ -75,7 +84,7 @@ pub fn draw(
             buf, w, font, transcript, viewport, highlight, replies, clip, aa, s,
         );
     }
-    render::body(buf, w, &bar);
+    render::body(buf, w, &bar, bar_tone);
 
     // Scroll position indicator: only while the transcript overflows the card.
     let track_y = replies.map_or(bar.y, |r| r.y);
@@ -99,6 +108,7 @@ pub fn draw(
         bar_h,
         caret_visible,
         preedit,
+        hint,
         label,
         aa,
         s,
@@ -175,6 +185,7 @@ fn draw_bar(
     row_h: u32,
     caret_visible: bool,
     preedit: &str,
+    hint: &str,
     label: &str,
     aa: Subpixel,
     s: u32,
@@ -188,7 +199,11 @@ fn draw_bar(
     // this bar has none, so the text starts at the padding.
     let text_x = (panel.x + p) as f32;
     let limit = (panel.x + panel.w) as f32 - p as f32 - text_x;
-    let typed = input.text();
+    // While the prefix waits, the bar carries the instruction and no input: the
+    // caret and the pre-edit belong to a line nobody is typing on.
+    let composing = hint.is_empty();
+    let typed = if composing { input.text() } else { hint };
+    let preedit = if composing { preedit } else { "" };
     let mut end = render::draw_text(
         buf,
         w,
@@ -250,7 +265,7 @@ fn draw_bar(
     let caret_w = 2 * s;
     let caret_bottom = (baseline - font.descent_px).round().max(0.0) as u32;
     let caret_h = font.line_h.ceil() as u32;
-    if caret_visible && caret_bottom > 0 {
+    if caret_visible && composing && caret_bottom > 0 {
         let caret_top = caret_bottom.saturating_sub(caret_h);
         let caret_x = if typed.is_empty() && preedit.is_empty() {
             text_x
@@ -285,7 +300,7 @@ pub fn draw_ball(buf: &mut [u8], w: u32, h: u32, lit: usize, scale: u32) {
     // clamps it to half of whichever side is shorter.
     panel.r = panel.w.min(panel.h);
     render::shadow(buf, w, h, &[panel], s);
-    render::body(buf, w, &panel);
+    render::body(buf, w, &panel, render::BG_PROMPT);
     // 4 px squares, 2 px gaps: a 2×2 grid centred in the ball.
     let cell = 4 * s;
     let gap = 2 * s;
@@ -472,6 +487,7 @@ mod tests {
             true,
             "",
             "",
+            "",
             reveal,
             1,
         );
@@ -577,6 +593,7 @@ mod tests {
                 true,
                 preedit,
                 "",
+                "",
                 1.0,
                 1,
             );
@@ -594,6 +611,58 @@ mod tests {
         };
         assert_eq!(ink(&bare), 0, "nothing is drawn after the typed text");
         assert!(ink(&composing) > 0, "the composition is visible");
+    }
+
+    /// The prefix mode is visible before its key is pressed: the bar's body takes
+    /// the mode tone and the line carries the instruction, with no caret and none
+    /// of the input.
+    #[test]
+    fn the_prefix_mode_turns_the_bar_and_shows_the_hint() {
+        let f = font();
+        let mut scene = scene(&f, 300.0);
+        scene.input.insert("half typed");
+        let (w, h) = sized(&scene, &f);
+        let (bw, bh) = frame(w, h);
+        let paint_with = |hint: &str, caret: bool| {
+            let mut buf = vec![0u8; (bw * bh * 4) as usize];
+            draw(
+                &mut buf,
+                bw,
+                bh,
+                &f,
+                &scene.transcript,
+                &scene.input,
+                &scene.viewport,
+                None,
+                caret,
+                "",
+                hint,
+                "",
+                1.0,
+                1,
+            );
+            buf
+        };
+        let typing = paint_with("", true);
+        let prefix = paint_with("press [ to enter vim mode", false);
+        let px = |buf: &Vec<u8>, x: u32, y: u32| buf[at(bw, x, y)..][..4].to_vec();
+        // The bar's body is the mode tone, not the glass.
+        let mid = h - f.row_h / 2;
+        assert_eq!(px(&typing, 12, mid), render::premul(render::BG_PROMPT));
+        assert_eq!(px(&prefix, 12, mid), render::premul(render::BG_MODE));
+        // The hint is inked where the input used to be, and the typed text is not.
+        let ink_row = |buf: &Vec<u8>| {
+            (crate::PAD..w - crate::PAD)
+                .flat_map(|x| (h - f.row_h..h).map(move |y| (x, y)))
+                .filter(|&(x, y)| {
+                    buf[at(bw, x, y)..][..4][..3] != render::premul(render::BG_MODE)[..3]
+                })
+                .count()
+        };
+        assert!(ink_row(&prefix) > 0, "the hint is drawn");
+        // And with the prefix over, the bar is exactly what it was.
+        let back = paint_with("", true);
+        assert_eq!(back, typing, "the bar comes back byte for byte");
     }
 
     /// Vim mode has to say so: the bar reads `-- VIM --` on the right and the
@@ -616,6 +685,7 @@ mod tests {
                 &scene.viewport,
                 None,
                 caret,
+                "",
                 "",
                 label,
                 1.0,
@@ -892,6 +962,7 @@ mod tests {
                 &scene.viewport,
                 None,
                 true,
+                "",
                 "",
                 "",
                 1.0,

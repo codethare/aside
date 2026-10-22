@@ -29,7 +29,9 @@ use smithay_client_toolkit::registry_handlers;
 use smithay_client_toolkit::seat::keyboard::{
     KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers,
 };
-use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
+use smithay_client_toolkit::seat::pointer::{
+    AxisScroll, PointerEvent, PointerEventKind, PointerHandler,
+};
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::{
@@ -236,6 +238,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         &viewport,
         Some(0),
         true,
+        "",
         "",
         "",
         1.0,
@@ -545,6 +548,14 @@ fn drag_for_bottom(output_h: Option<u32>, bottom: i32) -> i32 {
 /// The gap the anchor asks for, before any drag.
 fn base_gap(output_h: Option<u32>) -> i32 {
     output_h.unwrap_or(FALLBACK_OUTPUT_H) as i32 * EDGE_SHARE / 100
+}
+
+/// Whether a pointer at `y` in surface coordinates is over the replies card rather
+/// than the bar: the wheel scrolls there, and does nothing over the field.
+fn over_replies(panel_h: u32, y: f64) -> bool {
+    let top = render::SHADOW as f64;
+    let bar = top + (panel_h.saturating_sub(panel::bar_height())) as f64;
+    y >= top && y < bar
 }
 
 /// The tallest the replies may get: the gap below the bar, or the room left above
@@ -1016,6 +1027,26 @@ impl State {
         self.dirty = true;
     }
 
+    /// Scroll the replies from a pointer axis event. A notch is three lines; a
+    /// touchpad's continuous delta is already pixels, which is what `discrete`
+    /// being zero means.
+    fn wheel(&mut self, vertical: &AxisScroll) {
+        let Some(font) = self.font.as_ref() else {
+            return;
+        };
+        let delta = if vertical.discrete != 0 {
+            vertical.discrete as i64 * 3 * font.row_h as i64
+        } else {
+            (vertical.absolute * self.scale.max(1) as f64).round() as i64
+        };
+        if delta == 0 {
+            return;
+        }
+        let total = self.transcript.total_height();
+        self.viewport.scroll_by(delta, total);
+        self.dirty = true;
+    }
+
     /// What a key means while vim mode owns the keyboard. Navigation and the two
     /// keys that already had a meaning in every mode; anything else is swallowed,
     /// because the input line must not change while the mode is on.
@@ -1076,6 +1107,14 @@ impl State {
         }
         let next = index.min(rows - 1);
         self.move_highlight(next as i64 - self.highlight as i64);
+    }
+
+    /// What the bar says while the prefix waits for its one key.
+    fn mode_hint(&self) -> &'static str {
+        match self.mode {
+            Mode::Prefix => "press [ to enter vim mode",
+            Mode::Typing | Mode::Vim => "",
+        }
     }
 
     /// The bar's right-hand label, which is how a swallowed keystroke explains
@@ -1200,6 +1239,7 @@ impl State {
         // Read before the canvas borrows the pool: the reveal moves every frame.
         let reveal = self.reveal();
         let label = self.mode_label();
+        let hint = self.mode_hint();
         let typing = self.mode == Mode::Typing;
         let buffer = match self.buffer.take() {
             Some(buffer) => buffer,
@@ -1239,6 +1279,7 @@ impl State {
                 Some(self.highlight),
                 typing,
                 &self.ime.preedit,
+                hint,
                 label,
                 reveal,
                 self.scale,
@@ -1769,6 +1810,11 @@ impl PointerHandler for State {
                     self.dragging = None;
                 }
                 PointerEventKind::Motion { .. } => self.drag_to(event.position),
+                PointerEventKind::Axis { vertical, .. }
+                    if over_replies(self.height, event.position.1) =>
+                {
+                    self.wheel(&vertical);
+                }
                 _ => {}
             }
         }
@@ -2019,6 +2065,21 @@ mod tests {
         assert!(
             reply_cap(Some(1080), edge_gap(Some(1080), 100))
                 > reply_cap(Some(1080), edge_gap(Some(1080), -100))
+        );
+    }
+
+    /// The wheel scrolls over the replies and nowhere else.
+    #[test]
+    fn the_wheel_only_counts_over_the_replies() {
+        let panel_h = 400; // bar 30 + gap 12 + replies 358
+        let top = render::SHADOW as f64;
+        assert!(!over_replies(panel_h, top - 1.0), "the shadow margin");
+        assert!(over_replies(panel_h, top + 1.0), "the replies card");
+        let bar_top = top + (panel_h - panel::bar_height()) as f64;
+        assert!(!over_replies(panel_h, bar_top + 1.0), "the bar");
+        assert!(
+            over_replies(panel_h, bar_top - 0.5),
+            "just above the bar is replies"
         );
     }
 

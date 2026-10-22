@@ -216,6 +216,16 @@ impl Viewport {
         self.clamp(total);
     }
 
+    /// Scroll by `delta` buffer pixels, negative being towards the top. The same
+    /// rule the keys use: moving away from the tail stops following it, and
+    /// reaching it again resumes.
+    pub fn scroll_by(&mut self, delta: i64, total: u32) {
+        let max = total.saturating_sub(self.height);
+        let top = (self.top as i64 + delta).clamp(0, max as i64) as u32;
+        self.top = top;
+        self.following = top >= max;
+    }
+
     /// Scroll so the row of `row_h` at `y` is inside the window (the highlight
     /// must stay visible). Moving the highlight back to the newest row resumes
     /// following.
@@ -485,6 +495,27 @@ mod tests {
         v.ensure_visible(1170, 30, 1200);
         assert!(v.shows(1170, 30));
         assert_eq!(v.top, 1080, "a row below it scrolls exactly one window");
+    }
+
+    #[test]
+    fn the_wheel_scrolls_and_keeps_the_follow_rule() {
+        let mut v = Viewport::new(120);
+        v.follow(1200);
+        assert!(v.following);
+        // Up stops following; the wheel cannot go past the top.
+        v.scroll_by(-90, 1200);
+        assert_eq!(v.top, 990);
+        assert!(!v.following);
+        v.scroll_by(-10_000, 1200);
+        assert_eq!(v.top, 0);
+        // Down clamps at the end and follows again.
+        v.scroll_by(10_000, 1200);
+        assert_eq!(v.top, 1080);
+        assert!(v.following);
+        // Everything fits: there is nothing to scroll.
+        v.scroll_by(-90, 60);
+        assert_eq!(v.top, 0);
+        assert!(v.following);
     }
 
     #[test]

@@ -61,7 +61,9 @@ is on screen: an answer, a failure and the panel's own notes, separated by 8 px
 gaps. A question you sent is kept for the next request and drawn nowhere.
 `Up`/`Down` mark the highlighted line with brighter ink two pixels in from its
 neighbours, so there is no mark in the margin at all. The first reply of a run
-grows out of the bar in 160 ms; a follow-up does not.
+grows out of the bar in 160 ms; a follow-up does not. The wheel scrolls the
+replies while the pointer is over them — three lines a notch, a touchpad's own
+delta otherwise — and does nothing over the bar.
 
 The sizes are the panel's own; the layer surface adds the shadow margin on every
 side and sits that margin inside the visible gap. The answering panel is a
@@ -93,7 +95,8 @@ States snap: there is no height tween other than the first card's reveal.
 
 `Ctrl+T` is tmux's prefix shape rather than a vim toggle: it takes exactly one
 key, and `[` is the only command it has so far — later settings commands belong
-there. Vim mode takes the keyboard from the input line and from the input method,
+there. While it waits, the bar takes no input, changes tone and reads `press [ to
+enter vim mode`, so the next key is never swallowed by surprise. Vim mode takes the keyboard from the input line and from the input method,
 draws `-- VIM --` in the bar and hides the caret, so a swallowed keystroke is
 never a mystery. Its spatial keys move the panel rather than the text: the
 transcript keeps `n`/`p`, `Ctrl+n`/`Ctrl+p` and `g`/`G` for reading.
