@@ -36,6 +36,8 @@ pub struct Look {
     pub t: f32,
     /// How far the card has risen out of the bottom edge: 1 when in place.
     pub rise: f32,
+    /// How far the card has spread across from its centre: 1 when full width.
+    pub spread: f32,
 }
 
 impl Look {
@@ -46,29 +48,46 @@ impl Look {
             from: state,
             t: 1.0,
             rise: 1.0,
+            spread: 1.0,
         }
     }
 
-    /// A frame on its way: `t` between two shapes, or a rise into place.
-    pub fn moving(state: State, from: State, t: f32, rise: f32) -> Look {
+    /// A frame on its way: a shape change, a rise out of the bottom edge, a spread
+    /// from a point, or any two of them at once.
+    pub fn moving(state: State, from: State, t: f32, rise: f32, spread: f32) -> Look {
         Look {
             state,
             from,
             t: t.clamp(0.0, 1.0),
             rise: rise.clamp(0.0, 1.0),
+            spread: spread.clamp(0.0, 1.0),
         }
     }
 
     /// Whether this frame is animated rather than a settled shape.
     fn animated(&self) -> bool {
-        self.t < 1.0 || self.rise < 1.0
+        self.t < 1.0 || self.rise < 1.0 || self.spread < 1.0
     }
 }
 
-/// A card at `rise` of its height, anchored on its bottom edge: how the panel
-/// grows up out of the screen and how a shape change starts from nothing.
-fn risen(card: render::Panel, rise: f32) -> render::Panel {
-    let h = ((card.h as f32) * rise.clamp(0.0, 1.0)).round() as u32;
+/// A card at `spread` of its width, centred where it will be: how the panel opens
+/// as a line growing both ways out of a point. A card of no width is not painted.
+fn spread_card(card: render::Panel, spread: f32, min_w: u32) -> render::Panel {
+    let w = ((card.w as f32) * spread.clamp(0.0, 1.0)).round() as u32;
+    let w = w.max(if spread > 0.0 { min_w } else { 0 });
+    render::Panel {
+        x: card.x + (card.w - w) / 2,
+        w,
+        ..card
+    }
+}
+
+/// A card between `min_h` and its own height, anchored on its bottom edge: how the
+/// panel unfolds upward from a line, and how it rolls back down into one.
+fn risen(card: render::Panel, rise: f32, min_h: u32) -> render::Panel {
+    let rise = rise.clamp(0.0, 1.0);
+    let min_h = min_h.min(card.h).max(1);
+    let h = (min_h as f32 + (card.h as f32 - min_h as f32) * rise).round() as u32;
     render::Panel {
         y: card.y + card.h - h.max(1),
         h: h.max(1),
@@ -227,7 +246,18 @@ pub fn draw(
     if look.animated() {
         let from = card_of(look.from, &panel, bar_h);
         let to = card_of(look.state, &panel, bar_h);
-        let card = risen(lerp_card(&from, &to, look.t), look.rise);
+        // A thin line at nothing, the full card at one; a point of no width at
+        // nothing, the full width at one. Either can be part-way on its own.
+        let card = spread_card(
+            risen(lerp_card(&from, &to, look.t), look.rise, 2 * s),
+            look.spread,
+            2 * s,
+        );
+        if card.w == 0 || card.h == 0 {
+            return;
+        }
+        // Nothing is drawn on a line or on a point: the content follows both tracks.
+        let window = look.rise * look.spread;
         render::shadow(buf, w, h, &[card], s);
         // One card, two contents, faded in two halves: the shape being left goes
         // first, and the shape arriving follows once the card is wide enough.
@@ -248,8 +278,8 @@ pub fn draw(
             &card,
             lit,
             // What is leaving is all but gone when what arrives begins, so the
-            // card is never seen empty.
-            (1.0 - look.t * 1.8).clamp(0.0, 1.0) * look.rise,
+            // card is never seen empty; and nothing is drawn on a line or a point.
+            (1.0 - look.t * 1.8).clamp(0.0, 1.0) * window,
             aa,
             s,
         );
@@ -271,7 +301,7 @@ pub fn draw(
             &card,
             lit,
             // What arrives does so once there is a card wide enough to hold it.
-            ((look.t - 0.45) * 1.8).clamp(0.0, 1.0) * look.rise,
+            ((look.t - 0.45) * 1.8).clamp(0.0, 1.0) * window,
             aa,
             s,
         );
@@ -781,6 +811,76 @@ mod tests {
         assert_eq!(lerp_card(&bar, &ball, 1.0), ball);
     }
 
+    /// The opening's first half: a line spreading out of a point, which is the
+    /// card with no width and no height yet.
+    #[test]
+    fn a_frame_can_be_a_line_between_a_point_and_the_bar() {
+        let f = font();
+        let mut scene = scene(&f, 300.0);
+        scene.transcript = Transcript::default();
+        let (w, h) = (500u32, f.row_h);
+        let (bw, bh) = frame(w, h);
+        let paint_at = |spread: f32, rise: f32| {
+            let mut buf = vec![0u8; (bw * bh * 4) as usize];
+            draw(
+                &mut buf,
+                bw,
+                bh,
+                &f,
+                &scene.transcript,
+                &scene.input,
+                &scene.viewport,
+                None,
+                true,
+                "",
+                "",
+                "",
+                1.0,
+                Look::moving(State::Bar, State::Bar, 1.0, rise, spread),
+                0,
+                1,
+            );
+            buf
+        };
+        let glass = glass();
+        // A point: nothing at all is painted.
+        assert!(
+            paint_at(0.0, 0.0)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| p[3] == 0),
+            "a point is nothing"
+        );
+        // Half-spread: the middle of the panel has the line, its ends do not.
+        let half = paint_at(0.5, 0.0);
+        assert_ne!(&half[at(bw, w / 2, 0)..][..4][..3], &glass[..3], "centre");
+        assert_eq!(
+            &half[at(bw, 4, 0)..][..4],
+            &[0, 0, 0, 0],
+            "the line has not reached the edge"
+        );
+        // Full spread, still a line: it sits on the bottom row and is thin.
+        let line = paint_at(1.0, 0.0);
+        // The rim colours the outermost row, so the probe is the row inside it.
+        assert_ne!(
+            &line[at(bw, 4, h - 1)..][..4][..3],
+            &[0, 0, 0][..],
+            "the line reaches the edge"
+        );
+        assert_eq!(
+            &line[at(bw, w / 2, h - 1)..][..4][..3],
+            &[32, 32, 32][..],
+            "and runs across the middle, in the rim's tone"
+        );
+        // A line is not the bar: above it there is only the shadow it casts.
+        let above = &line[at(bw, w / 2, h - 8)..][..4];
+        assert_ne!(above[..3], glass[..3], "not the body");
+        assert_eq!(above[..3], [0, 0, 0], "shadow, and no more");
+        // Both tracks done: the idle bar.
+        assert_eq!(paint_at(1.0, 1.0), paint(&scene, w, h));
+    }
+
     /// A settled frame is the shape's own painter, whatever shape it came from: the
     /// animation cannot leak into the frame that ends it.
     #[test]
@@ -851,7 +951,7 @@ mod tests {
                 "",
                 "",
                 1.0,
-                Look::moving(State::Bar, State::Bar, 1.0, rise),
+                Look::moving(State::Bar, State::Bar, 1.0, rise, 1.0),
                 0,
                 1,
             );

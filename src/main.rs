@@ -64,15 +64,22 @@ const EDGE_SHARE: i32 = 38;
 /// distance to the screen's bottom is the yardstick the panel grows by.
 const REPLY_SHARE: u32 = 1;
 /// How long the replies card takes to grow out of the bar.
-const REVEAL_MS: u128 = 240;
+const REVEAL_MS: u128 = 260;
 /// How long the bar takes to shrink into the thinking ball. Long enough to see
 /// the shape change rather than only its result: the morph is the point.
-const MORPH_IN_MS: u128 = 320;
+const MORPH_IN_MS: u128 = 360;
 /// How long the ball takes to grow into the answering panel, a little longer
 /// because the card travels further.
-const MORPH_OUT_MS: u128 = 400;
-/// How long the panel takes to rise out of the bottom edge when it opens.
-const ENTER_MS: u128 = 200;
+const MORPH_OUT_MS: u128 = 460;
+/// How long the panel takes to open: a line spreading out of a point, then the
+/// card unfolding upward out of that line, one after the other.
+const ENTER_MS: u128 = 520;
+/// How long the panel takes to close, which is the opening run backwards: the card
+/// rolls up into a line, then the line pulls in from both ends to a point.
+const CLOSE_MS: u128 = 460;
+/// How much of an opening or closing the first track takes: the line gets its
+/// width first, and the closing run gives up its height first.
+const TRACK_SHARE: u128 = 55;
 /// How long the left button is held before moving the panel starts: a click on
 /// the panel must not be a one-pixel jump.
 const DRAG_HOLD_MS: u64 = 250;
@@ -334,6 +341,7 @@ fn run(
         pointer: None,
         morph: None,
         enter_start: None,
+        close_start: None,
         reveal_pending: false,
         reveal_start: None,
         revealed: false,
@@ -631,11 +639,34 @@ pub fn reveal_at(elapsed_ms: u128) -> f32 {
     1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
 }
 
-/// How far the panel has risen out of the bottom edge: the same ease-out, over
-/// `ENTER_MS`.
-pub fn enter_at(elapsed_ms: u128) -> f32 {
-    let t = (elapsed_ms as f32 / ENTER_MS as f32).clamp(0.0, 1.0);
+/// An ease-out over one track of an opening or closing.
+fn track_at(elapsed_ms: u128, over: u128) -> f32 {
+    let t = (elapsed_ms as f32 / over.max(1) as f32).clamp(0.0, 1.0);
     1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
+}
+
+/// The two tracks of the opening, `(spread, rise)`, `elapsed_ms` after it began: a
+/// line grows both ways out of a point, and once it has its width the card unfolds
+/// upward out of it.
+pub fn enter_tracks(elapsed_ms: u128) -> (f32, f32) {
+    let split = ENTER_MS * TRACK_SHARE / 100;
+    let spread = track_at(elapsed_ms, split);
+    // The rise only starts once the line has most of its width, so the two read as
+    // one movement instead of two.
+    let rise = track_at(
+        elapsed_ms.saturating_sub(split * 4 / 5),
+        ENTER_MS - split * 4 / 5,
+    );
+    (spread, rise)
+}
+
+/// The two tracks of the closing, `(spread, rise)`, which is the opening run
+/// backwards: the card rolls up into a line, then the line pulls in to a point.
+pub fn close_tracks(elapsed_ms: u128) -> (f32, f32) {
+    let split = CLOSE_MS * TRACK_SHARE / 100;
+    let rise = 1.0 - track_at(elapsed_ms, split);
+    let spread = 1.0 - track_at(elapsed_ms.saturating_sub(split), CLOSE_MS - split);
+    (spread, rise)
 }
 
 /// How far a shape change has got after `elapsed_ms` of `over`: a damped spring,
@@ -814,8 +845,10 @@ struct State {
     pointer: Option<wl_pointer::WlPointer>,
     /// The shape change in progress, if any.
     morph: Option<Morph>,
-    /// When the panel started rising out of the bottom edge, once per run.
+    /// When the panel started opening, once per run.
     enter_start: Option<std::time::Instant>,
+    /// When the panel started closing, which is what makes it exit.
+    close_start: Option<std::time::Instant>,
     /// A reply arrived while the ball was still morphing out: the card's own
     /// reveal waits for the shape change to end instead of running on top of it.
     reveal_pending: bool,
@@ -876,31 +909,46 @@ impl State {
         }
     }
 
-    /// How far the panel has risen out of the bottom edge.
-    fn rise(&self) -> f32 {
+    /// How far the panel has spread across and risen, `(spread, rise)`: one while
+    /// it is settled, and part-way through an opening or a closing.
+    fn tracks(&self) -> (f32, f32) {
+        if let Some(start) = self.close_start {
+            return close_tracks(start.elapsed().as_millis());
+        }
         match self.enter_start {
-            Some(start) => enter_at(start.elapsed().as_millis()),
-            None => 1.0,
+            Some(start) => enter_tracks(start.elapsed().as_millis()),
+            None => (1.0, 1.0),
         }
     }
 
-    /// Whether the panel is still rising, which needs frames of its own.
+    /// Whether the panel is opening or closing, which needs frames of its own.
     fn rising(&self) -> bool {
-        self.rise() < 1.0
+        let (spread, rise) = self.tracks();
+        spread < 1.0 || rise < 1.0
+    }
+
+    /// Whether a closing has run its course, which is when the panel goes.
+    fn close_finished(&self) -> bool {
+        match self.close_start {
+            Some(start) => start.elapsed().as_millis() >= CLOSE_MS,
+            None => false,
+        }
     }
 
     /// What the panel paints itself as in this frame.
     fn look(&self) -> panel::Look {
-        let rise = self.rise();
+        let (spread, rise) = self.tracks();
         match self.morph.filter(|_| self.morphing()) {
             Some(m) => panel::Look::moving(
                 state_of(m.to),
                 state_of(m.from),
                 self.morph_progress(),
                 rise,
+                spread,
             ),
             None => panel::Look {
                 rise,
+                spread,
                 ..panel::Look::settled(state_of(self.phase))
             },
         }
@@ -1143,8 +1191,11 @@ impl State {
                 self.reveal_start = None;
             }
             self.set_phase(Phase::Answering);
-        } else {
-            self.exit = true;
+        } else if self.close_start.is_none() {
+            // Nothing to cancel: the panel closes, rolling up and then pulling in
+            // from both ends, and the process goes when that has run.
+            self.close_start = Some(std::time::Instant::now());
+            self.dirty = true;
         }
     }
 
@@ -1328,6 +1379,11 @@ impl State {
             // The blink is the only thing moving, so keep asking for frames.
             self.dirty = true;
         }
+        if self.close_finished() {
+            // The closing animation has run: the panel goes, and the process with it.
+            self.exit = true;
+            return Ok(());
+        }
         if self.morphing() || self.rising() {
             // A shape change or the rise into place: every frame has to be painted.
             self.dirty = true;
@@ -1475,6 +1531,10 @@ impl State {
     }
 
     fn on_key(&mut self, event: &KeyEvent) {
+        // The panel is on its way out: no key has a meaning any more.
+        if self.close_start.is_some() {
+            return;
+        }
         let text = event.utf8.clone();
         // The prefix takes exactly one key, whatever it is: `[` goes to vim mode
         // and everything else is swallowed, so a settings key never types.
@@ -2294,10 +2354,57 @@ mod tests {
                 "it arrives before the deadline"
             );
         }
-        // The rise is the reveal's ease-out: quick, then settling.
-        assert_eq!(enter_at(0), 0.0);
-        assert_eq!(enter_at(ENTER_MS), 1.0);
-        assert!(enter_at(ENTER_MS / 2) > 0.5);
+    }
+
+    /// The opening and the closing are one run and its reverse: a line spreads out
+    /// of a point and the card then unfolds up out of it; closing rolls the card up
+    /// into a line and pulls the line in to a point.
+    #[test]
+    fn the_panel_opens_as_a_line_and_closes_back_into_one() {
+        let (spread, rise) = enter_tracks(0);
+        assert_eq!((spread, rise), (0.0, 0.0), "nothing at the start");
+        assert_eq!(enter_tracks(ENTER_MS), (1.0, 1.0), "the bar at the end");
+        // The width comes first: the line has most of its spread before the card
+        // has risen a quarter of the way.
+        let (spread, rise) = enter_tracks(ENTER_MS * 45 / 100);
+        assert!(spread > 0.9, "the line is out: {spread}");
+        assert!(rise < 0.3, "and the card has barely unfolded: {rise}");
+        // Then it unfolds, and it is finished no earlier than the deadline.
+        let (spread, rise) = enter_tracks(ENTER_MS * 85 / 100);
+        assert!(spread == 1.0 && rise > 0.5, "unfolding: {rise}");
+
+        // Closing is that run backwards: height first, then the two ends.
+        let (spread, rise) = close_tracks(0);
+        assert_eq!(
+            (spread, rise),
+            (1.0, 1.0),
+            "whole at the start of the close"
+        );
+        assert_eq!(close_tracks(CLOSE_MS), (0.0, 0.0), "gone at the end");
+        let (spread, rise) = close_tracks(CLOSE_MS * 50 / 100);
+        assert!(rise < 0.2, "rolled up into a line: {rise}");
+        assert!(spread > 0.5, "and the line is still out: {spread}");
+        let (spread, _) = close_tracks(CLOSE_MS * 90 / 100);
+        assert!(spread < 0.2, "then it pulls in: {spread}");
+        // Both tracks only ever move one way in their own run.
+        let mut last = (0.0, 0.0);
+        for ms in 0..=ENTER_MS {
+            let (spread, rise) = enter_tracks(ms);
+            assert!(
+                spread >= last.0 && rise >= last.1,
+                "opening goes back at {ms}"
+            );
+            last = (spread, rise);
+        }
+        last = (1.0, 1.0);
+        for ms in 0..=CLOSE_MS {
+            let (spread, rise) = close_tracks(ms);
+            assert!(
+                spread <= last.0 && rise <= last.1,
+                "closing goes back at {ms}"
+            );
+            last = (spread, rise);
+        }
     }
 
     /// A transition needs the larger of its two shapes, which is what the surface is

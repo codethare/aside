@@ -20,6 +20,7 @@
 ## 4. Docs
 
 - [x] 4.1 Update `README.md`, `docs/aside.1` and `docs/live-checklist.md` — verify: each names the three transitions and their durations
+- [x] 4.2 Open as a line spreading out of a point and unfold up out of it; close as that run backwards — verify: `enter_tracks`/`close_tracks` tests cover both tracks, their order and their ends, and a frame test finds a point, then a line, then the bar
 
 ## 5. Integration
 

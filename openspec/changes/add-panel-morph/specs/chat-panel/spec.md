@@ -2,21 +2,34 @@
 
 ## ADDED Requirements
 
-### Requirement: The panel rises into place
+### Requirement: The panel opens as a line and closes back into one
 
-When the panel opens, its card SHALL grow up out of the screen's bottom edge over
-200 ms on an ease-out, with its text and rim fading in behind it, and SHALL settle
-into exactly the idle bar. The animation SHALL NOT change the surface's size, delay
-a keystroke, or leave a frame at the end that differs from the settled one.
+When the panel opens it SHALL do so in two tracks over 520 ms: a line SHALL spread
+out of a point at the centre, both ways at once, until it has the panel's width, and
+then the card SHALL unfold upward out of that line into exactly the idle bar, with
+its text and rim fading in behind it. Only a point is on screen at the start, and a
+line — not a card — before the unfold begins. The animation SHALL NOT change the
+surface's size, delay a keystroke, or leave a frame at the end that differs from the
+settled one.
+
+Closing SHALL be the same run reversed, over 460 ms: the card rolls up into a line,
+and then that line pulls in from both ends to a point and is gone. `Esc` in typing
+mode with nothing to cancel therefore closes the panel **and then exits**, rather
+than exiting in one frame; no key SHALL have a meaning while the closing runs.
 
 #### Scenario: Opening is not a snap
 
 - **WHEN** the keybinding opens the panel
-- **THEN** the bar is seen to rise out of the bottom edge, and its final frame is the idle bar pixel for pixel
+- **THEN** a line is seen to spread out of the centre and unfold into the bar, and its final frame is the idle bar pixel for pixel
+
+#### Scenario: Closing is the opening backwards
+
+- **WHEN** the user presses `Esc` with no stream open
+- **THEN** the bar rolls up into a line, the line pulls in to the centre, and the process exits after it
 
 #### Scenario: Typing during it still works
 
-- **WHEN** a key arrives while the panel is still rising
+- **WHEN** a key arrives while the panel is still opening
 - **THEN** it reaches the input line and the animation is not restarted
 
 ### Requirement: The bar morphs into the ball and back out

@@ -17,7 +17,8 @@ round-trip, so an animation of the surface's own size is not available.
 
 - Blur, scale or opacity of the surface as a whole (needs the compositor), bouncy
   overshoot beyond a couple of percent, or animating anything else (typing, scroll).
-- Animating the panel *closing*: it exits, and a dead client cannot animate.
+- A closing that leaves the process alive for anything but the animation's length:
+  `Esc` starts the closing and the loop exits when it has run.
 
 ## Decisions
 
@@ -39,9 +40,13 @@ behind the settled frame.
 *Alternative rejected:* resizing the surface per frame — a configure round-trip per
 frame, which is what makes layer-surface animation stutter.
 
-**3. The entrance is a growth from the bottom edge, not a fade.** The card's height
-interpolates from 0 to the bar's band, anchored at the bottom, so it emerges from
-the edge with no compositing and no clipping maths. Text fades with the same `t`.
+**3. Opening and closing are two tracks of one card, not two animations.** `Look`
+carries a width fraction (`spread`) beside the height one (`rise`): the card's width
+shrinks to nothing about its own centre and its height to a 2 px line anchored at
+the bottom. Opening runs the spread first and the rise second, closing the rise
+first and the spread second, and the content fades by `rise × spread`, so nothing
+is drawn on a line or on a point. `main` reads both from one clock
+(`enter_tracks`/`close_tracks`), so there is no state machine to get out of step.
 *Alternative rejected:* a slide from below — it needs clipping outside the buffer,
 and `set_span` is not written for out-of-range rows.
 
