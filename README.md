@@ -104,6 +104,12 @@ transcript keeps `n`/`p`, `Ctrl+n`/`Ctrl+p` and `g`/`G` for reading.
 Editing is the usual set: `Left`, `Right`, `Home`, `End`, `Backspace`, `Delete`,
 and `Ctrl+Left`/`Ctrl+Right` by word.
 
+Typing goes through `zwp_text_input_v3` when an input method is there and through
+the keysyms when it is not — decided per keystroke, not once: a key pressed while
+an input method is in play is held for the rest of that event round, and typed
+itself if the input method says nothing about it. That is what keeps letters and
+digits working after the input method is switched off.
+
 ## What it depends on
 
 Six crates, 125 in the whole tree including transitive ones — the same shape as

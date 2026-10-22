@@ -1167,6 +1167,16 @@ impl State {
             // The card is growing: every frame of the ease has to be painted.
             self.dirty = true;
         }
+        // The round is over: keys the input method never claimed are the panel's own
+        // text. This is what keeps letters and digits working once the input method
+        // is switched off or gone. Never while a mode owns the keyboard: there, a
+        // letter is a command, and vim mode must not be typed into.
+        if self.mode == Mode::Typing
+            && let Some(text) = self.ime.flush()
+        {
+            self.input.insert(&text);
+            self.after_typing();
+        }
         let max_w = self.text_width();
         let mut text_arrived = false;
         if let Some(open) = self.request.as_mut() {
@@ -1325,12 +1335,23 @@ impl State {
             self.modifiers.ctrl,
             text.is_some(),
         );
-        // With an input method, text arrives through the protocol; without one,
-        // the keysyms are the only text there is.
-        if action == Key::Text && self.ime.wants_raw_keys() && self.ime.preedit.is_empty() {
+        // No input method has been heard from: the keysyms are the only text there
+        // is, so they are typed straight away.
+        if action == Key::Text && self.ime.wants_raw_keys() {
             if let Some(text) = text {
                 self.input.insert(&text);
                 self.after_typing();
+            }
+            return;
+        }
+        // An input method is in play. A pre-edit means it owns the keyboard; with
+        // none, the key is held for the rest of this event round, and typed only if
+        // the input method stays silent about it (see `tick`).
+        if action == Key::Text {
+            if self.ime.preedit.is_empty()
+                && let Some(text) = text
+            {
+                self.ime.hold(&text);
             }
             return;
         }

@@ -44,6 +44,10 @@ pub struct Ime {
     pub preedit: String,
     /// Whether an input method has spoken on this text input at all.
     live: bool,
+    /// Text keys seen since the input method last said anything. Held for the rest
+    /// of the event round: if the input method speaks in it, the keys were part of
+    /// its composition; if it stays silent, they are the panel's own text.
+    held: String,
 }
 
 impl Ime {
@@ -57,8 +61,29 @@ impl Ime {
         !self.live
     }
 
+    /// Hold a text key that the input method might claim. Only meaningful once an
+    /// input method has been heard from at all; before that the keys are typed
+    /// straight away.
+    pub fn hold(&mut self, text: &str) {
+        self.held.push_str(text);
+    }
+
+    /// What the keys held in this round amount to: `None` while the panel is
+    /// waiting for the input method, `Some` when it has stayed silent and the text
+    /// is the panel's to insert.
+    pub fn flush(&mut self) -> Option<String> {
+        (!self.held.is_empty()).then(|| std::mem::take(&mut self.held))
+    }
+
     /// What to do about one protocol event.
     pub fn handle(&mut self, event: TextInputEvent) -> Action {
+        // Whatever the input method says, the keys held so far are its business:
+        // it is composing them, or it has just committed what they became.
+        self.held.clear();
+        self.handle_event(event)
+    }
+
+    fn handle_event(&mut self, event: TextInputEvent) -> Action {
         match event {
             TextInputEvent::PreeditString { text, .. } => {
                 self.live = true;
@@ -154,6 +179,50 @@ mod tests {
 
     fn event(e: TextInputEvent) -> TextInputEvent {
         e
+    }
+
+    /// The reported defect: after Chinese, switching the input method off left the
+    /// panel unable to type letters or digits, because "an input method exists" was
+    /// latched once and never revisited.
+    #[test]
+    fn a_key_the_input_method_ignores_is_typed() {
+        let mut ime = Ime::default();
+        // An input method has spoken before, so keys are held rather than typed.
+        ime.handle(event(TextInputEvent::CommitString {
+            text: Some("你好".into()),
+        }));
+        assert!(!ime.wants_raw_keys());
+
+        // Now it says nothing about these keys: they are the panel's text.
+        ime.hold("n");
+        ime.hold("7");
+        assert_eq!(ime.flush().as_deref(), Some("n7"));
+        assert_eq!(ime.flush(), None, "a flush happens once per round");
+    }
+
+    #[test]
+    fn held_keys_are_dropped_when_the_input_method_answers() {
+        let mut ime = Ime::default();
+        ime.handle(event(TextInputEvent::Done { serial: 1 }));
+        ime.hold("n");
+        // A pre-edit in the same round: the key was the input method's.
+        let action = ime.handle(event(TextInputEvent::PreeditString {
+            text: Some("n".into()),
+            cursor_begin: 1,
+            cursor_end: 1,
+        }));
+        assert_eq!(action, Action::Preedit("n".into()));
+        assert_eq!(ime.flush(), None, "the key must not be typed as well");
+
+        // Same for a commit: only the committed text lands.
+        ime.hold("i");
+        assert_eq!(
+            ime.handle(event(TextInputEvent::CommitString {
+                text: Some("你".into())
+            })),
+            Action::Commit("你".into())
+        );
+        assert_eq!(ime.flush(), None);
     }
 
     #[test]
