@@ -22,17 +22,18 @@ text: there is no Markdown, code-block or table rendering.
 .PP
 The panel is a
 .B wlr\-layer\-shell
-surface on the overlay layer, anchored to the bottom of the output 32 pixels up
-and centred: a 640-pixel panel, one row tall, with the replies growing upwards
-above the input bar.  The frame and the bar are the ones
+surface on the overlay layer, anchored to the bottom of the output and centred,
+its bottom edge 38 per cent of the output height above the screen's bottom edge:
+the field lands just below the vertical centre and the replies grow upwards out
+of it.  The chrome is the one
 .BR wlmenu (1)
-draws: a translucent body with a hairline border inside a 24-pixel drop shadow,
+draws: a translucent body with a hairline border inside a 20-pixel drop shadow,
 and a 3-pixel scroll indicator at the right edge while the replies overflow.
-Only the model's text is drawn: an answer, a failure and the panel's own notes
-each inside a rounded card inset by the panel padding, with 8 pixels of padding
-above and below the text, and blocks separated by an 8-pixel gap.  A question you
-sent is kept for the next request and drawn nowhere.  The highlighted line is
-marked by a 2-pixel rail in the left margin.
+Two cards of one tone, 12 pixels apart: the replies above, the field below.
+Only the model's text is drawn -- answers, failures and the panel's own notes,
+8 pixels apart.  A question you sent is kept for the next request and drawn
+nowhere.  The highlighted line is marked by brighter ink, two pixels in from its
+neighbours.  The first reply of a run grows out of the bar in 160 milliseconds.
 While a request is out the panel is a 60-pixel square showing four blinking
 squares.  The expanded panel never exceeds the output height less 64 pixels, and
 scrolls inside that limit.

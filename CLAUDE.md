@@ -23,17 +23,18 @@ change.
    `argv`. See `specs/chat-sandbox`.
 3. **Keyboard first.** One meaning per key; every action reachable without a
    pointer. The key table in `specs/chat-panel` is the contract.
-4. **The frame and the bar are `wlmenu`'s.** Tokens and frame are copied exactly:
-   radius 12, `PAD` 16, 4 px rail, 8 px gap, 2 px pill, 1 px divider, the 24 px
-   shadow margin, the premultiplied translucent bodies and hairline in
-   `render.rs`, and the 3 px scroll indicator. Row height stays `size + 2 *
-   round(size * 0.25)`. The panel is a bottom-anchored `wlr-layer-shell` surface
-   in three states — bar, ball, replies — with the bar on the bottom row and the
-   replies above it, because the bottom anchor is what keeps the bar still while
-   they grow. The transcript is **not** `wlmenu`'s list: it is a stack of blocks,
-   an answer, a failure or a note inside a rounded card, separated by an 8 px
-   gap, and the highlight marked by a 2 px rail in the margin rather than a band
-   across the row. A question you sent is kept for the request and drawn nowhere.
+4. **The chrome is `wlmenu`'s.** Copied exactly: radius 12, `PAD` 16, 8 px gap,
+   `SEPARATION` 12, the 20 px shadow margin with the tight and wide layers, the
+   lit and dark hairline profiles, the plush inks, and the 3 px scroll indicator
+   in `render.rs`. Row height stays `size + 2 * round(size * 0.25)`. No accent
+   rail: `wlmenu` draws one only for a prompt label. The panel is a bottom-
+   anchored `wlr-layer-shell` surface in three states — bar, ball, replies — with
+   the bar on the bottom card and the replies in the card above it, its bottom
+   edge 38 % of the output height up the screen, because the bottom anchor is
+   what keeps the bar still while they grow. Both cards are one tone; the
+   transcript is a stack of blocks separated by an 8 px gap, with no fill of its
+   own, and the highlight is brighter ink 2 px in, never a mark in the margin. A
+   question you sent is kept for the request and drawn nowhere.
 5. **Frame cost is per visible row**, never per transcript row. Wrapping happens
    once per delta and once per resize; re-wrapping on every frame is a bug.
 6. **Zero dependencies beyond the six in `Cargo.toml`.** Ask before adding one;

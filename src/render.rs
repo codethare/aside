@@ -16,20 +16,51 @@ pub const CORNER_RADIUS: u32 = 12;
 
 /// Space reserved around the panel for its drop shadow (logical px). The buffer
 /// and the layer surface grow by it; the panel keeps its size and position.
-pub const SHADOW: u32 = 24;
+/// `wlmenu`'s current margin: plush's shadow is tighter than the old one.
+pub const SHADOW: u32 = 20;
 
 /// Shadow layers as (blur radius, alpha at the panel edge, vertical offset),
 /// logical px and 0-255. A tight contact shadow under a wide ambient one; the
 /// offset is positive because the light comes from above.
-const SHADOW_TIGHT: (u32, u32, u32) = (7, 170, 2);
-const SHADOW_WIDE: (u32, u32, u32) = (17, 130, 6);
+const SHADOW_TIGHT: (u32, u32, u32) = (6, 155, 1);
+const SHADOW_WIDE: (u32, u32, u32) = (13, 115, 4);
 // The margin must fit the widest layer, or its falloff is cut off at the buffer edge.
 const _: () = assert!(SHADOW >= SHADOW_WIDE.0 + SHADOW_WIDE.2);
 
-/// Hairline on the panel's outermost pixel — the seam between the translucent
-/// body and the shadow. Lit along the top, dark underneath, like window chrome.
+/// Hairline on a card's outermost pixel — the seam between the translucent body
+/// and the shadow. Its lit ink is solid along the top edge and gone by the lower
+/// third; its dark underside starts past the middle and is whole at the bottom.
+/// Between them the edge carries a little of both, which is what keeps it visible
+/// against the wallpaper without drawing a line around the card. (The profiles are
+/// `wlmenu`'s, so both panels share one chrome.)
 pub(crate) const BORDER_LIGHT_ALPHA: u32 = 34;
 pub(crate) const BORDER_DARK_ALPHA: u32 = 60;
+const BORDER_LIT: [(f32, f32); 5] = [
+    (0.0, 1.0),
+    (0.28, 0.62),
+    (0.55, 0.21),
+    (0.85, 0.0),
+    (1.0, 0.0),
+];
+const BORDER_DARK: [(f32, f32); 4] = [(0.0, 0.0), (0.5, 0.1), (0.82, 0.63), (1.0, 1.0)];
+
+/// Share down a piecewise-linear profile at `t` (0 = top of the card, 1 = bottom).
+fn profile(table: &[(f32, f32)], t: f32) -> f32 {
+    let mut prev = table[0];
+    for &(at, share) in &table[1..] {
+        if t <= at {
+            let span = at - prev.0;
+            let k = if span <= 0.0 {
+                1.0
+            } else {
+                (t - prev.0) / span
+            };
+            return prev.1 + (share - prev.1) * k;
+        }
+        prev = (at, share);
+    }
+    table[table.len() - 1].1
+}
 
 // Eye-comfort rules, checked at compile time (clippy: assertions on constants
 // belong here): the content inset must clear the corner radius so text never
@@ -42,37 +73,25 @@ const CLEAR: Bgra = [0, 0, 0, 0];
 
 /// Fixed gap between the prompt label and the typed input (8px grid).
 pub(crate) const PROMPT_GAP: f32 = 8.0;
-/// Prompt label rail: vertical accent strip on the bar's left edge.
-/// Vertical padding defines its height (text line + vpad both sides) —
-/// the same rhythm the capsule used.
-pub(crate) const PILL_VPAD: u32 = 2;
-/// Width of the label rail.
-pub(crate) const LABEL_RAIL_W: u32 = 4;
-/// A logical-pixel divider at the input/list boundary.
-pub(crate) const DIVIDER_H: u32 = 1;
-pub(crate) const DIVIDER_ALPHA: u32 = 64;
 
 /// Translucent glass body: the alpha is what the compositor blends with the
-/// wallpaper, so the buffer is premultiplied (`panel::draw` does that).
-pub const BG_NORMAL: Bgra = bgra(0x1e, 0x1e, 0x1e, 0xd4);
-pub const FG_NORMAL: Bgra = bgra(0xbb, 0xbb, 0xbb, 0xff);
-/// Input bar: a subtly lighter tone than the list, so bar and list read as
-/// separate pieces of one panel.
+/// wallpaper, so the buffer is premultiplied (`panel::draw` does that). One tone
+/// for the whole panel: the bar card and the replies card are the same glass.
 pub const BG_PROMPT: Bgra = bgra(0x2c, 0x2c, 0x2c, 0xdc);
-pub const FG_PROMPT: Bgra = bgra(0xee, 0xee, 0xee, 0xff);
+/// The secondary ink (`wlmenu`'s rows) and the primary one (its input line): the
+/// replies are the first, the field and the highlighted line the second.
+pub const FG_NORMAL: Bgra = bgra(0xeb, 0xeb, 0xf5, 0x9b);
+pub const FG_PROMPT: Bgra = bgra(0xff, 0xff, 0xff, 0xf5);
+/// Gap between the replies card and the bar card (logical px): they are two cards,
+/// the way `wlmenu` floats its field below its list.
+pub const SEPARATION: u32 = 12;
 /// Prompt label accent: a 4px rail on the input bar's left edge (option F); a
 /// deep slate blue that carries the emphasis while staying harmonious with the
 /// gray bar and apart from the selection blue.
 pub const LABEL_ACCENT: Bgra = bgra(0x2e, 0x4a, 0x5c, 0xff);
-/// Selected row. The background is darker than the old `0f7ca6` so white text
-/// clears WCAG AA: `#ffffff` on `#0b6285` is 6.77:1 (the previous pair was
-/// 4.06:1 — the weakest contrast in the whole UI, on the row that matters most).
-pub const BG_SEL: Bgra = bgra(0x0b, 0x62, 0x85, 0xee);
+/// The highlighted line's ink: opaque white, so the line the panel would copy is
+/// the brightest one on screen without a mark in the margin.
 pub const FG_SEL: Bgra = bgra(0xff, 0xff, 0xff, 0xff);
-/// A reply's card: between the list body and the prompt band, so the card reads
-/// as a surface laid on the panel rather than as the bar again. Composited over
-/// `BG_NORMAL` before it is painted (see `panel::card`).
-pub const BG_CARD: Bgra = bgra(0x26, 0x26, 0x26, 0xd8);
 
 /// Horizontal pixel span `[x0, x1)` of the rounded panel at row `y`
 /// (x0 inclusive, x1 exclusive). Corner pixels fall outside the span;
@@ -166,13 +185,18 @@ pub(crate) fn set_span(buf: &mut [u8], w: u32, y: u32, x0: u32, x1: u32, color: 
     }
 }
 
-/// Both drop-shadow layers in one pass. They share the panel outline, so each
-/// pixel gets its alpha from both LUTs and is written once: no read-modify-write
-/// between layers, and the band needs no clear (which is why the frame does not
-/// start with a full-buffer memset).
-pub(crate) fn shadow(buf: &mut [u8], w: u32, h: u32, panel: &Panel, scale: u32) {
-    // (blur, vertical offset, alpha by squared distance)
+/// Both drop-shadow layers for every card in one pass. The falloff is measured
+/// from the card's *outline* — a true signed distance to the rounded rectangle — so
+/// it wraps the corners instead of being cut off by them the way a per-row span is.
+/// A pixel takes the strongest card touching it, and nothing is painted under a
+/// translucent body. (Ported from `wlmenu`, which is where the numbers come from.)
+pub(crate) fn shadow(buf: &mut [u8], w: u32, h: u32, panels: &[Panel], scale: u32) {
+    if panels.is_empty() {
+        buf.fill(0);
+        return;
+    }
     let s = scale.max(1);
+    // (blur, vertical offset, alpha by squared distance)
     let layers: [(u32, i64, Vec<u32>); 2] =
         [SHADOW_WIDE, SHADOW_TIGHT].map(|(blur, a0, offset)| {
             let b = (blur * s).max(1);
@@ -188,104 +212,226 @@ pub(crate) fn shadow(buf: &mut [u8], w: u32, h: u32, panel: &Panel, scale: u32) 
             (b, offset, lut)
         });
     let reach = layers.iter().map(|l| l.0).max().unwrap_or(1);
-    // Alpha by horizontal distance, rebuilt per row: the two LUTs are combined
-    // once per column distance instead of once per shadow pixel.
-    let mut band = vec![0u8; reach as usize + 1];
-    // Rows inside the panel all share dv = 0, so the band is usually built once.
-    let mut cached = [u32::MAX; 2];
-    for by in 0..h {
-        let y = by as i64;
-        // Per layer: squared row distance from the shifted body, clamped to the
-        // layer's blur (the offset is what hangs the shadow below the panel).
-        let dv: [u32; 2] = [0, 1].map(|k| {
-            let (b, offset, _) = &layers[k];
-            let top = panel.y as i64 + *offset;
-            let bottom = top + panel.h as i64;
-            let d = if y < top {
-                top - y
-            } else if y >= bottom {
-                y - bottom + 1
-            } else {
-                0
-            };
-            let d = d.min(*b as i64) as u32;
-            d * d
-        });
-        // The outline row comes from the body itself, not from the offset shape:
-        // both layers must see the same span, or their falloffs leave a stripe
-        // where one starts further out than the other.
-        let rel = (y - panel.y as i64).clamp(0, panel.h as i64 - 1) as u32;
-        let (x0, x1) = panel.span(rel);
-        let start = x0.saturating_sub(reach);
-        let end = (x1 + reach).min(w);
-        // Everything the band does not cover is emptied: a reused buffer slot
-        // still holds the previous frame.
-        if start > 0 {
-            set_span(buf, w, by, 0, start, CLEAR);
-        }
-        if end < w {
-            set_span(buf, w, by, end, w, CLEAR);
-        }
-        let visible = (0..2).any(|k| dv[k] < layers[k].0 * layers[k].0);
-        if !visible {
-            if start < end {
-                set_span(buf, w, by, start, end, CLEAR);
+    let drop = layers.iter().map(|l| l.1.max(0) as u32).max().unwrap_or(0);
+    let shapes: Vec<Shape> = panels.iter().map(Shape::new).collect();
+    // The area any layer can touch: the cards' outlines grown by the blur (and by
+    // the downward offset), clipped to the buffer.
+    let left = shapes.iter().map(|p| p.x0()).min().unwrap_or(0);
+    let right = shapes.iter().map(|p| p.x1()).max().unwrap_or(w);
+    let x0 = left.saturating_sub(reach);
+    let x1 = (right + reach).min(w);
+    let y0 = panels
+        .iter()
+        .map(|p| p.y)
+        .min()
+        .unwrap_or(0)
+        .saturating_sub(reach);
+    let y1 = panels
+        .iter()
+        .map(|p| p.y + p.h)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(reach + drop)
+        .min(h);
+
+    // Alpha by horizontal position, rebuilt only when a row's geometry changes:
+    // every row level with the straight part of a card shares one profile.
+    let mut band = vec![0u8; (x1 - x0) as usize];
+    let mut inked = 0..0;
+    let mut cached = [u32::MAX; 4];
+
+    for y in y0..h.min(y1.max(y0)) {
+        let py = y as f32 + 0.5;
+        // This row's distance to every layer of every card, measured from where its
+        // corner arcs begin (`qy`), plus the same for the cards' own outlines.
+        let mut qys = [[0.0f32; 2]; 2];
+        let mut body_qy = [0.0f32; 2];
+        let mut key = [u32::MAX; 4];
+        let mut live = 0u32;
+        for (m, shape) in shapes.iter().enumerate().take(2) {
+            // Only the negative side collapses: the body contour needs the real
+            // value, or a row just outside the card reads as if it were under it.
+            body_qy[m] = shape.qy(py, 0).max(0.0);
+            for (k, (blur, offset, _)) in layers.iter().enumerate() {
+                // Rows level with the straight part all see the same falloff, so the
+                // negative side collapses to one key; past the blur the layer is gone.
+                let qy = shape.qy(py, *offset);
+                let reach = *blur as f32 + shape.r;
+                qys[m][k] = qy.max(0.0).min(reach);
+                if qy < reach {
+                    key[m * 2 + k] = qys[m][k].to_bits();
+                    live |= 1 << (m * 2 + k);
+                }
             }
-            continue;
         }
-        if dv != cached {
-            cached = dv;
-            for (dx, out) in band.iter_mut().enumerate() {
-                let dx2 = (dx * dx) as u32;
+        let live_bits = live;
+        if key != cached {
+            cached = key;
+            let mut first = band.len();
+            let mut last = 0;
+            for (i, out) in band.iter_mut().enumerate() {
+                let px = x0 as f32 + i as f32 + 0.5;
                 let mut a = 0u32;
-                for (k, (b, _, lut)) in layers.iter().enumerate() {
-                    let la = lut[(dx2 + dv[k]).min(b * b) as usize];
-                    a = la + div255(a * (255 - la));
+                for (m, shape) in shapes.iter().enumerate().take(2) {
+                    // No layer of this card reaches the row at all.
+                    if live_bits & (0b11 << (m * 2)) == 0 {
+                        continue;
+                    }
+                    let qx = shape.qx(px);
+                    // Under the card itself: painted by its own body, never by the shadow.
+                    if outline_gap(qx, body_qy[m], shape.r) <= 0.0 {
+                        continue;
+                    }
+                    let mut pa = 0u32;
+                    for (k, (blur, _, lut)) in layers.iter().enumerate() {
+                        if live_bits & (1 << (m * 2 + k)) == 0 {
+                            continue;
+                        }
+                        let d = outline_gap(qx, qys[m][k], shape.r).max(0.0);
+                        let la = lut[((d * d) as u32).min(blur * blur) as usize];
+                        pa = la + div255(pa * (255 - la));
+                    }
+                    a = a.max(pa);
+                }
+                if a > 0 {
+                    first = first.min(i);
+                    last = i;
                 }
                 *out = a as u8;
             }
+            inked = if last >= first { first..last + 1 } else { 0..0 };
         }
-        // Two bands outside the outline; the body itself is painted later, so
-        // it is stepped over rather than tested per pixel.
-        if by >= panel.y && by < panel.y + panel.h {
-            put_band(buf, w, by, start..x0.min(end), (x0, x1), Side::Left, &band);
-            put_band(buf, w, by, x1.max(start)..end, (x0, x1), Side::Right, &band);
-        } else {
-            put_band(buf, w, by, start..end, (x0, x1), Side::Row, &band);
+        let from = (x0 + inked.start as u32).min(w);
+        let to = (x0 + inked.end as u32).min(w);
+        // Outside the stretch this row paints, a reused buffer slot still holds the
+        // previous frame.
+        if from > 0 {
+            set_span(buf, w, y, 0, from, CLEAR);
         }
+        if to < w {
+            set_span(buf, w, y, to, w, CLEAR);
+        }
+        // The card standing on this row paints its own body, so the shadow goes in
+        // around it instead of under it: two stretches, not the whole width.
+        let body = panels
+            .iter()
+            .find(|p| y >= p.y && y < p.y + p.h)
+            .map(|p| p.span(y - p.y));
+        let (bl, br) = match body {
+            Some((bx0, bx1)) => (bx0.max(from).min(to), bx1.min(to).max(from)),
+            None => (to, to),
+        };
+        for (seg_from, seg_to) in [(from, bl), (br, to)] {
+            for (pixel, a) in buf[((y * w + seg_from) * 4) as usize..]
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .take((seg_to.saturating_sub(seg_from)) as usize)
+                .zip(&band[(seg_from - x0) as usize..(seg_to - x0) as usize])
+            {
+                pixel.copy_from_slice(&[0, 0, 0, *a]);
+            }
+        }
+    }
+    // Rows the layers cannot reach at all.
+    for y in (0..y0).chain(y1.min(h)..h) {
+        set_span(buf, w, y, 0, w, CLEAR);
     }
 }
 
-/// Which part of an outline row a shadow band covers.
-#[derive(Clone, Copy)]
-enum Side {
-    Left,
-    Right,
-    /// The whole row: the body is not there, so the middle is shadow too.
-    Row,
+/// A card's outline for the shadow: centre, half extents, and the corner radius
+/// clamped to them, so the distances below stay meaningful on a degenerate card.
+struct Shape {
+    cx: f32,
+    cy: f32,
+    half_w: f32,
+    half_h: f32,
+    r: f32,
+    x: u32,
+    w: u32,
 }
 
-/// Writes one row's shadow band: premultiplied black, so only the alpha byte.
-fn put_band(
-    buf: &mut [u8],
-    w: u32,
-    by: u32,
-    xs: std::ops::Range<u32>,
-    (x0, x1): (u32, u32),
-    side: Side,
-    band: &[u8],
-) {
-    for x in xs {
-        let dx = match side {
-            Side::Left => x0 - 1 - x,
-            Side::Right => x - x1,
-            Side::Row if x < x0 => x0 - 1 - x,
-            Side::Row if x >= x1 => x - x1,
-            Side::Row => 0,
-        };
-        let a = band[(dx as usize).min(band.len() - 1)];
-        let dst = &mut buf[((by * w + x) * 4) as usize..][..4];
-        dst.copy_from_slice(&[0, 0, 0, a]);
+impl Shape {
+    fn new(panel: &Panel) -> Self {
+        let half_w = panel.w as f32 / 2.0;
+        let half_h = panel.h as f32 / 2.0;
+        Self {
+            cx: panel.x as f32 + half_w,
+            cy: panel.y as f32 + half_h,
+            half_w,
+            half_h,
+            r: (panel.r as f32).min(half_w).min(half_h),
+            x: panel.x,
+            w: panel.w,
+        }
+    }
+
+    /// Horizontal gap from where the corner arcs begin; `|qx| > r` is the straight side.
+    fn qx(&self, px: f32) -> f32 {
+        (px - self.cx).abs() - (self.half_w - self.r)
+    }
+
+    /// The same for a row, with the layer's downward offset applied.
+    fn qy(&self, py: f32, offset: i64) -> f32 {
+        (py - self.cy - offset as f32).abs() - (self.half_h - self.r)
+    }
+
+    fn x0(&self) -> u32 {
+        self.x
+    }
+
+    fn x1(&self) -> u32 {
+        self.x + self.w
+    }
+}
+
+/// Signed distance from a rounded rectangle's outline, given the horizontal and
+/// vertical gaps to where its corner arcs begin: negative inside.
+fn outline_gap(qx: f32, qy: f32, radius: f32) -> f32 {
+    if qy <= 0.0 {
+        qx - radius
+    } else if qx <= 0.0 {
+        qy - radius
+    } else {
+        (qx * qx + qy * qy).sqrt() - radius
+    }
+}
+
+/// One card: rounded body fill, 1 px coverage antialiasing on both sides, and the
+/// hairline rim that makes its edge read as glass against the shadow. Every card in
+/// the panel takes the same body tone.
+pub(crate) fn body(buf: &mut [u8], w: u32, panel: &Panel) {
+    let bg = premul(BG_PROMPT);
+    for by in panel.y..panel.y + panel.h {
+        let rel = by - panel.y;
+        let (x0, x1) = panel.span(rel);
+        set_span(buf, w, by, x0, x1, bg);
+        // What is left of the fractional corner inset is the coverage of the pixel
+        // just outside the span, which is what antialiases the edge.
+        let inset = rounded_inset(panel.w, panel.h, panel.r, rel);
+        let cov = ((inset.ceil() - inset) * 255.0).round() as u32;
+        if cov > 0 && x0 > 0 {
+            over_pm(&mut buf[(by * w + x0 - 1) as usize * 4..][..4], bg, cov);
+        }
+        if cov > 0 && x1 < w {
+            over_pm(&mut buf[(by * w + x1) as usize * 4..][..4], bg, cov);
+        }
+        // Hairline on the outermost pixel: the seam where the body meets the
+        // shadow — lit along the top, dark underneath, cross-fading between.
+        let t = rel as f32 / panel.h.max(1) as f32;
+        let dark = (BORDER_DARK_ALPHA as f32 * profile(&BORDER_DARK, t)).round() as u32;
+        let light = (BORDER_LIGHT_ALPHA as f32 * profile(&BORDER_LIT, t)).round() as u32;
+        if x0 < x1 {
+            for x in [x0, x1 - 1] {
+                let dst = &mut buf[(by * w + x) as usize * 4..][..4];
+                if dark > 0 {
+                    over_pm(dst, [0, 0, 0, 0xff], dark);
+                }
+                if light > 0 {
+                    over_pm(dst, [0xff, 0xff, 0xff, 0xff], light);
+                }
+            }
+        }
     }
 }
 
@@ -337,47 +483,6 @@ pub fn rect(buf: &mut [u8], w: u32, h: u32, x: u32, y: u32, rw: u32, rh: u32, co
 /// of the viewport cannot paint over the bar. The outline and the edge coverage
 /// are the panel body's, which is what makes a card's corner look like every
 /// other corner in the product.
-#[allow(clippy::too_many_arguments)] // a rectangle is six numbers plus the buffer
-pub(crate) fn rounded_rect(
-    buf: &mut [u8],
-    w: u32,
-    x: u32,
-    y: u32,
-    rw: u32,
-    rh: u32,
-    r: u32,
-    color: Bgra,
-    clip: std::ops::Range<u32>,
-) {
-    if rw == 0 || rh == 0 {
-        return;
-    }
-    for by in y.max(clip.start)..(y + rh).min(clip.end) {
-        let rel = by - y;
-        let (x0, x1) = rounded_span(rw, rh, r, rel);
-        if x0 >= x1 {
-            continue;
-        }
-        set_span(buf, w, by, x + x0, x + x1, color);
-        let inset = rounded_inset(rw, rh, r, rel);
-        let cov = ((inset.ceil() - inset) * 255.0).round() as u32;
-        if cov > 0 && x0 > 0 {
-            over_pm(
-                &mut buf[((by * w + x + x0 - 1) * 4) as usize..][..4],
-                color,
-                cov,
-            );
-        }
-        if cov > 0 && x + x1 < w {
-            over_pm(
-                &mut buf[((by * w + x + x1) * 4) as usize..][..4],
-                color,
-                cov,
-            );
-        }
-    }
-}
-
 /// Antialiasing mode for text. LCD subpixel modes sample coverage in three
 /// horizontal sub-columns and feed them to R, G and B separately, which is
 /// noticeably sharper on 1× displays; `Gray` is neutral (no colour fringing)
@@ -911,15 +1016,27 @@ mod tests {
         (hi + 0.05) / (lo + 0.05)
     }
 
+    /// The inks are translucent, so what a reader sees is the ink composited over
+    /// the one glass: that pair is what has to clear AA.
+    fn ink_over(fg: Bgra, bg: Bgra) -> Bgra {
+        let mut px = bg;
+        for c in 0..3 {
+            let a = fg[3] as u32;
+            px[c] = ((fg[c] as u32 * a + bg[c] as u32 * (255 - a)) / 255) as u8;
+        }
+        px[3] = 255;
+        px
+    }
+
     #[test]
     fn default_palette_meets_wcag_aa_for_text() {
-        for (name, fg, bg) in [
-            ("normal", FG_NORMAL, BG_NORMAL),
-            ("prompt", FG_PROMPT, BG_PROMPT),
-            ("selected", FG_SEL, BG_SEL),
-            ("card", FG_NORMAL, BG_CARD),
+        for (name, fg) in [
+            ("normal", FG_NORMAL),
+            ("prompt", FG_PROMPT),
+            ("selected", FG_SEL),
         ] {
-            let r = contrast(fg, bg);
+            let seen = ink_over(fg, BG_PROMPT);
+            let r = contrast(seen, BG_PROMPT);
             assert!(
                 r >= 4.5,
                 "{name} text contrast {r:.2}:1 is below WCAG AA (4.5:1)"
@@ -927,34 +1044,46 @@ mod tests {
         }
     }
 
+    /// One card of the shared chrome: body inside, clear outside, and the hairline
+    /// lit on the top edge and dark on the bottom one.
     #[test]
-    fn a_card_fills_its_outline_and_antialiases_its_corners() {
+    fn a_card_is_glass_with_a_lit_top_and_a_dark_bottom() {
         let (rw, rh, r) = (120u32, 60u32, 12u32);
         let (x, y) = (10u32, 10u32);
         let (w, h) = (160u32, 90u32);
         let mut buf = blank(w, h);
-        let color = premul(BG_CARD);
-        rounded_rect(&mut buf, w, x, y, rw, rh, r, color, 0..h);
+        let panel = Panel {
+            x,
+            y,
+            w: rw,
+            h: rh,
+            r,
+        };
+        body(&mut buf, w, &panel);
         fn px(buf: &[u8], w: u32, x: u32, y: u32) -> &[u8] {
             &buf[((y * w + x) * 4) as usize..][..4]
         }
+        let glass = premul(BG_PROMPT);
         assert_eq!(
             px(&buf, w, x + rw / 2, y + rh / 2),
-            color,
-            "the middle is the card"
+            glass,
+            "the middle is the body"
         );
         assert_eq!(px(&buf, w, x, y), &CLEAR, "a corner is outside the outline");
         let edge = px(&buf, w, x + rounded_span(rw, rh, r, 1).0 - 1, y + 1);
         assert!(
-            edge[3] > 0 && edge[3] < color[3],
+            edge[3] > 0 && edge[3] < glass[3],
             "the corner pixel carries partial coverage: {edge:?}"
         );
-        // Clipped rows stay untouched: a card scrolled under the bar must not
-        // paint there.
-        let mut clipped = blank(w, h);
-        rounded_rect(&mut clipped, w, x, y, rw, rh, r, color, y + 20..h);
-        assert_eq!(px(&clipped, w, x + rw / 2, y + 10), &CLEAR);
-        assert_eq!(px(&clipped, w, x + rw / 2, y + 30), color);
+        // The rim: lighter than the row just inside it at the top, darker at the
+        // bottom, and neither where the profile has faded it out.
+        let rim = |row: u32| (px(&buf, w, x, y + row), px(&buf, w, x + 1, y + row));
+        // A row or two inside the flat band: within the corner radius the span is
+        // inset, and the pixel at the panel edge is edge coverage, not the rim.
+        let (top_rim, top_in) = rim(r + 2);
+        assert!(top_rim[0] > top_in[0], "top rim is lit");
+        let (bottom_rim, bottom_in) = rim(rh - r - 3);
+        assert!(bottom_rim[0] < bottom_in[0], "bottom rim is dark");
     }
 
     #[test]

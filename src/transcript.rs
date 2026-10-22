@@ -23,16 +23,6 @@ pub enum Kind {
     Note,
 }
 
-impl Kind {
-    /// Whether the entry is drawn inside a card. The reply, the failures and the
-    /// panel's own notes are all blocks with a body of their own; a question is
-    /// the user's line and stays bare, which is what makes the card mean "the
-    /// model is talking".
-    pub fn is_card(self) -> bool {
-        matches!(self, Kind::Answer | Kind::Error | Kind::Note)
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub kind: Kind,
@@ -239,12 +229,11 @@ impl Transcript {
     pub fn rows(&self, blocks: Blocks) -> Vec<Row<'_>> {
         let mut out = Vec::new();
         for entry in &self.entries {
-            let pad = if entry.kind.is_card() { blocks.pad } else { 0 };
             for (i, row) in entry.lines.visible_rows().enumerate() {
                 out.push(Row {
                     text: row,
                     kind: entry.kind,
-                    y: entry.y + pad + i as u32 * blocks.row_h,
+                    y: entry.y + i as u32 * blocks.row_h,
                     block: (entry.y, entry.h),
                 });
             }
@@ -259,8 +248,7 @@ impl Transcript {
         for entry in &self.entries {
             let rows = entry.lines.total_rows();
             if left < rows {
-                let pad = if entry.kind.is_card() { blocks.pad } else { 0 };
-                return Some(entry.y + pad + left as u32 * blocks.row_h);
+                return Some(entry.y + left as u32 * blocks.row_h);
             }
             left -= rows;
         }
@@ -310,20 +298,11 @@ fn split_at_char_boundary(s: &str, at: usize) -> (&str, bool) {
 }
 
 impl Entry {
-    /// Height of this entry's block: its text rows, plus a card's padding above
-    /// and below. An entry with no text takes no room at all, so an answer that
-    /// has not started yet cannot leave a gap under its question.
+    /// Height of this entry's block: its text rows and nothing else. An entry with
+    /// no text takes no room at all, so an answer that has not started yet cannot
+    /// leave a gap under its question.
     fn block_h(&self, blocks: Blocks) -> u32 {
-        let rows = self.lines.total_rows() as u32;
-        if rows == 0 {
-            return 0;
-        }
-        rows * blocks.row_h
-            + if self.kind.is_card() {
-                2 * blocks.pad
-            } else {
-                0
-            }
+        self.lines.total_rows() as u32 * blocks.row_h
     }
 
     /// Text length of this entry's rows, which is what the cap counts. The rows
@@ -436,11 +415,10 @@ mod tests {
         let rows = t.rows(Blocks::new(&f));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, Kind::Error);
-        let blocks = Blocks::new(&f);
         assert_eq!(
             t.total_height(),
-            f.row_h + 2 * blocks.pad,
-            "a failure is a card: its row plus the padding above and below"
+            f.row_h,
+            "a failure is one row of the replies card"
         );
     }
 
@@ -484,7 +462,7 @@ mod tests {
             "one gap between the blocks"
         );
         for (_, h) in cards {
-            assert!(h > blocks.row_h, "a card is taller than its bare rows");
+            assert_eq!(h % blocks.row_h, 0, "a block is whole rows tall");
         }
     }
 
@@ -498,8 +476,9 @@ mod tests {
         assert_eq!(t.total_height(), 0, "a question alone takes no room");
         assert_eq!(t.total_rows(), 0, "and no rows to draw");
         t.delta("x", &f, 400.0);
-        assert!(
-            t.total_height() > 2 * Blocks::new(&f).pad,
+        assert_eq!(
+            t.total_height(),
+            Blocks::new(&f).row_h,
             "the card appeared with its first row"
         );
     }
@@ -539,9 +518,8 @@ mod tests {
             .expect("an answer row");
         assert_eq!(rows[first_answer].text, "because");
         assert_eq!(
-            rows[first_answer].y,
-            rows[first_answer].block.0 + blocks.pad,
-            "the answer's first row starts after the card's padding"
+            rows[first_answer].y, rows[first_answer].block.0,
+            "the answer's first row starts at the block"
         );
         assert_eq!(t.row_y(first_answer, blocks), Some(rows[first_answer].y));
     }

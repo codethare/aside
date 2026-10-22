@@ -13,25 +13,22 @@ use crate::render::{self, Subpixel};
 /// viewport is too; the frame cost is per visible row.
 pub const MAX_ROWS: usize = 64;
 
-/// Block geometry in buffer pixels: one text row, the padding a card puts above
-/// and below its text, and the gap between two blocks. Both paddings are the one
-/// 8 px token, and the scale comes from the font, which is derived at `SIZE *
-/// scale` — the transcript holds buffer pixels like `row_h`, not logical ones.
+/// Block geometry in buffer pixels: one text row and the gap between two blocks,
+/// both 8 px on the grid. The scale comes from the font, which is derived at
+/// `SIZE * scale` — the transcript holds buffer pixels like `row_h`, not logical
+/// ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Blocks {
     pub row_h: u32,
-    pub pad: u32,
     pub gap: u32,
 }
 
 impl Blocks {
     pub fn new(font: &PanelFont) -> Blocks {
         let s = (font.size / crate::font::SIZE).round().max(1.0) as u32;
-        let inset = render::PROMPT_GAP as u32 * s;
         Blocks {
             row_h: font.row_h,
-            pad: inset,
-            gap: inset,
+            gap: render::PROMPT_GAP as u32 * s,
         }
     }
 }
@@ -327,16 +324,6 @@ impl Input {
     }
 }
 
-/// Colour of the 4 px rail beside the input: the working indicator. It changes
-/// a colour and no geometry, so a stream starting or ending cannot move a row.
-pub fn rail_color(streaming: bool) -> crate::render::Bgra {
-    if streaming {
-        render::BG_SEL
-    } else {
-        render::LABEL_ACCENT
-    }
-}
-
 /// Antialiasing for text at a given scale: subpixel only at 1×, where it is
 /// legible; above that it costs 35–55 % more for colour fringes nobody wants.
 pub fn text_aa(scale: u32) -> Subpixel {
@@ -509,12 +496,6 @@ mod tests {
         assert_eq!(v.top, 310);
         assert!(!v.shows(280, 30), "a row wholly above the window is hidden");
         assert!(v.shows(310, 30), "the first row of the window shows");
-    }
-
-    #[test]
-    fn rail_colour_is_the_only_thing_that_changes_while_streaming() {
-        assert_eq!(rail_color(false), render::LABEL_ACCENT);
-        assert_eq!(rail_color(true), render::BG_SEL);
     }
 
     #[test]

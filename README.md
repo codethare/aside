@@ -41,31 +41,33 @@ is checked on a machine with no compositor.
 ## What it looks like
 
 A `wlr-layer-shell` surface on the overlay layer, anchored to the bottom of the
-output, 32 px up and centred: the same panel `wlmenu` draws, 640 px wide and one
-row tall (30 px at 20 px text), with the replies growing upwards above the input
-bar. The bottom anchor is what keeps the bar in one place on screen; a top anchor
-would carry it downwards by a row per wrapped line. The frame and the bar are
-`wlmenu`'s too: a 24 px drop shadow, a premultiplied translucent body, a hairline
-border and antialiased corners. It has three states:
+output and centred, its bottom edge 38 % of the output height above the screen's
+bottom edge: the field lands just below the vertical centre, where the eye already
+is, and the replies grow upwards out of it. The bottom anchor is what keeps the
+bar in one place on screen; a top anchor would carry it downwards by a row per
+wrapped line. The chrome is `wlmenu`'s: a 20 px drop shadow measured from each
+card's outline, a premultiplied translucent body, a hairline whose lit and dark
+profiles cross-fade down the card, and antialiased corners. It has three states:
 
 | State | Panel size | What is drawn |
 |---|---|---|
 | idle | 640 × 30 | the bar alone |
 | thinking | 60 × 60 | a circle with four squares, one lit every 200 ms |
-| answering | 640 × (replies + bar) | the replies above, the bar at the bottom |
+| answering | 640 × (replies + 12 + bar) | the replies above, the bar below |
 
-Only the model's text is on screen: an answer, a failure and the panel's own
-notes are each drawn inside a rounded card inset by `PAD`, with 8 px of padding
-above and below the text, and blocks are separated by an 8 px gap. A question you
-sent is kept for the next request and drawn nowhere. `Up`/`Down` mark the
-highlighted line with a 2 px rail in the left margin instead of a band across the
-row.
+Two cards of one glass, 12 px apart: the replies in the upper one, the field in
+the lower one, and nothing but their shadows between them. Only the model's text
+is on screen: an answer, a failure and the panel's own notes, separated by 8 px
+gaps. A question you sent is kept for the next request and drawn nowhere.
+`Up`/`Down` mark the highlighted line with brighter ink two pixels in from its
+neighbours, so there is no mark in the margin at all. The first reply of a run
+grows out of the bar in 160 ms; a follow-up does not.
 
 The sizes are the panel's own; the layer surface adds the shadow margin on every
-side and sits 8 px from the screen edge, so the panel's visible gap stays 32 px.
-The answering panel never grows past the output height minus 64 px (the margin
-above and the breathing room below); a longer answer scrolls inside it and shows
-a 3 px scroll indicator on the right edge. States snap: there is no height tween.
+side and sits that margin inside the visible gap. The answering panel never grows
+past `output height − 38 % − 32 px`; a longer answer scrolls inside its card and
+shows a 3 px scroll indicator on the right edge. States snap: there is no height
+tween other than the first card's reveal.
 
 ## Keys
 

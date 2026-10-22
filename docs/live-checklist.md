@@ -14,17 +14,17 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 
 ## The panel
 
-1. Press the keybinding. The panel appears at the bottom of the output, 32 px up
-   and centred, and takes the keyboard.
-2. Type `what does EAGAIN mean` and press `Enter`. The answer streams in visibly,
-   growing while the stream is open, and the 4 px rail beside the input is blue
-   (`#0b6285`) until it finishes.
+1. Press the keybinding. The panel appears in the lower half of the output,
+   centred, its field just below the vertical centre, and takes the keyboard.
+2. Type `what does EAGAIN mean` and press `Enter`. The ball spins, then the
+   reply card is seen to rise out of the bar, streaming as it grows; the bar
+   itself does not move.
 3. Ask a follow-up. The earlier answer stays on screen (your questions are never
    drawn), the bar does not move, the panel grows upwards, and the new answer
    takes the earlier exchange into account.
 4. `Up`, `Down`, `PageUp`, `PageDown` move the highlighted line and the view
-   follows it; the highlighted line is marked by a 2 px blue rail (`#0b6285`) in
-   the left margin, not by a band across the row.
+   follows it; the highlighted line is brighter than its neighbours and starts
+   2 px further right, and nothing is drawn in the left margin.
 5. `Alt+C` copies exactly the highlighted line. Paste it somewhere and check
    there is no extra whitespace or transcript around it.
 6. While an answer is streaming, run `pgrep -a bwrap` in another terminal: the
@@ -53,10 +53,10 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 14. Time the first frame on a cold start (`time aside` with no transcript): it
     should be well under 50 ms after the compositor has the surface.
 15. Put a `wlmenu` frame next to an `aside --preview out.ppm` frame and check the
-    shared tokens against each other: radius, padding, rail width, gap, divider,
-    row height, the four colours, the shadow falloff, body translucency, the
-    hairline border and the corner antialiasing. This is the side-by-side check
-    the design asks for, and it needs a real `wlmenu` frame from your session.
+    shared tokens against each other: radius, padding, the 12 px card separation,
+    row height, the glass tone, the shadow falloff, the hairline profiles and the
+    corner antialiasing. This is the side-by-side check the design asks for, and
+    it needs a real `wlmenu` frame from your session.
 14. Scroll back while an answer is streaming: the view stays where it was put.
 
 ## Failure paths (optional, each costs one request)

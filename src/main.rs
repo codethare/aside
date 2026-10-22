@@ -53,13 +53,14 @@ use transcript::Transcript;
 pub const PAD: u32 = 16;
 /// `wlmenu`'s bar width, so the two read as one product.
 const WIDTH: u32 = 640;
-/// Gap between the anchored screen edge and the panel, and the room kept on the
-/// far side: the panel hangs from the bottom and grows upwards.
-const EDGE_MARGIN: i32 = 32;
+/// How far up the screen the panel's bottom edge sits, as a share of the output
+/// height: just below the vertical centre, where the eye already is, instead of
+/// hugging the bottom edge. The panel hangs from there and grows upwards.
+const EDGE_SHARE: i32 = 38;
+/// Breathing room kept above the panel, so a tall answer stops short of the top.
 const FAR_ROOM: i32 = 32;
-// The shadow margin hangs into the screen edge, so the surface margin is the
-// panel's visible gap minus that margin.
-const _: () = assert!(EDGE_MARGIN >= render::SHADOW as i32);
+/// How long the replies card takes to grow out of the bar.
+const REVEAL_MS: u128 = 160;
 /// Output height assumed for the height cap until the real one is known.
 const FALLBACK_OUTPUT_H: u32 = 1080;
 const APP_ID: &str = "aside";
@@ -225,9 +226,9 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         &input,
         &viewport,
         Some(0),
-        false,
         true,
         "",
+        1.0,
         1,
     );
     std::fs::write(path, panel::to_ppm(&buf, w, h)).map_err(|e| format!("{}: {e}", path.display()))
@@ -277,7 +278,7 @@ fn run(
     // Bottom-anchored, so the bar keeps one place on screen while answers grow
     // upwards out of it.
     layer.set_anchor(Anchor::BOTTOM);
-    layer.set_margin(0, 0, shadow_margin(), 0);
+    layer.set_margin(0, 0, bottom_margin(None), 0);
     layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
     // Collapsed to the bar. The first commit is buffer-less: it asks for the
     // configure, and nothing may be attached before that one arrives.
@@ -301,6 +302,8 @@ fn run(
         height: panel::bar_height(),
         scale: 1,
         phase: Phase::Idle,
+        reveal_start: None,
+        revealed: false,
         phase_start: std::time::Instant::now(),
         focused: false,
         output_w: None,
@@ -351,7 +354,10 @@ fn run(
     while !state.exit {
         // While a request is open, a byte can arrive at any moment; when idle
         // there is nothing to poll for, so the loop sleeps.
-        let timeout = if state.phase == Phase::Thinking {
+        let timeout = if state.revealing() {
+            // The card is growing: a frame every step of the ease.
+            Duration::from_millis(16)
+        } else if state.phase == Phase::Thinking {
             // The blink advances every 200 ms; wake often enough to show it.
             Duration::from_millis(50)
         } else if state.request.is_some() {
@@ -466,10 +472,16 @@ fn surface_size(panel: (u32, u32)) -> (u32, u32) {
     (panel.0 + 2 * render::SHADOW, panel.1 + 2 * render::SHADOW)
 }
 
-/// The margin leaves the panel `EDGE_MARGIN` from the screen edge it hangs off:
-/// the shadow margin already occupies part of that gap.
-const fn shadow_margin() -> i32 {
-    EDGE_MARGIN - render::SHADOW as i32
+/// The visible gap under the panel, in logical px: a share of the output height.
+fn edge_gap(output_h: Option<u32>) -> u32 {
+    let h = output_h.unwrap_or(FALLBACK_OUTPUT_H);
+    (h as i32 * EDGE_SHARE / 100).max(render::SHADOW as i32) as u32
+}
+
+/// The layer surface's bottom margin: the visible gap minus the shadow margin it
+/// already carries.
+fn bottom_margin(output_h: Option<u32>) -> i32 {
+    (edge_gap(output_h) - render::SHADOW) as i32
 }
 
 /// Horizontal margin that centres the surface on the output.
@@ -493,12 +505,20 @@ fn size_for(phase: Phase, content: u32, output_h: Option<u32>) -> (u32, u32) {
         Phase::Answering => {
             let cap = output_h
                 .unwrap_or(FALLBACK_OUTPUT_H)
-                .saturating_sub((EDGE_MARGIN + FAR_ROOM) as u32);
+                .saturating_sub(edge_gap(output_h) + FAR_ROOM as u32);
             let rows = layout::MAX_ROWS as u32 * bar;
             let want = bar + 1 + content.min(rows);
             (WIDTH, want.min(cap).max(bar))
         }
     }
+}
+
+/// How much of the replies card has grown out of the bar after `elapsed_ms`: an
+/// ease-out, so it leaves fast and settles instead of stopping dead. Read off the
+/// clock like the blink, so a late frame lands at the right height.
+pub fn reveal_at(elapsed_ms: u128) -> f32 {
+    let t = (elapsed_ms as f32 / REVEAL_MS as f32).clamp(0.0, 1.0);
+    1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
 }
 
 /// Which of the four squares is lit, from elapsed milliseconds rather than from
@@ -550,6 +570,10 @@ struct State {
     layer: LayerSurface,
     /// Which of the three states the panel is in.
     phase: Phase,
+    /// When the replies card started growing out of the bar, once per run.
+    reveal_start: Option<std::time::Instant>,
+    /// Whether this run has already revealed its first card.
+    revealed: bool,
     /// When the current phase began: the ball's blink is read off this clock.
     phase_start: std::time::Instant,
     /// Whether the compositor has handed this surface the keyboard.
@@ -590,13 +614,30 @@ impl State {
         blink_at(self.phase_start.elapsed().as_millis())
     }
 
+    /// How much of the replies card is on screen: 1 unless the reveal is running.
+    fn reveal(&self) -> f32 {
+        match self.reveal_start {
+            Some(start) => reveal_at(start.elapsed().as_millis()),
+            None => 1.0,
+        }
+    }
+
+    /// Whether the reveal needs a frame: it drives its own wake-ups while it runs.
+    fn revealing(&self) -> bool {
+        self.reveal() < 1.0
+    }
+
     /// Give the surface the size its phase wants, centred on the output, and
     /// re-wrap once if the width changed.
     fn apply_size(&mut self) {
         let (w, h) = self.target_size();
         let (sw, sh) = surface_size((w, h));
-        self.layer
-            .set_margin(0, 0, shadow_margin(), left_margin(self.output_w, sw));
+        self.layer.set_margin(
+            0,
+            0,
+            bottom_margin(self.output_h),
+            left_margin(self.output_w, sw),
+        );
         self.layer.set_size(sw, sh);
         let width_changed = w != self.width;
         if width_changed || h != self.height {
@@ -807,6 +848,10 @@ impl State {
             // The blink is the only thing moving, so keep asking for frames.
             self.dirty = true;
         }
+        if self.revealing() {
+            // The card is growing: every frame of the ease has to be painted.
+            self.dirty = true;
+        }
         let max_w = self.text_width();
         let mut text_arrived = false;
         if let Some(open) = self.request.as_mut() {
@@ -839,6 +884,12 @@ impl State {
             }
         }
         if text_arrived {
+            // The first card of a run grows out of the bar; a later answer does not
+            // replay it, because its card is already there.
+            if !self.revealed && self.transcript.total_height() > 0 {
+                self.revealed = true;
+                self.reveal_start = Some(std::time::Instant::now());
+            }
             // The first text ends the ball; every later row may grow the panel.
             self.phase = Phase::Answering;
             self.apply_size();
@@ -870,6 +921,8 @@ impl State {
             None
         };
         let stride = w as i32 * 4;
+        // Read before the canvas borrows the pool: the reveal moves every frame.
+        let reveal = self.reveal();
         let buffer = match self.buffer.take() {
             Some(buffer) => buffer,
             None => {
@@ -895,7 +948,6 @@ impl State {
         // Every pixel is written: the shm slots rotate, so a partial paint would
         // show the previous frame through.
         canvas.fill(0);
-        let streaming = self.request.is_some();
         match lit {
             Some(lit) => panel::draw_ball(canvas, w, h, lit, self.scale),
             None => panel::draw(
@@ -907,9 +959,9 @@ impl State {
                 &self.input,
                 &self.viewport,
                 Some(self.highlight),
-                streaming,
                 true,
                 &self.ime.preedit,
+                reveal,
                 self.scale,
             ),
         }
@@ -1012,9 +1064,8 @@ impl State {
         let before = self.input.text();
         let max_w = self.text_width();
         let mo = render::SHADOW * s;
-        let x = (mo + PAD * s + render::LABEL_RAIL_W * s) as f32
-            + render::PROMPT_GAP * s as f32
-            + render::measure(font, before, max_w);
+        // No rail in the bar: the text starts at the padding.
+        let x = (mo + PAD * s) as f32 + render::measure(font, before, max_w);
         // Both offsets are byte offsets into the surrounding text.
         let caret = self.input.caret() as i32;
         // The bar is the last row of the panel, inside the shadow margin.
@@ -1484,16 +1535,15 @@ mod tests {
             size_for(Phase::Answering, 3 * bar + 16, Some(1080)),
             (640, bar + 1 + 3 * bar + 16)
         );
-        // The cap is the output less the margin above and the room below.
+        // The cap is the output less the 38 % margin below and the room above.
+        let cap = 1080 - edge_gap(Some(1080)) - FAR_ROOM as u32;
+        assert_eq!(cap, 638, "38 % of 1080 plus 32 px of room");
         assert_eq!(
             size_for(Phase::Answering, 1000 * bar, Some(1080)),
-            (640, 1080 - 64)
+            (640, cap)
         );
         // Before the output reports, a 1080-pixel one is assumed.
-        assert_eq!(
-            size_for(Phase::Answering, 1000 * bar, None),
-            (640, 1080 - 64)
-        );
+        assert_eq!(size_for(Phase::Answering, 1000 * bar, None), (640, cap));
         // An empty transcript still leaves the bar plus its divider.
         assert_eq!(size_for(Phase::Answering, 0, Some(1080)).1, bar + 1);
         // A tiny output cannot make the panel taller than its bar or negative.
@@ -1528,7 +1578,46 @@ mod tests {
         t.finish_answer(&f);
         assert_eq!(t.request_turns()[0].text, "\u{4ec0}\u{4e48}\u{662f} EAGAIN");
         assert_eq!(t.total_rows(), 1, "the answer is what is on screen");
-        assert!(t.total_height() > f.row_h, "inside a card");
+        assert_eq!(t.total_height(), f.row_h, "one row, in the replies card");
+    }
+
+    /// The bar sits a share of the output height above the bottom edge, and the
+    /// height cap is derived from the same number.
+    #[test]
+    fn the_bar_sits_a_share_of_the_output_up_the_screen() {
+        for (output, gap) in [(1080u32, 410u32), (1440, 547), (600, 228)] {
+            assert_eq!(edge_gap(Some(output)), gap, "38 % of {output}");
+            // The surface margin is the gap less the shadow margin it carries.
+            assert_eq!(bottom_margin(Some(output)), (gap - render::SHADOW) as i32);
+            // A tall answer stops `FAR_ROOM` below the top edge.
+            let (_, h) = size_for(Phase::Answering, 100_000, Some(output));
+            assert_eq!(h, output - gap - FAR_ROOM as u32);
+        }
+        // Too small an output cannot make the margin negative or the panel shorter
+        // than its own bar.
+        assert_eq!(edge_gap(Some(10)), render::SHADOW);
+        assert_eq!(
+            size_for(Phase::Answering, 100_000, Some(10)).1,
+            panel::bar_height()
+        );
+    }
+
+    /// The reveal is a deadline: two frames at the same elapsed time paint the
+    /// same height, and it is done at the deadline.
+    #[test]
+    fn the_reveal_is_read_off_the_clock() {
+        assert_eq!(reveal_at(0), 0.0);
+        assert_eq!(reveal_at(REVEAL_MS), 1.0);
+        assert_eq!(reveal_at(REVEAL_MS * 10), 1.0, "a late frame is done");
+        // Monotonic, and busy in between: an ease, not a step.
+        let mut previous = 0.0;
+        for ms in 0..=REVEAL_MS {
+            let at = reveal_at(ms);
+            assert!(at >= previous, "the reveal never goes backwards");
+            previous = at;
+        }
+        let half = reveal_at(REVEAL_MS / 2);
+        assert!(half > 0.5 && half < 1.0, "ease-out: {half} at half time");
     }
 
     #[test]
