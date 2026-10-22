@@ -43,11 +43,11 @@ three lines, a continuous delta is taken as pixels.
 Only the model's text about the question just asked is drawn -- its answer, and a
 failure or note that belongs to it, 8 pixels apart.  Earlier turns are kept for
 the request and drawn nowhere, and so is the question you typed.  The highlighted line is marked by brighter ink, two pixels in from its
-neighbours.  The first reply of a run grows out of the bar in 160 milliseconds.
+neighbours.  The first reply of a run grows out of the bar in 240 milliseconds.
 While a request is out the panel is a 60-pixel square showing four blinking
 squares.  The three states are animated rather than snapped: the bar rises out of
-the bottom edge in 120 milliseconds, \fBEnter\fP morphs it into the ball in 200
-milliseconds, and the first text grows the ball into the panel in 240, all inside
+the bottom edge in 200 milliseconds, \fBEnter\fP morphs it into the ball in 320
+milliseconds, and the first text grows the ball into the panel in 400, all inside
 one buffer so the surface is resized once per state.  The expanded panel never exceeds the output height less 64 pixels, and
 scrolls inside that limit.
 .PP

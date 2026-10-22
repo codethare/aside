@@ -64,13 +64,15 @@ const EDGE_SHARE: i32 = 38;
 /// distance to the screen's bottom is the yardstick the panel grows by.
 const REPLY_SHARE: u32 = 1;
 /// How long the replies card takes to grow out of the bar.
-const REVEAL_MS: u128 = 160;
-/// How long the bar takes to shrink into the thinking ball.
-const MORPH_IN_MS: u128 = 200;
-/// How long the ball takes to grow into the answering panel.
-const MORPH_OUT_MS: u128 = 240;
+const REVEAL_MS: u128 = 240;
+/// How long the bar takes to shrink into the thinking ball. Long enough to see
+/// the shape change rather than only its result: the morph is the point.
+const MORPH_IN_MS: u128 = 320;
+/// How long the ball takes to grow into the answering panel, a little longer
+/// because the card travels further.
+const MORPH_OUT_MS: u128 = 400;
 /// How long the panel takes to rise out of the bottom edge when it opens.
-const ENTER_MS: u128 = 120;
+const ENTER_MS: u128 = 200;
 /// How long the left button is held before moving the panel starts: a click on
 /// the panel must not be a one-pixel jump.
 const DRAG_HOLD_MS: u64 = 250;

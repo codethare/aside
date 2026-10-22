@@ -62,7 +62,7 @@ is on screen: an answer, a failure and the panel's own notes, separated by 8 px
 gaps. A question you sent is kept for the next request and drawn nowhere.
 `Up`/`Down` mark the highlighted line with brighter ink two pixels in from its
 neighbours, so there is no mark in the margin at all. The first reply of a run
-grows out of the bar in 160 ms; a follow-up does not. The wheel scrolls the
+grows out of the bar in 240 ms; a follow-up does not. The wheel scrolls the
 replies while the pointer is over them — three lines a notch, a touchpad's own
 delta otherwise — and does nothing over the bar.
 
@@ -74,11 +74,11 @@ room left above it). It does not grow as the answer does — a longer answer scr
 inside the box and shows a 3 px scroll indicator on the right edge. Holding the
 left button for a quarter of a second and moving drags the panel, in both axes;
 it stays on the output, keeps its size, and where it was is never written down.
-Opening is animated: the bar rises out of the bottom edge over 120 ms, `Enter`
-morphs it into the thinking ball over 200 ms on a spring, and the first text grows
-that ball into the answering panel over 240 ms — one card changing shape, painted
+Opening is animated: the bar rises out of the bottom edge over 200 ms, `Enter`
+morphs it into the thinking ball over 320 ms on a spring, and the first text grows
+that ball into the answering panel over 400 ms — one card changing shape, painted
 inside one buffer, so the surface is resized once per state and never per frame.
-Inside the panel, the replies card grows out of the bar in 160 ms once the ball has
+Inside the panel, the replies card grows out of the bar in 240 ms once the ball has
 finished becoming the panel.
 
 ## Keys

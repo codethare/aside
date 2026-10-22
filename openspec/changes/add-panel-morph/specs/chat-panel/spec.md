@@ -5,7 +5,7 @@
 ### Requirement: The panel rises into place
 
 When the panel opens, its card SHALL grow up out of the screen's bottom edge over
-120 ms on an ease-out, with its text and rim fading in behind it, and SHALL settle
+200 ms on an ease-out, with its text and rim fading in behind it, and SHALL settle
 into exactly the idle bar. The animation SHALL NOT change the surface's size, delay
 a keystroke, or leave a frame at the end that differs from the settled one.
 
@@ -21,11 +21,11 @@ a keystroke, or leave a frame at the end that differs from the settled one.
 
 ### Requirement: The bar morphs into the ball and back out
 
-Sending a question SHALL morph the bar's card into the thinking ball over 200 ms on
+Sending a question SHALL morph the bar's card into the thinking ball over 320 ms on
 a spring: one rounded card whose width, height and corner radius interpolate from
 the bar's band to the 60 px square circle, the bar's text fading out and the ball's
 squares fading in. The first text SHALL morph that card out into the answering
-panel over 240 ms, the replies fading up inside it and the bar's own line fading in
+panel over 400 ms, the replies fading up inside it and the bar's own line fading in
 at the end. Both transitions SHALL be painted inside one buffer at the larger of
 the two states' sizes, so the surface SHALL be resized once per transition and
 `MUST NOT` be resized per frame. A settled frame SHALL be painted by the static
@@ -55,7 +55,7 @@ painters exactly as before, and neither transition SHALL re-wrap the transcript.
 
 ### Requirement: The reveal is the replies card's own animation
 
-The replies card appearing inside the answering panel SHALL keep its 160 ms reveal,
+The replies card appearing inside the answering panel SHALL keep its 240 ms reveal,
 and SHALL start when the ball-to-panel morph ends rather than on top of it, so a
 reply is seen once: first the card forming, then its content arriving.
 
