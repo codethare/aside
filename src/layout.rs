@@ -426,7 +426,8 @@ mod tests {
     fn a_character_wider_than_the_panel_breaks_on_a_boundary() {
         let f = font();
         // A CJK character is about 20 px wide, so a 12 px panel cannot hold one.
-        // The thinking ball is 60 px wide and its text width used to be 12 px:
+        // A 60 px panel once put the text width at 12 px, narrower than one CJK
+        // character, and the fallback break split it mid-byte:
         // the fallback break then split the character at byte 1 and panicked.
         for text in ["\u{4e2d}", "\u{4e2d}\u{6587}\u{5b57}", "a\u{4e2d}"] {
             let lines = Lines::wrap(text, &f, 12.0);

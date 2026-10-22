@@ -17,10 +17,8 @@ use crate::transcript::{Kind, Row, Transcript};
 /// The panel's three shapes, as shapes rather than as the state machine's phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
-    /// The input bar alone.
+    /// The input bar alone, which is also the shape a running request keeps.
     Bar,
-    /// The thinking ball.
-    Ball,
     /// The replies above, the bar below.
     Replies,
 }
@@ -113,7 +111,7 @@ fn draw_content(
     label: &str,
     state: State,
     card: &render::Panel,
-    lit: usize,
+    head: Option<f32>,
     fade: f32,
     aa: Subpixel,
     s: u32,
@@ -122,23 +120,29 @@ fn draw_content(
         return;
     }
     match state {
-        State::Bar => draw_bar(
-            buf,
-            w,
-            h,
-            card,
-            font,
-            input,
-            card.h,
-            caret_visible,
-            preedit,
-            hint,
-            label,
-            fade,
-            aa,
-            s,
-        ),
-        State::Ball => draw_ball_squares(buf, w, h, card, lit, fade, s),
+        State::Bar => {
+            draw_bar(
+                buf,
+                w,
+                h,
+                card,
+                font,
+                input,
+                card.h,
+                caret_visible,
+                preedit,
+                hint,
+                label,
+                fade,
+                aa,
+                s,
+            );
+            // The working light runs over the rim the body has just painted, so it
+            // needs the card's whole rim intact: only the bar's own state draws it.
+            if let Some(head) = head.filter(|_| fade > 0.99) {
+                render::orbit(buf, w, h, card, head, s);
+            }
+        }
         State::Replies => draw_replies(
             buf,
             w,
@@ -164,20 +168,7 @@ pub fn card_of(state: State, panel: &render::Panel, bar_h: u32) -> render::Panel
             h: bar_h.min(panel.h),
             ..*panel
         },
-        State::Ball => ball_card(panel, bar_h),
         State::Replies => *panel,
-    }
-}
-
-/// The ball's card: a square of its own diameter, on the bottom row and centred.
-fn ball_card(panel: &render::Panel, bar_h: u32) -> render::Panel {
-    let side = (2 * bar_h).min(panel.h).min(panel.w).max(1);
-    render::Panel {
-        x: panel.x + (panel.w - side) / 2,
-        y: panel.y + panel.h - side,
-        w: side,
-        h: side,
-        r: side / 2,
     }
 }
 
@@ -232,8 +223,9 @@ pub fn draw(
     reveal: f32,
     // Which shape this frame is, and how far it has morphed into it.
     look: Look,
-    // The square the ball has lit, while the panel is thinking.
-    lit: usize,
+    // Where the working light is on the bar's rim, 0..1 round the perimeter; the
+    // light is only painted while a request is open.
+    head: Option<f32>,
     scale: u32,
 ) {
     let s = scale.max(1);
@@ -276,7 +268,7 @@ pub fn draw(
             label,
             look.from,
             &card,
-            lit,
+            head,
             // What is leaving is all but gone when what arrives begins, so the
             // card is never seen empty; and nothing is drawn on a line or a point.
             (1.0 - look.t * 1.8).clamp(0.0, 1.0) * window,
@@ -299,19 +291,12 @@ pub fn draw(
             label,
             look.state,
             &card,
-            lit,
+            head,
             // What arrives does so once there is a card wide enough to hold it.
             ((look.t - 0.45) * 1.8).clamp(0.0, 1.0) * window,
             aa,
             s,
         );
-        return;
-    }
-    if look.state == State::Ball {
-        let card = ball_card(&panel, bar_h);
-        render::shadow(buf, w, h, &[card], s);
-        render::body(buf, w, &card, render::BG_PROMPT);
-        draw_ball_squares(buf, w, h, &card, lit, 1.0, s);
         return;
     }
 
@@ -385,6 +370,11 @@ pub fn draw(
         aa,
         s,
     );
+    // The working light, over the rim the bar has just painted: a request in flight
+    // is shown by the field's own edge, not by taking the field away.
+    if let Some(head) = head {
+        render::orbit(buf, w, h, &bar, head, s);
+    }
 }
 
 /// The panel inside the shadow margin, or `None` when the buffer is too small
@@ -564,49 +554,6 @@ fn draw_bar(
     }
 }
 
-/// The thinking ball: a filled circle on the cleared surface, with four `FG_PROMPT`
-/// squares in a 2×2 grid, one lit. `lit` comes from the clock, never from a frame
-/// counter, so a late frame lands on the right square.
-/// The ball's four squares, centred on `card`: 4 px cells, 2 px gaps, one lit. A
-/// morph draws them on a card that is still changing shape, so this is apart from
-/// the settled painter that owns the circle's shadow and body.
-fn draw_ball_squares(
-    buf: &mut [u8],
-    w: u32,
-    h: u32,
-    panel: &render::Panel,
-    lit: usize,
-    fade: f32,
-    s: u32,
-) {
-    let cell = 4 * s;
-    let gap = 2 * s;
-    let grid = cell * 2 + gap;
-    let left = panel.x + (panel.w - grid) / 2;
-    let top = panel.y + (panel.h - grid) / 2;
-    for i in 0..4 {
-        let (col, row) = (i as u32 % 2, i as u32 / 2);
-        let mut filled = render::premul(render::BG_PROMPT);
-        if i == lit {
-            filled = render::dim(render::FG_PROMPT, fade);
-        } else {
-            // Unlit squares stay visible as a dim dot rather than vanishing: a
-            // quarter of the primary ink over the body.
-            render::over_pm(&mut filled, render::dim(render::FG_PROMPT, fade), 64);
-        }
-        render::rect(
-            buf,
-            w,
-            h,
-            left + col * (cell + gap),
-            top + row * (cell + gap),
-            cell,
-            cell,
-            filled,
-        );
-    }
-}
-
 /// One reply line: the text in its ink, brighter and 2 px in when it is the
 /// highlighted one. No rail, no band: `aside` has no list to mark.
 #[allow(clippy::too_many_arguments)] // a row is where it goes plus what it says
@@ -771,7 +718,7 @@ mod tests {
             "",
             reveal,
             Look::settled(State::Replies),
-            0,
+            None,
             1,
         );
         buf
@@ -799,16 +746,11 @@ mod tests {
             (bar.x, bar.y, bar.w, bar.h),
             (20, 26 + h - f.row_h, 640, f.row_h)
         );
-        let ball = card_of(State::Ball, &panel, f.row_h);
-        assert_eq!((ball.w, ball.h), (2 * f.row_h, 2 * f.row_h));
-        assert_eq!(ball.r, f.row_h, "a circle: half its side");
-        assert_eq!(ball.x, 20 + (640 - 2 * f.row_h) / 2, "centred on the bar");
-        assert_eq!(ball.y, 26 + h - 2 * f.row_h, "and standing on its row");
         let pane = card_of(State::Replies, &panel, f.row_h);
         assert_eq!((pane.y, pane.h), (26, h), "the whole panel");
-        // A shape change is the lerp of two of them, exact at both ends.
-        assert_eq!(lerp_card(&bar, &ball, 0.0), bar);
-        assert_eq!(lerp_card(&bar, &ball, 1.0), ball);
+        // A shape change is the lerp of the two, exact at both ends.
+        assert_eq!(lerp_card(&bar, &pane, 0.0), bar);
+        assert_eq!(lerp_card(&bar, &pane, 1.0), pane);
     }
 
     /// The opening's first half: a line spreading out of a point, which is the
@@ -837,7 +779,7 @@ mod tests {
                 "",
                 1.0,
                 Look::moving(State::Bar, State::Bar, 1.0, rise, spread),
-                0,
+                None,
                 1,
             );
             buf
@@ -906,22 +848,22 @@ mod tests {
                 "",
                 1.0,
                 look,
-                0,
+                None,
                 1,
             );
             buf
         };
         let settled = paint_look(Look::settled(State::Replies));
-        for from in [State::Bar, State::Ball] {
-            assert_eq!(
-                paint_look(Look {
-                    from,
-                    ..Look::settled(State::Replies)
-                }),
-                settled,
-                "a frame at rest is the same frame"
-            );
-        }
+        // The bar is the shape it can come from; the frame at rest is the same one
+        // whatever the shape it left.
+        assert_eq!(
+            paint_look(Look {
+                from: State::Bar,
+                ..Look::settled(State::Replies)
+            }),
+            settled,
+            "a frame at rest is the same frame"
+        );
     }
 
     /// The entrance is the card growing up out of the bottom edge: at nothing it is
@@ -952,7 +894,7 @@ mod tests {
                 "",
                 1.0,
                 Look::moving(State::Bar, State::Bar, 1.0, rise, 1.0),
-                0,
+                None,
                 1,
             );
             buf
@@ -1067,7 +1009,7 @@ mod tests {
                 "",
                 1.0,
                 Look::settled(State::Replies),
-                0,
+                None,
                 1,
             );
             buf
@@ -1115,7 +1057,7 @@ mod tests {
                 "",
                 1.0,
                 Look::settled(State::Replies),
-                0,
+                None,
                 1,
             );
             buf
@@ -1167,7 +1109,7 @@ mod tests {
                 label,
                 1.0,
                 Look::settled(State::Replies),
-                0,
+                None,
                 1,
             );
             buf
@@ -1415,57 +1357,71 @@ mod tests {
         );
     }
 
+    /// The working light runs the bar's rim: the lit stretch of the edge is the one
+    /// the head has just passed, and the bar's own text is still drawn under it.
     #[test]
-    fn the_ball_has_a_lit_square_that_moves() {
+    fn the_working_light_runs_round_the_bar() {
         let f = font();
-        let scene = scene(&f, 300.0);
-        let (panel, scale) = (48u32, 1u32);
-        let (w, h) = frame(panel, panel);
-        let paint_ball = |lit: usize, w: u32, h: u32, scale: u32| {
-            let mut buf = vec![0u8; (w * h * 4) as usize];
+        let mut scene = scene(&f, 300.0);
+        scene.transcript = Transcript::default();
+        scene.input.insert("typing 打字");
+        let (w, h) = (500u32, f.row_h);
+        let (bw, bh) = frame(w, h);
+        let paint_head = |head: Option<f32>| {
+            let mut buf = vec![0u8; (bw * bh * 4) as usize];
             draw(
                 &mut buf,
-                w,
-                h,
+                bw,
+                bh,
                 &f,
                 &scene.transcript,
                 &scene.input,
                 &scene.viewport,
                 None,
-                false,
+                true,
                 "",
                 "",
                 "",
                 1.0,
-                Look::settled(State::Ball),
-                lit,
-                scale,
+                Look::settled(State::Bar),
+                head,
+                1,
             );
             buf
         };
-        let a = paint_ball(0, w, h, scale);
-        let b = paint_ball(1, w, h, scale);
-        assert_ne!(a, b, "a later phase lights a different square");
-        // Every density paints the same circle instead of panicking on the radius.
-        for scale in [1u32, 2, 3] {
-            let side = panel * scale;
-            let w = side + 2 * render::SHADOW * scale;
-            paint_ball(0, w, w, scale);
-        }
-        // The circle is round: the corner carries at most a trace of the shadow,
-        // and the middle is the glass body.
-        fn px(buf: &[u8], w: u32, x: u32, y: u32) -> &[u8] {
-            &buf[at(w, x, y)..][..4]
-        }
+        let idle = paint_head(None);
+        let dark = paint_head(Some(0.0));
+        assert_ne!(idle, dark, "a request in flight shows on the rim");
+
+        // A point a tenth of the way round the outline, probed with the head just
+        // past it and with the head half a lap away.
+        let card = render::Panel {
+            x: render::SHADOW,
+            y: render::SHADOW,
+            w,
+            h,
+            r: render::CORNER_RADIUS,
+        };
+        let points = render::outline(&card);
+        let on_rim = |share: f32| points[(share * points.len() as f32) as usize % points.len()];
+        let (px_x, px_y) = on_rim(0.10);
+        // `at` takes panel-relative coordinates; the outline is in buffer ones.
+        let probe =
+            |buf: &[u8]| buf[at(bw, px_x - render::SHADOW, px_y - render::SHADOW)..][..4][0];
+        let behind = probe(&paint_head(Some(0.12)));
+        let away = probe(&paint_head(Some(0.60)));
         assert!(
-            px(&a, w, 0, 0)[3] < render::BG_PROMPT[3],
-            "the corner is shadow, not the body"
+            behind > away,
+            "the stretch behind the head is lit: {behind} against {away}"
         );
-        assert_eq!(
-            px(&a, w, panel / 2, panel / 2)[3],
-            render::BG_PROMPT[3],
-            "centre is the glass body"
-        );
+        // The bar keeps its text: the light did not take the field away.
+        let ink = |buf: &[u8]| {
+            (crate::PAD..w / 2)
+                .flat_map(|x| (h / 2..h - 2).map(move |y| (x, y)))
+                .filter(|&(x, y)| buf[at(bw, x, y)..][..4][..3] != glass()[..3])
+                .count()
+        };
+        assert!(ink(&dark) > 0, "the typed text is drawn under the light");
     }
 
     #[test]
@@ -1499,7 +1455,7 @@ mod tests {
                 "",
                 1.0,
                 Look::settled(State::Replies),
-                0,
+                None,
                 scale,
             );
             assert!(

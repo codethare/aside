@@ -53,7 +53,7 @@ band one pixel inside it, and antialiased corners. It has three states:
 | State | Panel size | What is drawn |
 |---|---|---|
 | idle | 640 × 30 | the bar alone |
-| thinking | 60 × 60 | a circle with four squares, one lit every 200 ms |
+| thinking | 640 × 30 | the same bar, with a light running round its rim |
 | answering | 640 × (replies + 16 + bar) | the replies above, the bar below |
 
 Two cards of one glass, 16 px apart: the replies in the upper one, the field in
@@ -77,10 +77,10 @@ it stays on the output, keeps its size, and where it was is never written down.
 State changes are animated, and always as one card changing shape, painted inside
 one buffer, so the surface is resized once per state and never per frame. Opening
 takes 520 ms: a line spreads out of a point at the centre, and once it has the
-panel's width the card unfolds up out of it. `Enter` morphs the bar into the
-thinking ball in 360 ms on a spring, and the first text grows that ball into the
-answering panel in 460 ms. Inside the panel, the replies card grows out of the bar
-in 260 ms once the ball has finished becoming the panel. Closing is the opening
+panel's width the card unfolds up out of it. Sending a question moves nothing: the
+bar stays, and a light runs round its rim — one lap in 1.4 s — until the first text
+arrives, which grows the panel out of the bar in 460 ms. Inside it, the replies card
+grows out of the bar in 260 ms once that shape change has finished. Closing is the opening
 run backwards, over 460 ms: the card rolls up into a line, the line pulls in from
 both ends, and only then does the process exit.
 

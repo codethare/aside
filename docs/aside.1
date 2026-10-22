@@ -44,12 +44,11 @@ Only the model's text about the question just asked is drawn -- its answer, and 
 failure or note that belongs to it, 8 pixels apart.  Earlier turns are kept for
 the request and drawn nowhere, and so is the question you typed.  The highlighted line is marked by brighter ink, two pixels in from its
 neighbours.  The first reply of a run grows out of the bar in 260 milliseconds.
-While a request is out the panel is a 60-pixel square showing four blinking
-squares.  The three states are animated rather than snapped: opening takes 520
-milliseconds -- a line spreads out of a point and the card unfolds up out of it --
-\fBEnter\fP morphs the bar into the ball in 360, and the first text grows the ball
-into the panel in 460, all inside one buffer so the surface is resized once per
-state.  Closing is the opening run backwards in 460 milliseconds, and the process
+While a request is out the bar stays exactly where it is and a light runs round its
+rim, one lap every 1.4 seconds, until the answer begins.  The states are animated
+rather than snapped: opening takes 520 milliseconds -- a line spreads out of a
+point and the card unfolds up out of it -- and the first text grows the bar into the
+panel in 460, inside one buffer so the surface is resized once per state.  Closing is the opening run backwards in 460 milliseconds, and the process
 exits when it has finished.  The expanded panel never exceeds the output height less 64 pixels, and
 scrolls inside that limit.
 .PP

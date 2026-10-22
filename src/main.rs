@@ -65,10 +65,10 @@ const EDGE_SHARE: i32 = 38;
 const REPLY_SHARE: u32 = 1;
 /// How long the replies card takes to grow out of the bar.
 const REVEAL_MS: u128 = 260;
-/// How long the bar takes to shrink into the thinking ball. Long enough to see
-/// the shape change rather than only its result: the morph is the point.
+/// How long a shape change takes at its shortest. The morph is the point, so it is
+/// long enough to be seen rather than only to be over.
 const MORPH_IN_MS: u128 = 360;
-/// How long the ball takes to grow into the answering panel, a little longer
+/// How long the bar takes to grow into the answering panel, a little longer
 /// because the card travels further.
 const MORPH_OUT_MS: u128 = 460;
 /// How long the panel takes to open: a line spreading out of a point, then the
@@ -258,7 +258,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         "",
         1.0,
         panel::Look::settled(panel::State::Replies),
-        0,
+        None,
         1,
     );
     std::fs::write(path, panel::to_ppm(&buf, w, h)).map_err(|e| format!("{}: {e}", path.display()))
@@ -409,8 +409,9 @@ fn run(
             // The card is growing: a frame every step of the ease.
             Duration::from_millis(16)
         } else if state.phase == Phase::Thinking {
-            // The blink advances every 200 ms; wake often enough to show it.
-            Duration::from_millis(50)
+            // The working light advances by the clock; a frame every step of its
+            // lap keeps it smooth.
+            Duration::from_millis(16)
         } else if state.request.is_some() {
             Duration::from_millis(16)
         } else {
@@ -509,10 +510,10 @@ fn is_closed(kind: std::io::ErrorKind) -> bool {
     )
 }
 
-/// The width text is laid out at, in buffer pixels: the answering panel's, never
-/// the thinking ball's. The ball is `2 × bar` wide and that is not a text width —
-/// laying the transcript out at 12 px and back would re-wrap it twice per send,
-/// and a panel narrower than one CJK character split it mid-byte.
+/// The width text is laid out at, in buffer pixels: the answering panel's, whatever
+/// the panel's own width is at the moment. Laying the transcript out at a smaller
+/// width and back would re-wrap it twice per send, and a panel narrower than one
+/// CJK character once split it mid-byte.
 fn layout_width(scale: u32) -> f32 {
     let s = scale.max(1);
     chat::answer_width(WIDTH * s, s)
@@ -597,17 +598,15 @@ fn left_margin(output_w: Option<u32>, surface_w: u32) -> i32 {
         .unwrap_or(0)
 }
 
-/// The logical size a phase wants: idle is the bar, thinking is a ball twice the
-/// bar tall, answering is the bar plus the transcript's own height, capped so the
-/// panel never leaves the output. `content` is the transcript's height in logical
-/// pixels — its blocks are laid out in buffer pixels, so the caller divides by the
-/// scale. These are the panel's sizes; `surface_size` adds the shadow margin.
-/// Pure, so the spec's numbers are testable without a surface.
+/// The logical size a phase wants: idle and thinking are the bar, because a running
+/// request keeps the field it was typed in, and answering is the bar plus the
+/// replies' fixed box. These are the panel's sizes; `surface_size` adds the shadow
+/// margin, and the answers' own height never enters: the box is fixed. Pure, so the
+/// spec's numbers are testable without a surface.
 fn size_for(phase: Phase, output_h: Option<u32>) -> (u32, u32) {
     let bar = panel::bar_height();
     match phase {
-        Phase::Idle => (WIDTH, bar),
-        Phase::Thinking => (2 * bar, 2 * bar),
+        Phase::Idle | Phase::Thinking => (WIDTH, bar),
         // Fixed: the room the replies are given, and nothing about how much text
         // they hold, so the panel does not resize as an answer arrives or as it is
         // moved. The replies scroll inside it.
@@ -633,7 +632,7 @@ fn room_for_replies(output_h: Option<u32>) -> u32 {
 
 /// How much of the replies card has grown out of the bar after `elapsed_ms`: an
 /// ease-out, so it leaves fast and settles instead of stopping dead. Read off the
-/// clock like the blink, so a late frame lands at the right height.
+/// clock like the working light, so a late frame lands at the right height.
 pub fn reveal_at(elapsed_ms: u128) -> f32 {
     let t = (elapsed_ms as f32 / REVEAL_MS as f32).clamp(0.0, 1.0);
     1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
@@ -686,8 +685,7 @@ pub fn morph_at(elapsed_ms: u128, over: u128) -> f32 {
 /// The shape the panel paints itself as, for a phase.
 fn state_of(phase: Phase) -> panel::State {
     match phase {
-        Phase::Idle => panel::State::Bar,
-        Phase::Thinking => panel::State::Ball,
+        Phase::Idle | Phase::Thinking => panel::State::Bar,
         Phase::Answering => panel::State::Replies,
     }
 }
@@ -710,11 +708,14 @@ impl Morph {
     }
 }
 
-/// Which of the four squares is lit, from elapsed milliseconds rather than from
-/// a frame count, so a late frame lands on the right square.
-fn blink_at(elapsed_ms: u128) -> usize {
-    const STEP_MS: u128 = 200;
-    ((elapsed_ms / STEP_MS) % 4) as usize
+/// How long one lap of the working light takes.
+const LAP_MS: u128 = 1_400;
+
+/// Where the working light is on the bar's rim, as a fraction of its perimeter,
+/// read from elapsed milliseconds rather than from a frame count, so a late frame
+/// lands where the time says.
+pub fn orbit_at(elapsed_ms: u128) -> f32 {
+    (elapsed_ms % LAP_MS) as f32 / LAP_MS as f32
 }
 
 /// Who owns the keyboard. `Prefix` is one key wide, the way a terminal
@@ -796,7 +797,7 @@ fn window_move(keysym: Keysym, ctrl: bool) -> Option<(i32, i32)> {
 enum Phase {
     /// The bar alone: nothing asked yet.
     Idle,
-    /// A question is out and nothing has come back: the ball.
+    /// A question is out and nothing has come back: the bar, with its rim lit.
     Thinking,
     /// An answer, an error or a note is on screen.
     Answering,
@@ -849,14 +850,15 @@ struct State {
     enter_start: Option<std::time::Instant>,
     /// When the panel started closing, which is what makes it exit.
     close_start: Option<std::time::Instant>,
-    /// A reply arrived while the ball was still morphing out: the card's own
+    /// A reply arrived while the panel was still morphing: the card's own
     /// reveal waits for the shape change to end instead of running on top of it.
     reveal_pending: bool,
     /// When the replies card started growing out of the bar, once per run.
     reveal_start: Option<std::time::Instant>,
     /// Whether this run has already revealed its first card.
     revealed: bool,
-    /// When the current phase began: the ball's blink is read off this clock.
+    /// When the current phase began: the working light and the reveal are read off
+    /// this clock.
     phase_start: std::time::Instant,
     /// Whether the compositor has handed this surface the keyboard.
     focused: bool,
@@ -960,7 +962,9 @@ impl State {
         if self.phase == to {
             return;
         }
-        self.morph = Some(Morph {
+        // Only a change of shape is a morph: the bar is the bar, whether or not a
+        // request is running, so sending a question moves nothing.
+        self.morph = (state_of(self.phase) != state_of(to)).then(|| Morph {
             from: self.phase,
             to,
             start: std::time::Instant::now(),
@@ -988,8 +992,9 @@ impl State {
         }
     }
 
-    fn blink_index(&self) -> usize {
-        blink_at(self.phase_start.elapsed().as_millis())
+    /// Where the light is on the rim, while a request is open.
+    fn head(&self) -> Option<f32> {
+        (self.phase == Phase::Thinking).then(|| orbit_at(self.phase_start.elapsed().as_millis()))
     }
 
     /// How much of the replies card is on screen: 1 unless the reveal is running.
@@ -1436,7 +1441,7 @@ impl State {
             }
         }
         if text_arrived {
-            // The first text ends the ball: the ball grows into the panel, and the
+            // The first text ends the wait: the bar grows into the panel, and the
             // replies card's own reveal waits until that shape change is over, so a
             // reply is seen as one motion and then as its content.
             if !self.revealed && self.transcript.total_height() > 0 {
@@ -1467,7 +1472,7 @@ impl State {
         }
         // The shape this frame paints, and how far into it the panel has morphed.
         let look = self.look();
-        let lit = self.blink_index();
+        let head = self.head();
         let stride = w as i32 * 4;
         // Read before the canvas borrows the pool: the reveal moves every frame.
         let reveal = self.reveal();
@@ -1514,7 +1519,7 @@ impl State {
             label,
             reveal,
             look,
-            lit,
+            head,
             self.scale,
         );
         self.layer
@@ -2163,8 +2168,14 @@ mod tests {
         let bar = panel::bar_height();
         assert_eq!(bar, 30, "row_h_for(20) is 30 at 1x");
         assert_eq!(size_for(Phase::Idle, Some(1080)), (640, bar));
-        assert_eq!(size_for(Phase::Thinking, Some(1080)), (60, 60));
-        // Answering: the bar, the 12 px between the cards, and a fixed room for the
+        // Thinking is the bar: the field a question was typed in stays, and only
+        // its rim lights up.
+        assert_eq!(
+            size_for(Phase::Thinking, Some(1080)),
+            (640, bar),
+            "a running request keeps the bar"
+        );
+        // Answering: the bar, the 16 px between the cards, and a fixed room for the
         // replies. No term for the text, so it is the same size for one line and for
         // a thousand, and a move does not change it.
         let room = room_for_replies(Some(1080));
@@ -2446,17 +2457,22 @@ mod tests {
         assert!(half > 0.5 && half < 1.0, "ease-out: {half} at half time");
     }
 
+    /// The light's position comes from the clock, so a late frame lands where the
+    /// time says rather than where a frame count would.
     #[test]
-    fn the_blink_comes_from_the_clock() {
-        // 200 ms a step, 800 ms a cycle, and a late frame lands where the clock
-        // says rather than where the frame count would.
-        assert_eq!(blink_at(0), 0);
-        assert_eq!(blink_at(199), 0);
-        assert_eq!(blink_at(200), 1);
-        assert_eq!(blink_at(450), 2);
-        assert_eq!(blink_at(799), 3);
-        assert_eq!(blink_at(800), 0);
-        assert_eq!(blink_at(5_000), 1, "25 steps, wrapped");
+    fn the_working_light_comes_from_the_clock() {
+        assert_eq!(orbit_at(0), 0.0);
+        assert!((orbit_at(LAP_MS / 4) - 0.25).abs() < 1e-6);
+        assert!((orbit_at(LAP_MS / 2) - 0.5).abs() < 1e-6);
+        assert_eq!(orbit_at(LAP_MS), 0.0, "one lap is back where it began");
+        assert!((orbit_at(5_000) - (5_000 % LAP_MS) as f32 / LAP_MS as f32).abs() < 1e-6);
+        // It only ever goes forward inside a lap.
+        let mut last = -1.0;
+        for ms in (0..LAP_MS).step_by(50) {
+            let at = orbit_at(ms);
+            assert!(at > last, "the light goes back at {ms}");
+            last = at;
+        }
     }
 
     #[test]

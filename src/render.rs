@@ -431,6 +431,97 @@ fn outline_gap(qx: f32, qy: f32, radius: f32) -> f32 {
     }
 }
 
+/// The card's rim, in order: the top edge left to right, the right side down, the
+/// bottom edge right to left, and the left side up. The corners come from
+/// `rounded_span`, so the polyline is the same outline the body and the shadow are
+/// drawn from and a light following it cannot leave the edge.
+pub(crate) fn outline(panel: &Panel) -> Vec<(u32, u32)> {
+    let mut points = Vec::with_capacity(2 * (panel.w + panel.h) as usize);
+    if panel.w == 0 || panel.h == 0 {
+        return points;
+    }
+    let span = |rel: u32| panel.span(rel);
+    // Top row, left to right.
+    let (x0, x1) = span(0);
+    for x in x0..x1 {
+        points.push((x, panel.y));
+    }
+    // Right side, down.
+    for rel in 1..panel.h {
+        let (_, x1) = span(rel);
+        if x1 > 0 {
+            points.push((x1 - 1, panel.y + rel));
+        }
+    }
+    // Bottom row, right to left.
+    let (bx0, bx1) = span(panel.h - 1);
+    for x in (bx0..bx1).rev() {
+        points.push((x, panel.y + panel.h - 1));
+    }
+    // Left side, up.
+    for rel in (1..panel.h).rev() {
+        points.push((span(rel).0, panel.y + rel));
+    }
+    points
+}
+
+/// A light running around a card's rim: the head is a fraction of the way round, and
+/// the `LIGHT_SHARE` of the perimeter behind it is lit, falling off so the segment
+/// has no hard end. It is painted *into* the card — the rim at full strength, then
+/// two rows of halo inside it — so it reads as light on glass rather than as a
+/// line drawn on the edge, and it passes the lit top edge and the dark bottom one
+/// alike.
+pub(crate) fn orbit(buf: &mut [u8], w: u32, h: u32, panel: &Panel, head: f32, scale: u32) {
+    let points = outline(panel);
+    if points.is_empty() {
+        return;
+    }
+    let s = scale.max(1);
+    let len = points.len() as f32;
+    let head = head.rem_euclid(1.0);
+    // The halo: (how far inside the rim, share of the head's own alpha).
+    let step = s as usize;
+    let halo = [(0, 1.0f32), (step, 0.5), (2 * step, 0.2)];
+    let (cx, cy) = (
+        panel.x as i64 + panel.w as i64 / 2,
+        panel.y as i64 + panel.h as i64 / 2,
+    );
+    for (i, (x, y)) in points.into_iter().enumerate() {
+        // How far behind the head this point is, as a share of one lap: the light
+        // is the stretch the head has just passed.
+        let behind = (head - i as f32 / len).rem_euclid(1.0);
+        if behind >= LIGHT_SHARE {
+            continue;
+        }
+        let t = behind / LIGHT_SHARE;
+        // Brightest at the head, nothing at the tail, and no cusp where it starts.
+        let peak = LIGHT_ALPHA as f32 * (1.0 - t) * (1.0 - t);
+        // Inward is towards the card's own centre.
+        let dx = (cx - x as i64).signum();
+        let dy = (cy - y as i64).signum();
+        for (step, share) in halo {
+            let alpha = (peak * share).round() as u32;
+            if alpha == 0 {
+                continue;
+            }
+            let px = x as i64 + dx * step as i64;
+            let py = y as i64 + dy * step as i64;
+            if px < 0 || py < 0 || px >= w as i64 || py >= h as i64 {
+                continue;
+            }
+            over_pm(
+                &mut buf[((py as u32 * w + px as u32) * 4) as usize..][..4],
+                [0xff, 0xff, 0xff, 0xff],
+                alpha,
+            );
+        }
+    }
+}
+
+/// How much of the perimeter the working light covers, and how bright its head is.
+const LIGHT_SHARE: f32 = 0.28;
+const LIGHT_ALPHA: u32 = 235;
+
 /// One card: rounded body fill, 1 px coverage antialiasing on both sides, and the
 /// hairline rim that makes its edge read as glass against the shadow. Every card
 /// takes the same tone except the bar in the prefix mode.

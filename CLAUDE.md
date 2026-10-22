@@ -31,7 +31,8 @@ change.
    pixel inside it, the plush inks, and the 3 px scroll indicator in `render.rs`.
    Row height stays `size + 2 * round(size * 0.25)`. No accent rail: `plush` and
    `wlmenu` draw one only for a prompt label. The panel is a bottom-
-   anchored `wlr-layer-shell` surface in three states — bar, ball, replies — with
+   anchored `wlr-layer-shell` surface in three states — the bar, the bar with its
+   working light running round the rim, and the replies — with
    the bar on the bottom card and the replies in the card above it, its bottom
    edge 38 % of the output height up the screen, because the bottom anchor is
    what keeps the bar still while they grow. Both cards are one tone; the
