@@ -64,20 +64,36 @@ neighbours, so there is no mark in the margin at all. The first reply of a run
 grows out of the bar in 160 ms; a follow-up does not.
 
 The sizes are the panel's own; the layer surface adds the shadow margin on every
-side and sits that margin inside the visible gap. The answering panel never grows
-past `output height − 38 % − 32 px`; a longer answer scrolls inside its card and
-shows a 3 px scroll indicator on the right edge. States snap: there is no height
-tween other than the first card's reveal.
+side and sits that margin inside the visible gap. The replies may grow to the
+height of the bar's own gap above the screen's bottom edge (38 % of the output),
+clamped by the room left above the bar; a longer answer scrolls inside its card
+and shows a 3 px scroll indicator on the right edge. Holding the left button for
+a quarter of a second and moving drags the panel: it stays on the output, the cap
+follows the gap, and the position is never written down. States snap: there is no
+height tween other than the first card's reveal.
 
 ## Keys
 
-| Key | Action |
-|---|---|
-| `Enter` | send |
-| `Esc` | cancel a streaming answer, or close the panel |
-| `Up` / `Down` | move the highlighted transcript line |
-| `PageUp` / `PageDown` | move it a page |
-| `Alt+C` | copy the highlighted line to the clipboard |
+| Key | Mode | Action |
+|---|---|---|
+| `Enter` | typing, vim | send |
+| `Esc` | typing | cancel a streaming answer, or close the panel |
+| `Esc` | vim, prefix | leave the mode, cancelling nothing |
+| `Ctrl+T` | typing | enter the prefix mode; the next key is a settings command |
+| `[` | prefix | enter vim mode |
+| `j` / `k` | vim | move the highlighted line down / up |
+| `n` / `p` | vim | move it a page down / up |
+| `h` / `l` | vim | move it to the first / last line |
+| `Ctrl+j` / `Ctrl+k` | vim | move it a page |
+| `Up` / `Down` | typing | move the highlighted transcript line |
+| `PageUp` / `PageDown` | typing | move it a page |
+| `Alt+C` | typing, vim | copy the highlighted line to the clipboard |
+
+`Ctrl+T` is tmux's prefix shape rather than a vim toggle: it takes exactly one
+key, and `[` is the only command it has so far — later settings commands belong
+there. Vim mode takes the keyboard from the input line and from the input method,
+draws `-- VIM --` in the bar and hides the caret, so a swallowed keystroke is
+never a mystery.
 
 Editing is the usual set: `Left`, `Right`, `Home`, `End`, `Backspace`, `Delete`,
 and `Ctrl+Left`/`Ctrl+Right` by word.

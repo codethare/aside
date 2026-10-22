@@ -28,6 +28,8 @@ pub fn draw(
     highlight: Option<usize>,
     caret_visible: bool,
     preedit: &str,
+    // The bar's right-hand label: `-- VIM --` while vim mode owns the keyboard.
+    label: &str,
     // How much of the replies card has grown out of the bar: 1 is fully shown.
     reveal: f32,
     scale: u32,
@@ -97,6 +99,7 @@ pub fn draw(
         bar_h,
         caret_visible,
         preedit,
+        label,
         aa,
         s,
     );
@@ -169,6 +172,7 @@ fn draw_bar(
     row_h: u32,
     caret_visible: bool,
     preedit: &str,
+    label: &str,
     aa: Subpixel,
     s: u32,
 ) {
@@ -222,6 +226,23 @@ fn draw_bar(
             render::FG_PROMPT,
         );
         end = end_x;
+    }
+    if !label.is_empty() {
+        // Right-aligned and in the dimmer ink: it explains why a key did not
+        // type, without competing with what is being typed.
+        let width = render::measure(font, label, f32::MAX);
+        render::draw_text(
+            buf,
+            w,
+            h,
+            font,
+            (panel.x + panel.w) as f32 - p as f32 - width,
+            baseline,
+            label,
+            render::FG_NORMAL,
+            width,
+            aa,
+        );
     }
     let caret_w = 2 * s;
     let caret_bottom = (baseline - font.descent_px).round().max(0.0) as u32;
@@ -447,6 +468,7 @@ mod tests {
             highlight,
             true,
             "",
+            "",
             reveal,
             1,
         );
@@ -551,6 +573,7 @@ mod tests {
                 None,
                 true,
                 preedit,
+                "",
                 1.0,
                 1,
             );
@@ -568,6 +591,55 @@ mod tests {
         };
         assert_eq!(ink(&bare), 0, "nothing is drawn after the typed text");
         assert!(ink(&composing) > 0, "the composition is visible");
+    }
+
+    /// Vim mode has to say so: the bar reads `-- VIM --` on the right and the
+    /// caret is gone, so a swallowed keystroke is never a mystery.
+    #[test]
+    fn the_bar_says_when_vim_mode_is_on() {
+        let f = font();
+        let scene = scene(&f, 300.0);
+        let (w, h) = sized(&scene, &f);
+        let (bw, bh) = frame(w, h);
+        let paint_with = |label: &str, caret: bool| {
+            let mut buf = vec![0u8; (bw * bh * 4) as usize];
+            draw(
+                &mut buf,
+                bw,
+                bh,
+                &f,
+                &scene.transcript,
+                &scene.input,
+                &scene.viewport,
+                None,
+                caret,
+                "",
+                label,
+                1.0,
+                1,
+            );
+            buf
+        };
+        let plain = paint_with("", true);
+        let vim = paint_with("-- VIM --", false);
+        // The label's ink is in the bar's right half, and only there.
+        let ink = |buf: &[u8], from: u32, to: u32| {
+            (from..to)
+                .flat_map(|x| (h - f.row_h..h).map(move |y| (x, y)))
+                .filter(|&(x, y)| buf[at(bw, x, y)..][..4][..3] != glass()[..3])
+                .count()
+        };
+        let right = (w * 2 / 3, w - crate::PAD);
+        assert_eq!(
+            ink(&plain, right.0, right.1),
+            0,
+            "nothing there when typing"
+        );
+        assert!(ink(&vim, right.0, right.1) > 0, "the mode is on the bar");
+        // The caret is gone: with an empty input it sits at the padding, and only
+        // the typing frame has it.
+        assert!(ink(&plain, crate::PAD, crate::PAD + 3) > 0, "the caret");
+        assert_eq!(ink(&vim, crate::PAD, crate::PAD + 3), 0, "no caret in vim");
     }
 
     #[test]
@@ -779,6 +851,7 @@ mod tests {
                 &scene.viewport,
                 None,
                 true,
+                "",
                 "",
                 1.0,
                 scale,

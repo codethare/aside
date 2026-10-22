@@ -27,6 +27,13 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    2 px further right, and nothing is drawn in the left margin.
 5. `Alt+C` copies exactly the highlighted line. Paste it somewhere and check
    there is no extra whitespace or transcript around it.
+5b. `Ctrl+T` then `[`: the bar reads `-- VIM --` and the caret is gone. `j`/`k`
+   move one line, `n`/`p` a page, `h`/`l` to the first/last line, and no letter
+   reaches the input line. `Esc` leaves the mode, and a second `Esc` cancels a
+   stream that was running the whole time.
+5c. Hold the left button for a quarter of a second and move: the panel follows
+   the pointer and stays on screen. A short click moves nothing, and a new run
+   starts where the anchor puts it.
 6. While an answer is streaming, run `pgrep -a bwrap` in another terminal: the
    sandboxed process is there. Press `Esc`: the stream stops, `cancelled` appears,
    the panel stays open, and `pgrep -a bwrap` now finds nothing.

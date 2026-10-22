@@ -23,12 +23,13 @@ use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::reexports::calloop::PostAction;
 use smithay_client_toolkit::reexports::calloop::generic::Generic;
-use smithay_client_toolkit::reexports::calloop::{EventLoop, Interest, Mode};
+use smithay_client_toolkit::reexports::calloop::{EventLoop, Interest};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::registry_handlers;
 use smithay_client_toolkit::seat::keyboard::{
     KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers,
 };
+use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::{
@@ -38,7 +39,7 @@ use smithay_client_toolkit::shell::wlr_layer::{
 use smithay_client_toolkit::shm::Shm;
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use wayland_client::globals::registry_queue_init;
-use wayland_client::protocol::{wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface};
+use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface};
 use wayland_client::{Connection, QueueHandle};
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
     ContentHint, ContentPurpose, Event as TextInputEvent, ZwpTextInputV3,
@@ -57,10 +58,16 @@ const WIDTH: u32 = 640;
 /// height: just below the vertical centre, where the eye already is, instead of
 /// hugging the bottom edge. The panel hangs from there and grows upwards.
 const EDGE_SHARE: i32 = 38;
-/// Breathing room kept above the panel, so a tall answer stops short of the top.
-const FAR_ROOM: i32 = 32;
+/// How tall the replies may be, as a multiple of that same gap: the field's own
+/// distance to the screen's bottom is the yardstick the panel grows by.
+const REPLY_SHARE: u32 = 1;
 /// How long the replies card takes to grow out of the bar.
 const REVEAL_MS: u128 = 160;
+/// How long the left button is held before moving the panel starts: a click on
+/// the panel must not be a one-pixel jump.
+const DRAG_HOLD_MS: u64 = 250;
+/// Left button, from `linux/input-event-codes.h`.
+const BTN_LEFT: u32 = 0x110;
 /// Output height assumed for the height cap until the real one is known.
 const FALLBACK_OUTPUT_H: u32 = 1080;
 const APP_ID: &str = "aside";
@@ -81,6 +88,7 @@ usage: aside [--model MODEL] [--base-url URL] [--proxy URL] [--preview FILE] [--
 enum Key {
     Send,
     Cancel,
+    Prefix,
     Up,
     Down,
     PageUp,
@@ -118,6 +126,7 @@ fn key_action(keysym: Keysym, alt: bool, ctrl: bool, has_text: bool) -> Key {
         Keysym::Home => Key::Home,
         Keysym::End => Key::End,
         Keysym::c if alt && !ctrl => Key::Copy,
+        Keysym::t if ctrl && !alt => Key::Prefix,
         _ if has_text && plain => Key::Text,
         _ => Key::Ignore,
     }
@@ -228,6 +237,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         Some(0),
         true,
         "",
+        "",
         1.0,
         1,
     );
@@ -278,7 +288,7 @@ fn run(
     // Bottom-anchored, so the bar keeps one place on screen while answers grow
     // upwards out of it.
     layer.set_anchor(Anchor::BOTTOM);
-    layer.set_margin(0, 0, bottom_margin(None), 0);
+    layer.set_margin(0, 0, bottom_margin(None, 0), 0);
     layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
     // Collapsed to the bar. The first commit is buffer-less: it asks for the
     // configure, and nothing may be attached before that one arrives.
@@ -302,6 +312,12 @@ fn run(
         height: panel::bar_height(),
         scale: 1,
         phase: Phase::Idle,
+        mode: Mode::Typing,
+        drag: Drag::default(),
+        press: None,
+        pointer_at: (0.0, 0.0),
+        dragging: None,
+        pointer: None,
         reveal_start: None,
         revealed: false,
         phase_start: std::time::Instant::now(),
@@ -337,7 +353,11 @@ fn run(
     if let Some(listener) = listener {
         loop_handle
             .insert_source(
-                Generic::new(listener, Interest::READ, Mode::Level),
+                Generic::new(
+                    listener,
+                    Interest::READ,
+                    smithay_client_toolkit::reexports::calloop::Mode::Level,
+                ),
                 |_, listener, state: &mut State| {
                     use std::io::Read;
                     while let Ok((mut stream, _)) = listener.accept() {
@@ -354,7 +374,13 @@ fn run(
     while !state.exit {
         // While a request is open, a byte can arrive at any moment; when idle
         // there is nothing to poll for, so the loop sleeps.
-        let timeout = if state.revealing() {
+        if state.holding() {
+            // Waiting out the hold before a drag begins.
+            state.check_hold();
+        }
+        let timeout = if state.holding() {
+            Duration::from_millis(30)
+        } else if state.revealing() {
             // The card is growing: a frame every step of the ease.
             Duration::from_millis(16)
         } else if state.phase == Phase::Thinking {
@@ -472,16 +498,44 @@ fn surface_size(panel: (u32, u32)) -> (u32, u32) {
     (panel.0 + 2 * render::SHADOW, panel.1 + 2 * render::SHADOW)
 }
 
-/// The visible gap under the panel, in logical px: a share of the output height.
-fn edge_gap(output_h: Option<u32>) -> u32 {
-    let h = output_h.unwrap_or(FALLBACK_OUTPUT_H);
-    (h as i32 * EDGE_SHARE / 100).max(render::SHADOW as i32) as u32
+/// How far the panel has been dragged from its anchored place, in logical px.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Drag {
+    left: i32,
+    bottom: i32,
+}
+
+/// The visible gap under the panel, in logical px: a share of the output height,
+/// plus whatever the user dragged it by. Negative drags are clamped by the caller.
+fn edge_gap(output_h: Option<u32>, drag: i32) -> u32 {
+    let h = output_h.unwrap_or(FALLBACK_OUTPUT_H) as i32;
+    (h * EDGE_SHARE / 100 + drag).max(render::SHADOW as i32) as u32
 }
 
 /// The layer surface's bottom margin: the visible gap minus the shadow margin it
 /// already carries.
-fn bottom_margin(output_h: Option<u32>) -> i32 {
-    (edge_gap(output_h) - render::SHADOW) as i32
+fn bottom_margin(output_h: Option<u32>, drag: i32) -> i32 {
+    edge_gap(output_h, drag) as i32 - render::SHADOW as i32
+}
+
+/// Where a drag leaves the surface horizontally: the centred place plus the drag,
+/// kept on the output so the panel cannot be pushed off either side.
+fn dragged_left(output_w: Option<u32>, sw: u32, drag: i32) -> i32 {
+    let room = output_w
+        .map(|ow| (ow as i32 - sw as i32).max(0))
+        .unwrap_or(i32::MAX / 2);
+    (left_margin(output_w, sw) + drag).clamp(0, room)
+}
+
+/// The tallest the replies may get: the gap below the bar, or the room left above
+/// it when the panel has been dragged so high that the gap is most of the screen.
+fn reply_cap(output_h: Option<u32>, gap: u32) -> u32 {
+    let h = output_h.unwrap_or(FALLBACK_OUTPUT_H);
+    // What is left above the bar once the bar and the gap between the cards are
+    // on screen: the panel must never leave the output.
+    let chrome = panel::bar_height() + render::SEPARATION;
+    let room = h.saturating_sub(gap + render::SHADOW + chrome);
+    (gap * REPLY_SHARE).min(room)
 }
 
 /// Horizontal margin that centres the surface on the output.
@@ -497,18 +551,17 @@ fn left_margin(output_w: Option<u32>, surface_w: u32) -> i32 {
 /// pixels — its blocks are laid out in buffer pixels, so the caller divides by the
 /// scale. These are the panel's sizes; `surface_size` adds the shadow margin.
 /// Pure, so the spec's numbers are testable without a surface.
-fn size_for(phase: Phase, content: u32, output_h: Option<u32>) -> (u32, u32) {
+fn size_for(phase: Phase, content: u32, output_h: Option<u32>, drag: i32) -> (u32, u32) {
     let bar = panel::bar_height();
     match phase {
         Phase::Idle => (WIDTH, bar),
         Phase::Thinking => (2 * bar, 2 * bar),
         Phase::Answering => {
-            let cap = output_h
-                .unwrap_or(FALLBACK_OUTPUT_H)
-                .saturating_sub(edge_gap(output_h) + FAR_ROOM as u32);
+            let gap = edge_gap(output_h, drag);
+            let cap = reply_cap(output_h, gap);
             let rows = layout::MAX_ROWS as u32 * bar;
-            let want = bar + 1 + content.min(rows);
-            (WIDTH, want.min(cap).max(bar))
+            let want = bar + render::SEPARATION + content.min(rows).min(cap);
+            (WIDTH, want)
         }
     }
 }
@@ -526,6 +579,61 @@ pub fn reveal_at(elapsed_ms: u128) -> f32 {
 fn blink_at(elapsed_ms: u128) -> usize {
     const STEP_MS: u128 = 200;
     ((elapsed_ms / STEP_MS) % 4) as usize
+}
+
+/// Who owns the keyboard. `Prefix` is one key wide, the way a terminal
+/// multiplexer's prefix is; `Vim` keeps it until `Esc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Typing goes to the input line, and the key table applies.
+    Typing,
+    /// `Ctrl+T` was pressed: the next key is a settings command.
+    Prefix,
+    /// The highlight moves and nothing is typed.
+    Vim,
+}
+
+/// What the one key after the prefix means. The table is the place later settings
+/// keys are added, rather than taking more keys from the input line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Prefix {
+    /// `[`: enter vim mode.
+    Vim,
+    /// Anything else: leave the prefix and do nothing.
+    None,
+}
+
+fn prefix_action(keysym: Keysym) -> Prefix {
+    match keysym {
+        Keysym::bracketleft => Prefix::Vim,
+        _ => Prefix::None,
+    }
+}
+
+/// Where a vim-mode key wants the highlight to go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Move {
+    /// That many rows from where it is.
+    Lines(i64),
+    /// The first or the last line of the transcript.
+    First,
+    Last,
+}
+
+/// The movement a vim-mode key asks for, if it asks for one. `page` is one
+/// screenful, in the unit the highlight counts in.
+fn vim_move(keysym: Keysym, ctrl: bool, page: i64) -> Option<Move> {
+    match (keysym, ctrl) {
+        // `n`/`p` page; `Ctrl+j`/`Ctrl+k` are the same jump on the line axis.
+        (Keysym::n, _) | (Keysym::j, true) => Some(Move::Lines(page)),
+        (Keysym::p, _) | (Keysym::k, true) => Some(Move::Lines(-page)),
+        (Keysym::j, false) => Some(Move::Lines(1)),
+        (Keysym::k, false) => Some(Move::Lines(-1)),
+        // One column has no horizontal axis: `h`/`l` are the far ends of it.
+        (Keysym::h, _) => Some(Move::First),
+        (Keysym::l, _) => Some(Move::Last),
+        _ => None,
+    }
 }
 
 /// The panel's three states. Their sizes are fixed by the spec; this is the
@@ -570,6 +678,17 @@ struct State {
     layer: LayerSurface,
     /// Which of the three states the panel is in.
     phase: Phase,
+    /// Who owns the keyboard: the input line, the prefix, or vim mode.
+    mode: Mode,
+    /// Moved by dragging, in logical px from the anchored place.
+    drag: Drag,
+    /// The left button is down, and since when.
+    press: Option<std::time::Instant>,
+    /// Where the pointer is, latest first.
+    pointer_at: (f64, f64),
+    /// The pointer position a drag started from, once the hold has elapsed.
+    dragging: Option<(f64, f64)>,
+    pointer: Option<wl_pointer::WlPointer>,
     /// When the replies card started growing out of the bar, once per run.
     reveal_start: Option<std::time::Instant>,
     /// Whether this run has already revealed its first card.
@@ -607,6 +726,7 @@ impl State {
             self.phase,
             self.transcript.total_height().div_ceil(self.scale.max(1)),
             self.output_h,
+            self.drag.bottom,
         )
     }
 
@@ -632,12 +752,8 @@ impl State {
     fn apply_size(&mut self) {
         let (w, h) = self.target_size();
         let (sw, sh) = surface_size((w, h));
-        self.layer.set_margin(
-            0,
-            0,
-            bottom_margin(self.output_h),
-            left_margin(self.output_w, sw),
-        );
+        let (left, bottom) = self.margins(sw);
+        self.layer.set_margin(0, 0, bottom, left);
         self.layer.set_size(sw, sh);
         let width_changed = w != self.width;
         if width_changed || h != self.height {
@@ -654,6 +770,13 @@ impl State {
             self.viewport.clamp(self.transcript.total_height());
             self.dirty = true;
         }
+    }
+
+    /// Where the surface goes: centred plus the drag, kept on the output.
+    fn margins(&self, sw: u32) -> (i32, i32) {
+        let left = dragged_left(self.output_w, sw, self.drag.left);
+        let bottom = bottom_margin(self.output_h, self.drag.bottom);
+        (left, bottom)
     }
 
     /// Remember the output's logical size: it centres the panel and caps its height.
@@ -811,6 +934,102 @@ impl State {
         }
     }
 
+    /// The left button is down: once it has been held long enough, the panel
+    /// follows the pointer. Checked by the loop rather than by a timer of its own,
+    /// so a press that is released early never starts anything.
+    fn check_hold(&mut self) {
+        let Some(at) = self.press else { return };
+        if self.dragging.is_some() || at.elapsed() < Duration::from_millis(DRAG_HOLD_MS) {
+            return;
+        }
+        self.dragging = Some(self.pointer_at);
+    }
+
+    /// Whether a frame is needed for the hold deadline.
+    fn holding(&self) -> bool {
+        self.press.is_some() && self.dragging.is_none()
+    }
+
+    /// Move the panel by the pointer's delta since the drag began. The margins are
+    /// the only way to move a layer surface; the drag is an offset from the
+    /// anchored place, clamped to the output by `margins`.
+    fn drag_to(&mut self, position: (f64, f64)) {
+        let Some(from) = self.dragging else { return };
+        let (dx, dy) = (position.0 - from.0, position.1 - from.1);
+        // Dragged up means further from the bottom edge, so the bottom margin grows
+        // as the pointer's y shrinks.
+        self.drag.left = self.drag.left.saturating_add(dx.round() as i32);
+        self.drag.bottom = self.drag.bottom.saturating_sub(dy.round() as i32);
+        self.dragging = Some(position);
+        // The cap is a share of the gap, so a drag can change how tall the panel
+        // may grow: size it again before the margins go out.
+        self.apply_size();
+        self.dirty = true;
+    }
+
+    /// What a key means while vim mode owns the keyboard. Navigation and the two
+    /// keys that already had a meaning in every mode; anything else is swallowed,
+    /// because the input line must not change while the mode is on.
+    fn on_vim_key(&mut self, event: &KeyEvent) {
+        let (alt, ctrl) = (self.modifiers.alt, self.modifiers.ctrl);
+        match event.keysym {
+            Keysym::Escape => self.leave_vim(),
+            Keysym::Return | Keysym::KP_Enter => self.send(),
+            Keysym::c if alt && !ctrl => self.copy_highlight(),
+            keysym => match vim_move(keysym, ctrl, self.page_rows()) {
+                Some(Move::Lines(delta)) => self.move_highlight(delta),
+                Some(Move::First) => self.move_to(0),
+                Some(Move::Last) => self.move_to(usize::MAX),
+                None => {}
+            },
+        }
+    }
+
+    /// Vim mode takes the keyboard from the input line and from the input method:
+    /// otherwise `j` is composed by fcitx instead of moving the highlight.
+    fn enter_vim(&mut self) {
+        self.mode = Mode::Vim;
+        self.ime.preedit.clear();
+        if let Some(text_input) = self.text_input.as_ref() {
+            text_input.disable();
+            text_input.commit();
+        }
+        self.dirty = true;
+    }
+
+    /// Back to typing, with the input method listening again.
+    fn leave_vim(&mut self) {
+        self.mode = Mode::Typing;
+        if self.focused
+            && let Some(text_input) = self.text_input.as_ref()
+        {
+            text_input.enable();
+            text_input.set_content_type(ContentHint::empty(), ContentPurpose::Normal);
+            text_input.commit();
+        }
+        self.report_cursor();
+        self.dirty = true;
+    }
+
+    /// Put the highlight on a line of the transcript, clamped to what exists.
+    fn move_to(&mut self, index: usize) {
+        let rows = self.rows();
+        if rows == 0 {
+            return;
+        }
+        let next = index.min(rows - 1);
+        self.move_highlight(next as i64 - self.highlight as i64);
+    }
+
+    /// The bar's right-hand label, which is how a swallowed keystroke explains
+    /// itself.
+    fn mode_label(&self) -> &'static str {
+        match self.mode {
+            Mode::Vim => "-- VIM --",
+            Mode::Typing | Mode::Prefix => "",
+        }
+    }
+
     /// `Alt+C`: the only path to the clipboard, and it copies one line.
     fn copy_highlight(&mut self) {
         let Some(font) = self.font.as_ref() else {
@@ -923,6 +1142,8 @@ impl State {
         let stride = w as i32 * 4;
         // Read before the canvas borrows the pool: the reveal moves every frame.
         let reveal = self.reveal();
+        let label = self.mode_label();
+        let typing = self.mode == Mode::Typing;
         let buffer = match self.buffer.take() {
             Some(buffer) => buffer,
             None => {
@@ -959,8 +1180,9 @@ impl State {
                 &self.input,
                 &self.viewport,
                 Some(self.highlight),
-                true,
+                typing,
                 &self.ime.preedit,
+                label,
                 reveal,
                 self.scale,
             ),
@@ -980,6 +1202,20 @@ impl State {
 
     fn on_key(&mut self, event: &KeyEvent) {
         let text = event.utf8.clone();
+        // The prefix takes exactly one key, whatever it is: `[` goes to vim mode
+        // and everything else is swallowed, so a settings key never types.
+        if self.mode == Mode::Prefix {
+            self.mode = Mode::Typing;
+            if prefix_action(event.keysym) == Prefix::Vim {
+                self.enter_vim();
+            }
+            self.dirty = true;
+            return;
+        }
+        if self.mode == Mode::Vim {
+            self.on_vim_key(event);
+            return;
+        }
         // While the ball spins the question is already sent: only Esc means
         // anything. The check sits before the key table so no text key slips in.
         if self.phase == Phase::Thinking && event.keysym != Keysym::Escape {
@@ -1003,6 +1239,10 @@ impl State {
         match action {
             Key::Send => self.send(),
             Key::Cancel => self.cancel(),
+            Key::Prefix => {
+                self.mode = Mode::Prefix;
+                self.dirty = true;
+            }
             Key::Up => self.move_highlight(-1),
             Key::Down => self.move_highlight(1),
             Key::PageUp => self.move_highlight(-self.page_rows()),
@@ -1104,6 +1344,11 @@ impl State {
 
     /// What the compositor's text-input events mean for the input line.
     fn on_text_input(&mut self, event: TextInputEvent) {
+        // Second line of defence: the text input is disabled in vim mode, but a
+        // commit already in flight must not append to a line nobody is typing on.
+        if self.mode != Mode::Typing {
+            return;
+        }
         // The bar draws the pre-edit, so any change to it is a change on screen:
         // it appearing, growing, or being cancelled by `Esc` in the input method.
         let composed = self.ime.preedit.clone();
@@ -1282,6 +1527,12 @@ impl SeatHandler for State {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            if let Ok(pointer) = self.seat_state.get_pointer(qh, &seat) {
+                self.pointer = Some(pointer);
+            }
+            return;
+        }
         if capability != Capability::Keyboard || self.keyboard.is_some() {
             return;
         }
@@ -1309,6 +1560,14 @@ impl SeatHandler for State {
             && let Some(keyboard) = self.keyboard.take()
         {
             keyboard.release();
+        }
+        if capability == Capability::Pointer
+            && let Some(pointer) = self.pointer.take()
+        {
+            pointer.release();
+            // A device that went away mid-drag leaves no press behind.
+            self.press = None;
+            self.dragging = None;
         }
     }
 
@@ -1429,6 +1688,36 @@ impl ProvidesRegistryState for State {
 
 smithay_client_toolkit::delegate_dispatch2!(State);
 
+impl PointerHandler for State {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        for event in events {
+            if &event.surface != self.layer.wl_surface() {
+                continue;
+            }
+            self.pointer_at = event.position;
+            match event.kind {
+                // Held down and not yet moving: the loop starts the drag when the
+                // hold elapses, so a click moves nothing.
+                PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
+                    self.press = Some(std::time::Instant::now());
+                }
+                PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
+                    self.press = None;
+                    self.dragging = None;
+                }
+                PointerEventKind::Motion { .. } => self.drag_to(event.position),
+                _ => {}
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1521,33 +1810,37 @@ mod tests {
     fn the_three_states_have_the_spec_s_sizes() {
         let bar = panel::bar_height();
         assert_eq!(bar, 30, "row_h_for(20) is 30 at 1x");
-        assert_eq!(size_for(Phase::Idle, 0, Some(1080)), (640, bar));
-        assert_eq!(size_for(Phase::Thinking, 0, Some(1080)), (60, 60));
-        // Answering: the bar plus the transcript's own height, which is blocks
-        // and gaps rather than a count of rows.
+        assert_eq!(size_for(Phase::Idle, 0, Some(1080), 0), (640, bar));
+        assert_eq!(size_for(Phase::Thinking, 0, Some(1080), 0), (60, 60));
+        // Answering: the bar, the 12 px between the cards, and the replies' own
+        // height, which is blocks and gaps rather than a count of rows.
         assert_eq!(
-            size_for(Phase::Answering, 4 * bar, Some(1080)),
-            (640, bar + 1 + 4 * bar)
+            size_for(Phase::Answering, 4 * bar, Some(1080), 0),
+            (640, bar + render::SEPARATION + 4 * bar)
         );
-        // A card's padding counts: 8 px above and below make the panel taller
-        // than its text rows alone.
+        // The cap is the gap below the bar in force: 38 % of 1080.
+        let cap = reply_cap(Some(1080), edge_gap(Some(1080), 0));
+        assert_eq!(cap, 410, "as tall as the field's gap above the bottom");
+        let tallest = bar + render::SEPARATION + cap;
         assert_eq!(
-            size_for(Phase::Answering, 3 * bar + 16, Some(1080)),
-            (640, bar + 1 + 3 * bar + 16)
-        );
-        // The cap is the output less the 38 % margin below and the room above.
-        let cap = 1080 - edge_gap(Some(1080)) - FAR_ROOM as u32;
-        assert_eq!(cap, 638, "38 % of 1080 plus 32 px of room");
-        assert_eq!(
-            size_for(Phase::Answering, 1000 * bar, Some(1080)),
-            (640, cap)
+            size_for(Phase::Answering, 1000 * bar, Some(1080), 0),
+            (640, tallest)
         );
         // Before the output reports, a 1080-pixel one is assumed.
-        assert_eq!(size_for(Phase::Answering, 1000 * bar, None), (640, cap));
-        // An empty transcript still leaves the bar plus its divider.
-        assert_eq!(size_for(Phase::Answering, 0, Some(1080)).1, bar + 1);
-        // A tiny output cannot make the panel taller than its bar or negative.
-        assert_eq!(size_for(Phase::Answering, 10 * bar, Some(40)).1, bar);
+        assert_eq!(
+            size_for(Phase::Answering, 1000 * bar, None, 0),
+            (640, tallest)
+        );
+        // An empty transcript still leaves the bar and the gap between the cards.
+        assert_eq!(
+            size_for(Phase::Answering, 0, Some(1080), 0).1,
+            bar + render::SEPARATION
+        );
+        // A tiny output cannot make the cap negative.
+        assert_eq!(
+            size_for(Phase::Answering, 10 * bar, Some(40), 0).1,
+            bar + render::SEPARATION
+        );
     }
 
     #[test]
@@ -1586,19 +1879,101 @@ mod tests {
     #[test]
     fn the_bar_sits_a_share_of_the_output_up_the_screen() {
         for (output, gap) in [(1080u32, 410u32), (1440, 547), (600, 228)] {
-            assert_eq!(edge_gap(Some(output)), gap, "38 % of {output}");
+            assert_eq!(edge_gap(Some(output), 0), gap, "38 % of {output}");
             // The surface margin is the gap less the shadow margin it carries.
-            assert_eq!(bottom_margin(Some(output)), (gap - render::SHADOW) as i32);
-            // A tall answer stops `FAR_ROOM` below the top edge.
-            let (_, h) = size_for(Phase::Answering, 100_000, Some(output));
-            assert_eq!(h, output - gap - FAR_ROOM as u32);
+            assert_eq!(
+                bottom_margin(Some(output), 0),
+                (gap - render::SHADOW) as i32
+            );
+            // A drag moves the gap, and with it the cap.
+            assert_eq!(edge_gap(Some(output), 100), gap + 100);
+            // A tall answer stops at the gap, which is the cap.
+            let (_, h) = size_for(Phase::Answering, 100_000, Some(output), 0);
+            assert_eq!(
+                h,
+                panel::bar_height() + render::SEPARATION + gap,
+                "the panel is its bar, the gap between the cards and the replies"
+            );
         }
-        // Too small an output cannot make the margin negative or the panel shorter
-        // than its own bar.
-        assert_eq!(edge_gap(Some(10)), render::SHADOW);
+        // Too small an output cannot make the margin negative.
+        assert_eq!(edge_gap(Some(10), 0), render::SHADOW);
+        assert_eq!(bottom_margin(Some(10), 0), 0);
+        // Dragged so high that the gap is most of the screen: the room above the
+        // bar clamps the cap instead, and the panel still fits.
+        let gap = edge_gap(Some(1080), 600);
+        let cap = reply_cap(Some(1080), gap);
+        let chrome = panel::bar_height() + render::SEPARATION;
         assert_eq!(
-            size_for(Phase::Answering, 100_000, Some(10)).1,
-            panel::bar_height()
+            cap,
+            1080 - gap - render::SHADOW - chrome,
+            "clamped by the room above"
+        );
+        assert!(chrome + cap <= 1080 - gap);
+    }
+
+    /// `Ctrl+T` opens the prefix, and the prefix is one key wide: `[` goes to vim
+    /// mode, everything else leaves it and does nothing.
+    #[test]
+    fn the_prefix_takes_one_key_and_opens_vim() {
+        assert_eq!(
+            key_action(Keysym::t, false, true, true),
+            Key::Prefix,
+            "Ctrl+T is the prefix"
+        );
+        assert_eq!(prefix_action(Keysym::bracketleft), Prefix::Vim);
+        for keysym in [
+            Keysym::z,
+            Keysym::Escape,
+            Keysym::Return,
+            Keysym::bracketright,
+        ] {
+            assert_eq!(prefix_action(keysym), Prefix::None, "{keysym:?}");
+        }
+    }
+
+    /// The vim table: `j`/`k` a line, `n`/`p` a page, `h`/`l` the ends, `Ctrl+j`/
+    /// `Ctrl+k` a page, and nothing else moves.
+    #[test]
+    fn vim_keys_move_the_highlight_and_nothing_else() {
+        let page = 7;
+        assert_eq!(vim_move(Keysym::j, false, page), Some(Move::Lines(1)));
+        assert_eq!(vim_move(Keysym::k, false, page), Some(Move::Lines(-1)));
+        assert_eq!(vim_move(Keysym::n, false, page), Some(Move::Lines(page)));
+        assert_eq!(vim_move(Keysym::p, false, page), Some(Move::Lines(-page)));
+        assert_eq!(vim_move(Keysym::j, true, page), Some(Move::Lines(page)));
+        assert_eq!(vim_move(Keysym::k, true, page), Some(Move::Lines(-page)));
+        assert_eq!(vim_move(Keysym::h, false, page), Some(Move::First));
+        assert_eq!(vim_move(Keysym::l, false, page), Some(Move::Last));
+        // A letter that is not in the table cannot type either: nothing happens.
+        for keysym in [Keysym::a, Keysym::x, Keysym::space, Keysym::Escape] {
+            assert_eq!(vim_move(keysym, false, page), None, "{keysym:?}");
+        }
+    }
+
+    /// A drag moves the surface, but never off the output.
+    #[test]
+    fn a_drag_stays_on_the_output() {
+        let (output, surface) = (Some(1920u32), 688u32);
+        let centred = dragged_left(output, surface, 0);
+        assert_eq!(centred, (1920 - 688) / 2);
+        assert_eq!(dragged_left(output, surface, 100), centred + 100);
+        // Far past either edge: clamped to the output, not pushed off it.
+        assert_eq!(dragged_left(output, surface, -10_000), 0);
+        assert_eq!(
+            dragged_left(output, surface, 10_000),
+            (1920 - 688),
+            "the right edge stays on screen"
+        );
+        // With no output size yet there is nothing to centre against, and the drag
+        // still cannot go negative.
+        assert_eq!(dragged_left(None, surface, 100), 100);
+        assert_eq!(dragged_left(None, surface, -50), 0);
+        // A drag up grows the gap, and with it the cap; a drag down shrinks both.
+        let base = bottom_margin(Some(1080), 0);
+        assert_eq!(bottom_margin(Some(1080), -100), base - 100);
+        assert!(
+            reply_cap(Some(1080), edge_gap(Some(1080), 100))
+                > reply_cap(Some(1080), edge_gap(Some(1080), -100))
         );
     }
 

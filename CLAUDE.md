@@ -22,7 +22,9 @@ change.
    the network and nothing else, and the credential on stdin rather than in
    `argv`. See `specs/chat-sandbox`.
 3. **Keyboard first.** One meaning per key; every action reachable without a
-   pointer. The key table in `specs/chat-panel` is the contract.
+   pointer. The key table in `specs/chat-panel` is the contract, and it is
+   per-mode: typing, the `Ctrl+T` prefix (one key wide), and vim mode. A key
+   consumed by the prefix or by vim mode never reaches the input line.
 4. **The chrome is `wlmenu`'s.** Copied exactly: radius 12, `PAD` 16, 8 px gap,
    `SEPARATION` 12, the 20 px shadow margin with the tight and wide layers, the
    lit and dark hairline profiles, the plush inks, and the 3 px scroll indicator
