@@ -29,9 +29,12 @@ of it.  The chrome is the one
 .BR wlmenu (1)
 draws: a translucent body with a hairline border inside a 20-pixel drop shadow,
 and a 3-pixel scroll indicator at the right edge while the replies overflow.
-Holding the left button for a quarter of a second and moving drags the panel; it
-stays on the output, and where it was is never written down.
-Two cards of one tone, 12 pixels apart: the replies above, the field below.
+Holding the left button for a quarter of a second and moving drags the panel in
+both directions; it stays on the output and keeps its size, and where it was is
+never written down.
+Two cards of one tone, 12 pixels apart: the replies above, the field below, in a
+box of fixed height -- as tall as the field's gap above the screen's bottom edge --
+so a longer answer scrolls inside it instead of growing the panel.
 Only the model's text is drawn -- answers, failures and the panel's own notes,
 8 pixels apart.  A question you sent is kept for the next request and drawn
 nowhere.  The highlighted line is marked by brighter ink, two pixels in from its

@@ -52,10 +52,10 @@ pub fn draw(
         ..panel
     };
     let room = bar.y.saturating_sub(panel.y).saturating_sub(sep);
-    // The reveal: the card is only as tall as it has grown so far, measured up from
-    // the bar, so it is seen to come out of the field. Everything below is clipped.
-    let full = room.min(transcript.total_height());
-    let card_h = (reveal.clamp(0.0, 1.0) * full as f32).round() as u32;
+    // The card is the room's full height for as long as the panel is up: the
+    // transcript scrolls inside it rather than resizing it. The reveal only makes
+    // it appear from the bar, so `reveal = 0` is no card at all and 1 is the box.
+    let card_h = (reveal.clamp(0.0, 1.0) * room as f32).round() as u32;
     let replies = (card_h > 0).then(|| render::Panel {
         y: bar.y - sep - card_h,
         h: card_h,
@@ -141,7 +141,10 @@ fn draw_replies(
         if !viewport.shows(row.y, blocks.row_h) {
             continue;
         }
-        let y = card.y + row.y;
+        // The row's position inside the card is its place in the transcript less
+        // how far the view has been scrolled: without the subtraction a long answer
+        // is drawn below the card and nothing shows.
+        let y = card.y + row.y.saturating_sub(viewport.top);
         if y + blocks.row_h <= clip.start || y >= clip.end {
             continue;
         }
@@ -756,6 +759,44 @@ mod tests {
                 assert_eq!(px(&half, x, y), px(&full, x, y), "bar moved at ({x},{y})");
             }
         }
+    }
+
+    /// The reported defect: an answer taller than the box drew nothing at all,
+    /// because the lines were placed from the transcript's origin while the card
+    /// was clipped to the box.
+    #[test]
+    fn a_tall_answer_scrolls_inside_the_box() {
+        let f = font();
+        let mut scene = scene(&f, 300.0);
+        for i in 0..6 {
+            scene.transcript.add_note(&format!("note {i}"), &f, 300.0);
+        }
+        let room = 4 * f.row_h;
+        let (w, h) = (500u32, height_for(room, &f, 1));
+        scene.viewport = Viewport::new(transcript_px(h, &f, 1));
+        let total = scene.transcript.total_height();
+        assert!(total > room, "the transcript is taller than the box");
+        scene.viewport.follow(total);
+        let tail = paint(&scene, w, h);
+        let ink_in = |from: u32, to: u32| {
+            (from..to)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    tail[at(w, x, y)..][..4][..3] != render::premul(render::BG_PROMPT)[..3]
+                })
+                .count()
+        };
+        // The box is full of the newest lines, right down to its last row.
+        assert!(ink_in(f.row_h, 2 * f.row_h) > 0, "the box is not empty");
+        assert!(
+            ink_in(room - f.row_h, room) > 0,
+            "the newest line is at the bottom of the box"
+        );
+        // Scrolled to the top instead, the frame is a different slice of the text,
+        // and the bar is untouched either way.
+        scene.viewport.top = 0;
+        let head = paint(&scene, w, h);
+        assert_ne!(head, tail, "the view offset is applied to the lines");
     }
 
     #[test]

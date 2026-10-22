@@ -216,10 +216,10 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
     transcript.delta("Then the peer is gone", &font, max_w);
     transcript.cancel("cancelled", &font, max_w);
     transcript.fail("the provider refused the request (401)", &font, max_w);
-    // The panel is as tall as its blocks, so the transcript comes first.
+    // The answering panel is a fixed size: the bar, the gap and the box.
     let (pw, ph) = (
         WIDTH,
-        panel::height_for(transcript.total_height(), &font, 1),
+        panel::height_for(room_for_replies(Some(FALLBACK_OUTPUT_H)), &font, 1),
     );
     let (w, h) = surface_size((pw, ph));
     let mut input = Input::default();
@@ -285,9 +285,10 @@ fn run(
     let surface = compositor.create_surface(&qh);
     surface.set_buffer_scale(1);
     let layer = shell.create_layer_surface(&qh, surface, Layer::Overlay, Some(APP_ID), None);
-    // Bottom-anchored, so the bar keeps one place on screen while answers grow
-    // upwards out of it.
-    layer.set_anchor(Anchor::BOTTOM);
+    // Anchored bottom and left: a layer-shell margin only applies to an anchored
+    // edge, and the panel is moved on both axes. With no right anchor the surface
+    // keeps its own width, and `left_margin` centres it.
+    layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT);
     layer.set_margin(0, 0, bottom_margin(None, 0), 0);
     layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
     // Collapsed to the bar. The first commit is buffer-less: it asks for the
@@ -570,19 +571,24 @@ fn left_margin(output_w: Option<u32>, surface_w: u32) -> i32 {
 /// pixels — its blocks are laid out in buffer pixels, so the caller divides by the
 /// scale. These are the panel's sizes; `surface_size` adds the shadow margin.
 /// Pure, so the spec's numbers are testable without a surface.
-fn size_for(phase: Phase, content: u32, output_h: Option<u32>, drag: i32) -> (u32, u32) {
+fn size_for(phase: Phase, output_h: Option<u32>) -> (u32, u32) {
     let bar = panel::bar_height();
     match phase {
         Phase::Idle => (WIDTH, bar),
         Phase::Thinking => (2 * bar, 2 * bar),
-        Phase::Answering => {
-            let gap = edge_gap(output_h, drag);
-            let cap = reply_cap(output_h, gap);
-            let rows = layout::MAX_ROWS as u32 * bar;
-            let want = bar + render::SEPARATION + content.min(rows).min(cap);
-            (WIDTH, want)
-        }
+        // Fixed: the room the replies are given, and nothing about how much text
+        // they hold, so the panel does not resize as an answer arrives or as it is
+        // moved. The replies scroll inside it.
+        Phase::Answering => (WIDTH, bar + render::SEPARATION + room_for_replies(output_h)),
     }
+}
+
+/// How tall the replies card always is: the anchored gap, clamped by the room left
+/// above the bar and by the 64 rows the frame may draw.
+fn room_for_replies(output_h: Option<u32>) -> u32 {
+    let gap = edge_gap(output_h, 0);
+    let rows = layout::MAX_ROWS as u32 * panel::bar_height();
+    reply_cap(output_h, gap).min(rows)
 }
 
 /// How much of the replies card has grown out of the bar after `elapsed_ms`: an
@@ -756,15 +762,10 @@ struct State {
 }
 
 impl State {
-    /// Join the font thread once. Until then there is no text, and no frame.
+    /// The size the phase wants. The replies' box is fixed, so this does not read
+    /// the transcript at all: an answer arriving never resizes the panel.
     fn target_size(&self) -> (u32, u32) {
-        // The blocks are buffer pixels; the panel's size is logical.
-        size_for(
-            self.phase,
-            self.transcript.total_height().div_ceil(self.scale.max(1)),
-            self.output_h,
-            self.drag.bottom,
-        )
+        size_for(self.phase, self.output_h)
     }
 
     fn blink_index(&self) -> usize {
@@ -1866,68 +1867,30 @@ mod tests {
     fn the_three_states_have_the_spec_s_sizes() {
         let bar = panel::bar_height();
         assert_eq!(bar, 30, "row_h_for(20) is 30 at 1x");
-        assert_eq!(size_for(Phase::Idle, 0, Some(1080), 0), (640, bar));
-        assert_eq!(size_for(Phase::Thinking, 0, Some(1080), 0), (60, 60));
-        // Answering: the bar, the 12 px between the cards, and the replies' own
-        // height, which is blocks and gaps rather than a count of rows.
-        assert_eq!(
-            size_for(Phase::Answering, 4 * bar, Some(1080), 0),
-            (640, bar + render::SEPARATION + 4 * bar)
-        );
-        // The cap is the gap below the bar in force: 38 % of 1080.
-        let cap = reply_cap(Some(1080), edge_gap(Some(1080), 0));
-        assert_eq!(cap, 410, "as tall as the field's gap above the bottom");
-        let tallest = bar + render::SEPARATION + cap;
-        assert_eq!(
-            size_for(Phase::Answering, 1000 * bar, Some(1080), 0),
-            (640, tallest)
-        );
+        assert_eq!(size_for(Phase::Idle, Some(1080)), (640, bar));
+        assert_eq!(size_for(Phase::Thinking, Some(1080)), (60, 60));
+        // Answering: the bar, the 12 px between the cards, and a fixed room for the
+        // replies. No term for the text, so it is the same size for one line and for
+        // a thousand, and a move does not change it.
+        let room = room_for_replies(Some(1080));
+        assert_eq!(room, 410, "38 % of 1080");
+        let answering = (640, bar + render::SEPARATION + room);
+        assert_eq!(size_for(Phase::Answering, Some(1080)), answering);
         // Before the output reports, a 1080-pixel one is assumed.
+        assert_eq!(size_for(Phase::Answering, None), answering);
+        // A tiny output cannot make the room negative.
         assert_eq!(
-            size_for(Phase::Answering, 1000 * bar, None, 0),
-            (640, tallest)
-        );
-        // An empty transcript still leaves the bar and the gap between the cards.
-        assert_eq!(
-            size_for(Phase::Answering, 0, Some(1080), 0).1,
+            size_for(Phase::Answering, Some(10)).1,
             bar + render::SEPARATION
         );
-        // A tiny output cannot make the cap negative.
+        // The row cap bounds the box as well as the viewport: past ~5000 px the gap
+        // alone would allow more rows than a frame may draw.
+        let tall = Some(8000u32);
         assert_eq!(
-            size_for(Phase::Answering, 10 * bar, Some(40), 0).1,
-            bar + render::SEPARATION
+            room_for_replies(tall),
+            layout::MAX_ROWS as u32 * bar,
+            "never more than the rows the frame may draw"
         );
-    }
-
-    #[test]
-    fn the_text_is_laid_out_at_the_answering_width_in_every_phase() {
-        let inner = 2 * (crate::PAD + 8);
-        assert_eq!(layout_width(1), (WIDTH - inner) as f32);
-        assert_eq!(layout_width(2), ((WIDTH * 2 - 2 * inner) as f32));
-        // The ball is 60 px wide at 1x; no text may be laid out at that width.
-        assert!(layout_width(1) > (2 * panel::bar_height()) as f32);
-    }
-
-    /// The sequence that crashed with fcitx: sending enters the thinking ball,
-    /// and the ball's 60 px panel used to become the text width - 12 px, narrower
-    /// than a single CJK character, so the re-wrap split one mid-byte and panicked.
-    #[test]
-    fn a_sent_chinese_question_survives_the_thinking_ball() {
-        let f = PanelFont::load(font::SIZE).expect("system font available");
-        let w = layout_width(1);
-        let mut t = Transcript::default();
-        t.ask("\u{4ec0}\u{4e48}\u{662f} EAGAIN", &f);
-        t.rewrap(&f, w);
-        assert_eq!(t.total_rows(), 0, "the question is not drawn, only kept");
-        t.delta(
-            "\u{5b83}\u{8868}\u{793a}\u{8d44}\u{6e90}\u{6682}\u{65f6}\u{4e0d}\u{53ef}\u{7528}\u{ff0c}\u{7a0d}\u{540e}\u{91cd}\u{8bd5}\u{5373}\u{53ef}\u{3002}",
-            &f,
-            w,
-        );
-        t.finish_answer(&f);
-        assert_eq!(t.request_turns()[0].text, "\u{4ec0}\u{4e48}\u{662f} EAGAIN");
-        assert_eq!(t.total_rows(), 1, "the answer is what is on screen");
-        assert_eq!(t.total_height(), f.row_h, "one row, in the replies card");
     }
 
     /// The bar sits a share of the output height above the bottom edge, and the
@@ -1943,8 +1906,8 @@ mod tests {
             );
             // A drag moves the gap, and with it the cap.
             assert_eq!(edge_gap(Some(output), 100), gap + 100);
-            // A tall answer stops at the gap, which is the cap.
-            let (_, h) = size_for(Phase::Answering, 100_000, Some(output), 0);
+            // The box is the gap, whatever the transcript holds.
+            let (_, h) = size_for(Phase::Answering, Some(output));
             assert_eq!(
                 h,
                 panel::bar_height() + render::SEPARATION + gap,

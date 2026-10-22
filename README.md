@@ -64,13 +64,14 @@ neighbours, so there is no mark in the margin at all. The first reply of a run
 grows out of the bar in 160 ms; a follow-up does not.
 
 The sizes are the panel's own; the layer surface adds the shadow margin on every
-side and sits that margin inside the visible gap. The replies may grow to the
-height of the bar's own gap above the screen's bottom edge (38 % of the output),
-clamped by the room left above the bar; a longer answer scrolls inside its card
-and shows a 3 px scroll indicator on the right edge. Holding the left button for
-a quarter of a second and moving drags the panel: it stays on the output, the cap
-follows the gap, and the position is never written down. States snap: there is no
-height tween other than the first card's reveal.
+side and sits that margin inside the visible gap. The answering panel is a
+**fixed** size: the bar, the 12 px between the cards, and a box as tall as the
+bar's own gap above the screen's bottom edge (38 % of the output, clamped by the
+room left above it). It does not grow as the answer does — a longer answer scrolls
+inside the box and shows a 3 px scroll indicator on the right edge. Holding the
+left button for a quarter of a second and moving drags the panel, in both axes;
+it stays on the output, keeps its size, and where it was is never written down.
+States snap: there is no height tween other than the first card's reveal.
 
 ## Keys
 

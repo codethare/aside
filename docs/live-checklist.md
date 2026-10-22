@@ -33,8 +33,12 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    to the first/last line. No letter reaches the input line. `Esc` leaves the
    mode, and a second `Esc` cancels a stream that was running the whole time.
 5c. Hold the left button for a quarter of a second and move: the panel follows
-   the pointer and stays on screen. A short click moves nothing, and a new run
-   starts where the anchor puts it.
+   the pointer in both directions, stays on screen, and does not change size while
+   it moves. A short click moves nothing, and a new run starts where the anchor
+   puts it.
+5d. Ask something long enough to overflow the box: the panel is the same size it
+   was, the newest lines are the ones on screen, and scrolling reaches the older
+   ones.
 6. While an answer is streaming, run `pgrep -a bwrap` in another terminal: the
    sandboxed process is there. Press `Esc`: the stream stops, `cancelled` appears,
    the panel stays open, and `pgrep -a bwrap` now finds nothing.
