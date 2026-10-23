@@ -46,7 +46,9 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    first motion, in both directions, stays on screen, and does not change size
    while it moves. A click without moving does nothing, and a new run starts where
    the anchor puts it.
-5c2. Press on the first line of an answer and drag to its third line: those three
+5c2. Move the pointer across the replies without holding a button: nothing is
+   selected, and a selection made a moment ago stays exactly as it was.
+5c3. Press on the first line of an answer and drag to its third line: those three
    lines are drawn highlighted, no text moves, and `Ctrl+C` puts exactly those
    three lines on the clipboard. `Esc` clears the selection and leaves the panel
    open; a second `Esc` closes it.

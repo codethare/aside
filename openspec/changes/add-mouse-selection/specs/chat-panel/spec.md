@@ -102,6 +102,11 @@ change: the lines it named are no longer on screen.
 - **WHEN** the user presses on the first line of an answer, drags to its third line, releases, and presses `Ctrl+C`
 - **THEN** the clipboard holds those three lines, one per line, and nothing else
 
+#### Scenario: Passing over the text selects nothing
+
+- **WHEN** the pointer moves across the replies with no button held, after a selection has been made and released
+- **THEN** the selection is unchanged, and no text is banded by the movement
+
 #### Scenario: A selection can stop mid-word
 
 - **WHEN** the user drags from the fourth word of a line to the second word of the next

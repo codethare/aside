@@ -624,6 +624,26 @@ fn copied_lines(sel: &panel::Selection, rows: &[crate::transcript::Row<'_>]) -> 
         .max(1)
 }
 
+/// What a pointer motion means. The button has to be down for any of it: a moving
+/// pointer over the panel is a hover, and a hover selects nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Motion {
+    /// No button down: the pointer is just passing over.
+    Hover,
+    /// Extend the selection the press started.
+    Extend,
+    /// Carry the panel.
+    Drag,
+}
+
+fn motion_with(press: Option<(f64, f64)>, selecting: bool) -> Motion {
+    match (press, selecting) {
+        (None, _) => Motion::Hover,
+        (Some(_), true) => Motion::Extend,
+        (Some(_), false) => Motion::Drag,
+    }
+}
+
 /// A pointer's logical y turned into an offset in the replies card, in buffer
 /// pixels, plus how far the view is scrolled. The card's top is the panel's top,
 /// which is the shadow margin in from the surface's.
@@ -1326,19 +1346,23 @@ impl State {
         self.transcript.row_at(y, blocks)
     }
 
-    /// A motion with the button down extends a selection or carries the panel.
+    /// A motion extends a selection or carries the panel — but only while the
+    /// button is down. A pointer merely passing over the replies selects nothing:
+    /// that was the reported bug, a hover painting text as if it had been dragged.
     fn motion_to(&mut self, position: (f64, f64)) {
-        if self.selecting {
-            if let (Some((row, ch)), Some(sel)) = (self.reply_spot(position), self.selection) {
-                self.selection = Some(panel::Selection {
-                    cursor: (row, ch),
-                    ..sel
-                });
+        match motion_with(self.press, self.selecting) {
+            Motion::Hover => {}
+            Motion::Drag => self.drag_to(position),
+            Motion::Extend => {
+                if let (Some((row, ch)), Some(sel)) = (self.reply_spot(position), self.selection) {
+                    self.selection = Some(panel::Selection {
+                        cursor: (row, ch),
+                        ..sel
+                    });
+                }
+                self.dirty = true;
             }
-            self.dirty = true;
-            return;
         }
-        self.drag_to(position);
     }
 
     /// Move the panel by the pointer's delta since the drag began. The margins are
@@ -2308,6 +2332,16 @@ impl PointerHandler for State {
                 PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
                     self.press = None;
                     self.dragging = None;
+                    // The selection stays where it was chosen; the gesture that made
+                    // it is over, so a later hover cannot extend it.
+                    self.selecting = false;
+                }
+                // A pointer that leaves with the button down leaves the gesture
+                // behind too, or the next hover would carry it on.
+                PointerEventKind::Leave { .. } => {
+                    self.press = None;
+                    self.dragging = None;
+                    self.selecting = false;
                 }
                 PointerEventKind::Motion { .. } => self.motion_to(event.position),
                 PointerEventKind::Axis { vertical, .. }
@@ -2539,6 +2573,18 @@ mod tests {
         for keysym in [Keysym::a, Keysym::x, Keysym::z, Keysym::slash] {
             assert_eq!(copy_key(keysym, false, page), None, "{keysym:?}");
         }
+    }
+
+    /// The reported bug: a pointer passing over the replies selected text, because
+    /// the "I am selecting" flag outlived the press that set it. A motion only acts
+    /// while the button is down, and a hover is no gesture at all.
+    #[test]
+    fn a_hover_selects_nothing() {
+        let down = Some((10.0, 10.0));
+        assert_eq!(motion_with(None, true), Motion::Hover, "a stale flag");
+        assert_eq!(motion_with(None, false), Motion::Hover);
+        assert_eq!(motion_with(down, true), Motion::Extend);
+        assert_eq!(motion_with(down, false), Motion::Drag);
     }
 
     /// The copy note counts the lines that went out, and a single line says so.
