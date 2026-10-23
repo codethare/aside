@@ -105,28 +105,33 @@ both ends, and only then does the process exit.
 
 | Key | Mode | Action |
 |---|---|---|
-| `Enter` | typing, vim | send |
+| `Enter` | typing | send |
 | `Esc` | typing | cancel a streaming answer, or close the panel |
-| `Esc` | vim, prefix | leave the mode, cancelling nothing |
+| `Esc` | prefix | leave the mode, cancelling nothing |
+| `Esc` | copy | clear the selection; leave copy mode when there is none |
 | `Ctrl+T` | typing | enter the prefix mode; the next key is a settings command |
-| `[` | prefix | enter vim mode |
-| `h` / `j` / `k` / `l` | vim | move the **panel** 16 px left / down / up / right |
-| `Ctrl+h` / `Ctrl+j` / `Ctrl+k` / `Ctrl+l` | vim | the same, 160 px |
-| `n` / `p` | vim | move the highlighted line a page down / up |
-| `Ctrl+n` / `Ctrl+p` | vim | move it one line |
-| `g` / `G` | vim | move it to the first / last line |
+| `[` | prefix | enter copy mode |
+| `Alt+hjkl` | any | move the **panel** 16 px left / down / up / right |
+| `Alt+Ctrl+hjkl` | any | the same, 160 px |
 | `Up` / `Down` | typing | move the highlighted transcript line |
 | `PageUp` / `PageDown` | typing | move it a page |
-| `Alt+C` / `Ctrl+C` | typing, vim | copy the highlighted line to the clipboard |
+| `Alt+C` / `Ctrl+C` | typing, copy | copy the selection, or the highlighted line |
 | `Ctrl+V` | typing | paste the clipboard into the input line |
 
-`Ctrl+T` is tmux's prefix shape rather than a vim toggle: it takes exactly one
+Copy mode is tmux's, cut down to what the panel has to walk. `h`/`l` move a
+character, `0`/`$` to the ends of the line, `j`/`k` a line, `w`/`b` a word,
+`Ctrl+d`/`Ctrl+u` half a page, `Ctrl+f`/`Ctrl+b` (or `PageDown`/`PageUp`) a page,
+`g`/`G` the first and last line. `Space` starts a selection and `Enter` or `y`
+copies it — or the line the cursor is on — and leaves; `q` leaves, `Esc` clears a
+selection first. After a copy the bar says `copied N lines` for a moment.
+
+`Ctrl+T` is tmux's prefix shape rather than a mode toggle: it takes exactly one
 key, and `[` is the only command it has so far — later settings commands belong
 there. While it waits, the bar takes no input, changes tone and reads `press [ to
-enter vim mode`, so the next key is never swallowed by surprise. Vim mode takes the keyboard from the input line and from the input method,
-draws `-- VIM --` in the bar and hides the caret, so a swallowed keystroke is
-never a mystery. Its spatial keys move the panel rather than the text: the
-transcript keeps `n`/`p`, `Ctrl+n`/`Ctrl+p` and `g`/`G` for reading.
+enter copy mode`, so the next key is never swallowed by surprise. Copy mode takes
+the keyboard from the input line and from the input method, draws `-- COPY --` in
+the bar, hides the caret and shows a cursor in the replies, so a swallowed
+keystroke is never a mystery.
 
 Editing is the usual set: `Left`, `Right`, `Home`, `End`, `Backspace`, `Delete`,
 and `Ctrl+Left`/`Ctrl+Right` by word.

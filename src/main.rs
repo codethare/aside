@@ -63,6 +63,8 @@ const EDGE_SHARE: i32 = 38;
 /// How tall the replies may be, as a multiple of that same gap: the field's own
 /// distance to the screen's bottom is the yardstick the panel grows by.
 const REPLY_SHARE: u32 = 1;
+/// How long `copied N lines` stays in the bar.
+const COPY_NOTE_MS: u64 = 1_200;
 /// How long a shape change takes at its shortest. The morph is the point, so it is
 /// long enough to be seen rather than only to be over.
 const MORPH_IN_MS: u128 = 360;
@@ -107,6 +109,8 @@ enum Key {
     PageDown,
     Copy,
     Paste,
+    /// `Alt+hjkl`: move the panel itself.
+    Window,
     Backspace,
     Delete,
     Left,
@@ -142,6 +146,8 @@ fn key_action(keysym: Keysym, alt: bool, ctrl: bool, has_text: bool) -> Key {
         Keysym::c if ctrl && !alt => Key::Copy,
         Keysym::v if ctrl && !alt => Key::Paste,
         Keysym::t if ctrl && !alt => Key::Prefix,
+        Keysym::h | Keysym::j | Keysym::k | Keysym::l if alt && !ctrl => Key::Window,
+        Keysym::h | Keysym::j | Keysym::k | Keysym::l if alt && ctrl => Key::Window,
         _ if has_text && plain => Key::Text,
         _ => Key::Ignore,
     }
@@ -274,6 +280,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         &viewport,
         None,
         Some(0),
+        None,
         true,
         "",
         "",
@@ -367,6 +374,8 @@ fn run(
         dragging: None,
         selecting: false,
         selection: None,
+        copy_cursor: (0, 0),
+        copied: None,
         pointer: None,
         morph: None,
         enter_start: None,
@@ -428,6 +437,9 @@ fn run(
         let timeout = if state.morphing() || state.rising() {
             // The card is growing: a frame every step of the ease.
             Duration::from_millis(16)
+        } else if state.copy_note_up() {
+            // The note is only up for a moment; a frame every step of that.
+            Duration::from_millis(100)
         } else if state.phase == Phase::Thinking {
             // The working light advances by the clock; a frame every step of its
             // lap keeps it smooth.
@@ -600,6 +612,18 @@ fn byte_index(text: &str, index: usize) -> usize {
         .map_or(text.len(), |(byte, _)| byte)
 }
 
+/// How many lines a selection covers: the rows from its first end to its last.
+fn copied_lines(sel: &panel::Selection, rows: &[crate::transcript::Row<'_>]) -> usize {
+    let ((r0, _), (r1, _)) = sel.ends();
+    rows.iter()
+        .enumerate()
+        .filter(|(i, row)| {
+            (r0..=r1).contains(i) && sel.columns(*i, row.text.chars().count()).is_some()
+        })
+        .count()
+        .max(1)
+}
+
 /// A pointer's logical y turned into an offset in the replies card, in buffer
 /// pixels, plus how far the view is scrolled. The card's top is the panel's top,
 /// which is the shadow margin in from the surface's.
@@ -759,66 +783,92 @@ pub fn orbit_at(elapsed_ms: u128) -> f32 {
 }
 
 /// Who owns the keyboard. `Prefix` is one key wide, the way a terminal
-/// multiplexer's prefix is; `Vim` keeps it until `Esc`.
+/// multiplexer's prefix is; `Copy` keeps it until it is left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     /// Typing goes to the input line, and the key table applies.
     Typing,
     /// `Ctrl+T` was pressed: the next key is a settings command.
     Prefix,
-    /// The highlight moves and nothing is typed.
-    Vim,
+    /// A cursor walks the replies and can take a selection out with it.
+    Copy,
 }
 
 /// What the one key after the prefix means. The table is the place later settings
 /// keys are added, rather than taking more keys from the input line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Prefix {
-    /// `[`: enter vim mode.
-    Vim,
+    /// `[`: enter copy mode.
+    Copy,
     /// Anything else: leave the prefix and do nothing.
     None,
 }
 
 fn prefix_action(keysym: Keysym) -> Prefix {
     match keysym {
-        Keysym::bracketleft => Prefix::Vim,
+        Keysym::bracketleft => Prefix::Copy,
         _ => Prefix::None,
     }
 }
 
-/// Where a vim-mode key wants the highlight to go.
+/// What a key means in copy mode, tmux's table cut down to what this panel has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Move {
-    /// That many rows from where it is.
-    Lines(i64),
-    /// The first or the last line of the transcript.
+enum CopyKey {
+    /// One character left or right.
+    Left,
+    Right,
+    /// The start or the end of the line.
+    LineStart,
+    LineEnd,
+    /// That many lines down (negative up).
+    Row(i64),
+    /// The next or previous word.
+    WordForward,
+    WordBack,
     First,
     Last,
+    /// Start a selection, or end the one there is.
+    Select,
+    /// Copy what is selected and leave.
+    Copy,
+    /// Leave without copying.
+    Quit,
+    /// Clear the selection, or leave when there is none.
+    Cancel,
 }
 
-/// The movement a vim-mode key asks for, if it asks for one. `page` is one
-/// screenful, in the unit the highlight counts in.
-fn vim_move(keysym: Keysym, ctrl: bool, page: i64) -> Option<Move> {
+/// The copy-mode table. `page` is one screenful in rows, so the keys that move by a
+/// page need no idea of the viewport's own arithmetic.
+fn copy_key(keysym: Keysym, ctrl: bool, page: i64) -> Option<CopyKey> {
+    let half = (page / 2).max(1);
     match (keysym, ctrl) {
-        // `n`/`p` page; `Ctrl+n`/`Ctrl+p` are the same movement one line at a time,
-        // which is where `j`/`k` used to be before they moved the window.
-        (Keysym::n, false) => Some(Move::Lines(page)),
-        (Keysym::p, false) => Some(Move::Lines(-page)),
-        (Keysym::n, true) => Some(Move::Lines(1)),
-        (Keysym::p, true) => Some(Move::Lines(-1)),
-        // The ends of the transcript, vim's own keys for them.
-        (Keysym::g, false) => Some(Move::First),
-        (Keysym::G, false) => Some(Move::Last),
+        (Keysym::h, false) => Some(CopyKey::Left),
+        (Keysym::l, false) => Some(CopyKey::Right),
+        (Keysym::_0, false) => Some(CopyKey::LineStart),
+        (Keysym::dollar, false) => Some(CopyKey::LineEnd),
+        (Keysym::j, false) => Some(CopyKey::Row(1)),
+        (Keysym::k, false) => Some(CopyKey::Row(-1)),
+        (Keysym::w, false) => Some(CopyKey::WordForward),
+        (Keysym::b, false) => Some(CopyKey::WordBack),
+        (Keysym::d, true) => Some(CopyKey::Row(half)),
+        (Keysym::u, true) => Some(CopyKey::Row(-half)),
+        (Keysym::f, true) | (Keysym::Next, _) => Some(CopyKey::Row(page)),
+        (Keysym::b, true) | (Keysym::Prior, _) => Some(CopyKey::Row(-page)),
+        (Keysym::g, false) => Some(CopyKey::First),
+        (Keysym::G, false) => Some(CopyKey::Last),
+        (Keysym::space, false) | (Keysym::v, false) => Some(CopyKey::Select),
+        (Keysym::Return, _) | (Keysym::KP_Enter, _) | (Keysym::y, false) => Some(CopyKey::Copy),
+        (Keysym::q, false) => Some(CopyKey::Quit),
+        (Keysym::Escape, _) => Some(CopyKey::Cancel),
         _ => None,
     }
 }
 
-/// How far one vim-mode keypress moves the panel, in logical px: one padding step,
-/// and ten of them when `Ctrl` is held, so the keyboard can cross the screen.
+/// How far one `Alt+hjkl` press moves the panel, in logical px: one padding step,
+/// and ten of them with `Ctrl` held, so the keyboard can cross the screen.
 const WINDOW_STEP: i32 = 16;
 
-/// The panel movement a vim-mode key asks for, in logical px: `dx` right, `dy` up.
+/// The panel movement a chord asks for, in logical px: `dx` right, `dy` up.
 /// `hjkl` are spatial here, which is why the transcript's own keys moved.
 fn window_move(keysym: Keysym, ctrl: bool) -> Option<(i32, i32)> {
     let step = if ctrl { WINDOW_STEP * 10 } else { WINDOW_STEP };
@@ -876,7 +926,7 @@ struct State {
     /// The shape it is drawn as, which is not always the phase's own: a request
     /// keeps the box a follow-up was asked from.
     shape: panel::State,
-    /// Who owns the keyboard: the input line, the prefix, or vim mode.
+    /// Who owns the keyboard: the input line, the prefix, or copy mode.
     mode: Mode,
     /// Moved by dragging, in logical px from the anchored place.
     drag: Drag,
@@ -892,6 +942,10 @@ struct State {
     /// What a pointer selected, in characters: an anchor and where it has been
     /// dragged to, either end first.
     selection: Option<panel::Selection>,
+    /// Where the copy-mode cursor is: a line and a character of it.
+    copy_cursor: (usize, usize),
+    /// When the last copy happened, and how many lines it took.
+    copied: Option<(std::time::Instant, usize)>,
     pointer: Option<wl_pointer::WlPointer>,
     /// The shape change in progress, if any.
     morph: Option<Morph>,
@@ -1335,36 +1389,112 @@ impl State {
         self.dirty = true;
     }
 
-    /// What a key means while vim mode owns the keyboard. Navigation and the two
-    /// keys that already had a meaning in every mode; anything else is swallowed,
-    /// because the input line must not change while the mode is on.
-    fn on_vim_key(&mut self, event: &KeyEvent) {
-        let (alt, ctrl) = (self.modifiers.alt, self.modifiers.ctrl);
-        match event.keysym {
-            Keysym::Escape => self.leave_vim(),
-            Keysym::Return | Keysym::KP_Enter => self.send(),
-            Keysym::c if alt && !ctrl => self.copy_highlight(),
-            keysym => {
-                // The spatial pair moves the panel; the transcript keeps its own
-                // keys, one step further out of the way.
-                if let Some((dx, dy)) = window_move(keysym, ctrl) {
-                    self.move_panel(dx, dy);
+    /// What a key means while copy mode owns the keyboard: tmux's table, a cursor
+    /// in the replies, and a selection that is the same one the pointer writes.
+    fn on_copy_key(&mut self, event: &KeyEvent) {
+        // The window chords work here too: reading is when the panel gets in the
+        // way most.
+        if self.modifiers.alt
+            && let Some((dx, dy)) = window_move(event.keysym, self.modifiers.ctrl)
+        {
+            self.move_panel(dx, dy);
+            return;
+        }
+        let Some(font) = self.font.as_ref() else {
+            return;
+        };
+        let blocks = layout::Blocks::new(font);
+        let rows = self.transcript.rows(blocks);
+        if rows.is_empty() {
+            if copy_key(event.keysym, self.modifiers.ctrl, self.page_rows()) == Some(CopyKey::Quit)
+            {
+                self.leave_copy();
+            }
+            return;
+        }
+        let len = |row: usize| rows.get(row).map_or(0, |r| r.text.chars().count());
+        let last = rows.len() - 1;
+        let (mut row, mut ch) = self.copy_cursor;
+        row = row.min(last);
+        ch = ch.min(len(row));
+        let page = self.page_rows();
+        let Some(key) = copy_key(event.keysym, self.modifiers.ctrl, page) else {
+            return;
+        };
+        match key {
+            CopyKey::Left => ch = ch.saturating_sub(1),
+            CopyKey::Right => ch = (ch + 1).min(len(row)),
+            CopyKey::LineStart => ch = 0,
+            CopyKey::LineEnd => ch = len(row),
+            CopyKey::Row(delta) => {
+                let next = (row as i64 + delta).clamp(0, last as i64) as usize;
+                row = next;
+                ch = ch.min(len(row));
+            }
+            CopyKey::WordForward => (row, ch) = self.transcript.word_forward((row, ch), blocks),
+            CopyKey::WordBack => (row, ch) = self.transcript.word_back((row, ch), blocks),
+            CopyKey::First => {
+                row = 0;
+                ch = ch.min(len(0));
+            }
+            CopyKey::Last => {
+                row = last;
+                ch = ch.min(len(row));
+            }
+            CopyKey::Select => {
+                // Space starts a selection at the cursor, and ends the one there is.
+                self.selection = match self.selection {
+                    Some(sel) if sel.cursor == (row, ch) => None,
+                    _ => Some(panel::Selection {
+                        anchor: (row, ch),
+                        cursor: (row, ch),
+                    }),
+                };
+            }
+            CopyKey::Copy => {
+                // How many lines went out, for the note in the bar: the copy itself
+                // reads the same rows again, and it is a keypress, not a frame.
+                let lines = match self.selection {
+                    Some(sel) => copied_lines(&sel, &rows),
+                    None => 1,
+                };
+                self.copy_highlight();
+                self.copied = Some((std::time::Instant::now(), lines));
+                self.leave_copy();
+                return;
+            }
+            CopyKey::Quit => {
+                self.leave_copy();
+                return;
+            }
+            CopyKey::Cancel => {
+                if self.selection.take().is_some() {
+                    self.selection = None;
+                } else {
+                    self.leave_copy();
                     return;
-                }
-                match vim_move(keysym, ctrl, self.page_rows()) {
-                    Some(Move::Lines(delta)) => self.move_highlight(delta),
-                    Some(Move::First) => self.move_to(0),
-                    Some(Move::Last) => self.move_to(usize::MAX),
-                    None => {}
                 }
             }
         }
+        self.copy_cursor = (row, ch);
+        if let Some(sel) = self.selection.as_mut() {
+            // Moving with a selection extends it, as tmux does.
+            sel.cursor = (row, ch);
+        }
+        self.highlight = row;
+        let blocks = layout::Blocks::new(font);
+        if let Some(y) = self.transcript.row_y(row, blocks) {
+            let total = self.transcript.total_height();
+            self.viewport.ensure_visible(y, blocks.row_h, total);
+        }
+        self.dirty = true;
     }
 
-    /// Vim mode takes the keyboard from the input line and from the input method:
-    /// otherwise `j` is composed by fcitx instead of moving the highlight.
-    fn enter_vim(&mut self) {
-        self.mode = Mode::Vim;
+    /// Copy mode takes the keyboard from the input line and from the input method:
+    /// otherwise `j` is composed by fcitx instead of moving the cursor.
+    fn enter_copy(&mut self) {
+        self.mode = Mode::Copy;
+        self.copy_cursor = (self.highlight, 0);
         self.ime.preedit.clear();
         if let Some(text_input) = self.text_input.as_ref() {
             text_input.disable();
@@ -1374,7 +1504,7 @@ impl State {
     }
 
     /// Back to typing, with the input method listening again.
-    fn leave_vim(&mut self) {
+    fn leave_copy(&mut self) {
         self.mode = Mode::Typing;
         if self.focused
             && let Some(text_input) = self.text_input.as_ref()
@@ -1387,29 +1517,36 @@ impl State {
         self.dirty = true;
     }
 
-    /// Put the highlight on a line of the transcript, clamped to what exists.
-    fn move_to(&mut self, index: usize) {
-        let rows = self.rows();
-        if rows == 0 {
-            return;
-        }
-        let next = index.min(rows - 1);
-        self.move_highlight(next as i64 - self.highlight as i64);
-    }
-
     /// What the bar says while the prefix waits for its one key.
     fn mode_hint(&self) -> &'static str {
         match self.mode {
-            Mode::Prefix => "press [ to enter vim mode",
-            Mode::Typing | Mode::Vim => "",
+            Mode::Prefix => "press [ to enter copy mode",
+            Mode::Typing | Mode::Copy => "",
         }
+    }
+
+    /// Whether `copied N lines` is still on the bar, which needs frames to clear it.
+    fn copy_note_up(&self) -> bool {
+        self.copied
+            .is_some_and(|(at, _)| at.elapsed() < Duration::from_millis(COPY_NOTE_MS))
     }
 
     /// The bar's right-hand label, which is how a swallowed keystroke explains
     /// itself.
     fn mode_label(&self) -> &'static str {
+        // The copy note outranks the mode label: it is what just happened, and it
+        // is only up for a moment.
+        if let Some((at, lines)) = self.copied
+            && at.elapsed() < Duration::from_millis(COPY_NOTE_MS)
+        {
+            return if lines <= 1 {
+                "copied 1 line"
+            } else {
+                "copied lines"
+            };
+        }
         match self.mode {
-            Mode::Vim => "-- VIM --",
+            Mode::Copy => "-- COPY --",
             Mode::Typing | Mode::Prefix => "",
         }
     }
@@ -1507,7 +1644,7 @@ impl State {
         // The round is over: keys the input method never claimed are the panel's own
         // text. This is what keeps letters and digits working once the input method
         // is switched off or gone. Never while a mode owns the keyboard: there, a
-        // letter is a command, and vim mode must not be typed into.
+        // letter is a command, and copy mode must not be typed into.
         if self.mode == Mode::Typing
             && let Some(text) = self.ime.flush()
         {
@@ -1615,6 +1752,7 @@ impl State {
             &self.viewport,
             selection,
             Some(self.highlight),
+            (self.mode == Mode::Copy).then_some(self.copy_cursor),
             typing,
             &self.ime.preedit,
             hint,
@@ -1642,18 +1780,18 @@ impl State {
             return;
         }
         let text = event.utf8.clone();
-        // The prefix takes exactly one key, whatever it is: `[` goes to vim mode
+        // The prefix takes exactly one key, whatever it is: `[` goes to copy mode
         // and everything else is swallowed, so a settings key never types.
         if self.mode == Mode::Prefix {
             self.mode = Mode::Typing;
-            if prefix_action(event.keysym) == Prefix::Vim {
-                self.enter_vim();
+            if prefix_action(event.keysym) == Prefix::Copy {
+                self.enter_copy();
             }
             self.dirty = true;
             return;
         }
-        if self.mode == Mode::Vim {
-            self.on_vim_key(event);
+        if self.mode == Mode::Copy {
+            self.on_copy_key(event);
             return;
         }
         // While the ball spins the question is already sent: only Esc means
@@ -1700,6 +1838,11 @@ impl State {
             Key::PageDown => self.move_highlight(self.page_rows()),
             Key::Copy => self.copy_highlight(),
             Key::Paste => self.paste_clipboard(),
+            Key::Window => {
+                if let Some((dx, dy)) = window_move(event.keysym, self.modifiers.ctrl) {
+                    self.move_panel(dx, dy);
+                }
+            }
             Key::Backspace => {
                 self.input.backspace();
                 self.after_typing();
@@ -1796,7 +1939,7 @@ impl State {
 
     /// What the compositor's text-input events mean for the input line.
     fn on_text_input(&mut self, event: TextInputEvent) {
-        // Second line of defence: the text input is disabled in vim mode, but a
+        // Second line of defence: the text input is disabled in copy mode, but a
         // commit already in flight must not append to a line nobody is typing on.
         if self.mode != Mode::Typing {
             return;
@@ -2339,16 +2482,16 @@ mod tests {
         assert!(chrome + cap <= 1080 - gap);
     }
 
-    /// `Ctrl+T` opens the prefix, and the prefix is one key wide: `[` goes to vim
+    /// `Ctrl+T` opens the prefix, and the prefix is one key wide: `[` goes to copy
     /// mode, everything else leaves it and does nothing.
     #[test]
-    fn the_prefix_takes_one_key_and_opens_vim() {
+    fn the_prefix_takes_one_key_and_opens_copy_mode() {
         assert_eq!(
             key_action(Keysym::t, false, true, true),
             Key::Prefix,
             "Ctrl+T is the prefix"
         );
-        assert_eq!(prefix_action(Keysym::bracketleft), Prefix::Vim);
+        assert_eq!(prefix_action(Keysym::bracketleft), Prefix::Copy);
         for keysym in [
             Keysym::z,
             Keysym::Escape,
@@ -2359,12 +2502,71 @@ mod tests {
         }
     }
 
-    /// The vim tables: `hjkl` step the window, and the transcript keeps its own
-    /// keys for the line, the page and the ends.
+    /// The copy-mode table, key by key: what moves, what selects, what leaves.
     #[test]
-    fn vim_keys_move_the_window_and_the_highlight() {
-        let page = 7;
-        // The spatial pair moves the panel, `Ctrl` ten times as far.
+    fn the_copy_mode_table_is_tmuxs_where_this_panel_has_something_to_move() {
+        let page = 8;
+        assert_eq!(copy_key(Keysym::h, false, page), Some(CopyKey::Left));
+        assert_eq!(copy_key(Keysym::l, false, page), Some(CopyKey::Right));
+        assert_eq!(copy_key(Keysym::_0, false, page), Some(CopyKey::LineStart));
+        assert_eq!(
+            copy_key(Keysym::dollar, false, page),
+            Some(CopyKey::LineEnd)
+        );
+        assert_eq!(copy_key(Keysym::j, false, page), Some(CopyKey::Row(1)));
+        assert_eq!(copy_key(Keysym::k, false, page), Some(CopyKey::Row(-1)));
+        assert_eq!(copy_key(Keysym::w, false, page), Some(CopyKey::WordForward));
+        assert_eq!(copy_key(Keysym::b, false, page), Some(CopyKey::WordBack));
+        assert_eq!(
+            copy_key(Keysym::d, true, page),
+            Some(CopyKey::Row(4)),
+            "half a page"
+        );
+        assert_eq!(copy_key(Keysym::u, true, page), Some(CopyKey::Row(-4)));
+        assert_eq!(copy_key(Keysym::f, true, page), Some(CopyKey::Row(8)));
+        assert_eq!(copy_key(Keysym::b, true, page), Some(CopyKey::Row(-8)));
+        assert_eq!(copy_key(Keysym::Next, false, page), Some(CopyKey::Row(8)));
+        assert_eq!(copy_key(Keysym::Prior, false, page), Some(CopyKey::Row(-8)));
+        assert_eq!(copy_key(Keysym::g, false, page), Some(CopyKey::First));
+        assert_eq!(copy_key(Keysym::G, false, page), Some(CopyKey::Last));
+        assert_eq!(copy_key(Keysym::space, false, page), Some(CopyKey::Select));
+        assert_eq!(copy_key(Keysym::v, false, page), Some(CopyKey::Select));
+        assert_eq!(copy_key(Keysym::Return, false, page), Some(CopyKey::Copy));
+        assert_eq!(copy_key(Keysym::y, false, page), Some(CopyKey::Copy));
+        assert_eq!(copy_key(Keysym::q, false, page), Some(CopyKey::Quit));
+        assert_eq!(copy_key(Keysym::Escape, false, page), Some(CopyKey::Cancel));
+        // A letter that is not in the table types nothing and moves nothing.
+        for keysym in [Keysym::a, Keysym::x, Keysym::z, Keysym::slash] {
+            assert_eq!(copy_key(keysym, false, page), None, "{keysym:?}");
+        }
+    }
+
+    /// The copy note counts the lines that went out, and a single line says so.
+    #[test]
+    fn the_copy_note_counts_the_lines_it_took() {
+        let f = PanelFont::load(font::SIZE).expect("system font available");
+        let blocks = layout::Blocks::new(&f);
+        let mut t = crate::transcript::Transcript::default();
+        t.ask("q", &f);
+        t.delta("one\ntwo\nthree", &f, 400.0);
+        t.finish_answer(&f);
+        let rows = t.rows(blocks);
+        let one = panel::Selection {
+            anchor: (0, 0),
+            cursor: (0, 2),
+        };
+        assert_eq!(copied_lines(&one, &rows), 1, "part of one line is one line");
+        let three = panel::Selection {
+            anchor: (0, 0),
+            cursor: (2, 3),
+        };
+        assert_eq!(copied_lines(&three, &rows), 3, "three lines");
+    }
+
+    /// The window chords: `Alt+hjkl` a padding step, `Alt+Ctrl+hjkl` ten of them,
+    /// and nothing else in the Alt row moves the panel.
+    #[test]
+    fn the_window_moves_by_chord() {
         assert_eq!(window_move(Keysym::h, false), Some((-16, 0)));
         assert_eq!(window_move(Keysym::l, false), Some((16, 0)));
         assert_eq!(window_move(Keysym::j, false), Some((0, -16)));
@@ -2374,19 +2576,11 @@ mod tests {
         for keysym in [Keysym::n, Keysym::p, Keysym::g, Keysym::a, Keysym::Escape] {
             assert_eq!(window_move(keysym, false), None, "{keysym:?}");
         }
-
-        // The transcript: `n`/`p` page, `Ctrl+n`/`Ctrl+p` a line, `g`/`G` the ends.
-        assert_eq!(vim_move(Keysym::n, false, page), Some(Move::Lines(page)));
-        assert_eq!(vim_move(Keysym::p, false, page), Some(Move::Lines(-page)));
-        assert_eq!(vim_move(Keysym::n, true, page), Some(Move::Lines(1)));
-        assert_eq!(vim_move(Keysym::p, true, page), Some(Move::Lines(-1)));
-        assert_eq!(vim_move(Keysym::g, false, page), Some(Move::First));
-        assert_eq!(vim_move(Keysym::G, false, page), Some(Move::Last));
-        // `hjkl` no longer move the highlight, and a letter outside the table does
-        // nothing at all.
-        for keysym in [Keysym::h, Keysym::j, Keysym::k, Keysym::l, Keysym::a] {
-            assert_eq!(vim_move(keysym, false, page), None, "{keysym:?}");
-        }
+        // The chords reach the key table as a window move, and `Alt+C` is still the
+        // copy.
+        assert_eq!(key_action(Keysym::h, true, false, true), Key::Window);
+        assert_eq!(key_action(Keysym::j, true, true, true), Key::Window);
+        assert_eq!(key_action(Keysym::c, true, false, true), Key::Copy);
     }
 
     /// A drag moves the surface, but never off the output.

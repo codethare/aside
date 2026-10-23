@@ -140,6 +140,8 @@ fn draw_content(
     selection: Option<Selection>,
     // The line the keyboard names.
     highlight: Option<usize>,
+    // The copy-mode cursor: the line and character it is on.
+    cursor: Option<(usize, usize)>,
     caret_visible: bool,
     preedit: &str,
     hint: &str,
@@ -186,6 +188,7 @@ fn draw_content(
             viewport,
             selection,
             highlight,
+            cursor,
             card,
             card.y..(card.y + card.h),
             fade,
@@ -252,11 +255,13 @@ pub fn draw(
     selection: Option<Selection>,
     // The line the keyboard names.
     highlight: Option<usize>,
+    // The copy-mode cursor: the line and character it is on.
+    cursor: Option<(usize, usize)>,
     caret_visible: bool,
     preedit: &str,
     // What the bar says instead of the input line: the prefix mode's instruction.
     hint: &str,
-    // The bar's right-hand label: `-- VIM --` while vim mode owns the keyboard.
+    // The bar's right-hand label: `-- COPY --` while copy mode owns the keyboard.
     label: &str,
     // Which shape this frame is, and how far it has morphed into it.
     look: Look,
@@ -300,6 +305,7 @@ pub fn draw(
             viewport,
             selection,
             highlight,
+            cursor,
             caret_visible,
             preedit,
             hint,
@@ -324,6 +330,7 @@ pub fn draw(
             viewport,
             selection,
             highlight,
+            cursor,
             caret_visible,
             preedit,
             hint,
@@ -374,7 +381,8 @@ pub fn draw(
         // out of the bar with it instead of being wiped in place.
         let clip = replies.y..(replies.y + replies.h);
         draw_replies(
-            buf, w, font, transcript, viewport, selection, highlight, replies, clip, 1.0, aa, s,
+            buf, w, font, transcript, viewport, selection, highlight, cursor, replies, clip, 1.0,
+            aa, s,
         );
     }
     render::body(buf, w, &bar, bar_tone);
@@ -442,6 +450,7 @@ fn draw_replies(
     viewport: &Viewport,
     selection: Option<Selection>,
     highlight: Option<usize>,
+    cursor: Option<(usize, usize)>,
     card: &render::Panel,
     clip: std::ops::Range<u32>,
     fade: f32,
@@ -477,7 +486,12 @@ fn draw_replies(
             None if highlight == Some(index) => RowMark::Ink,
             None => RowMark::None,
         };
-        draw_row(buf, w, font, card, row, y, mark, clip.end, fade, aa, s);
+        // The copy cursor is its own mark: a bar at the character it is on, so it can
+        // sit inside a selection without changing what is selected.
+        let on_row = cursor.filter(|(row, _)| *row == index).map(|(_, ch)| ch);
+        draw_row(
+            buf, w, font, card, row, y, mark, on_row, clip.end, fade, aa, s,
+        );
     }
 }
 
@@ -621,6 +635,7 @@ fn draw_row(
     row: &Row<'_>,
     y: u32,
     mark: RowMark,
+    cursor: Option<usize>,
     bottom: u32,
     fade: f32,
     aa: Subpixel,
@@ -648,6 +663,21 @@ fn draw_row(
                 render::BG_SEL,
             );
         }
+    }
+    if let Some(ch) = cursor {
+        // One pixel wide and as tall as the line: a caret in the text, not a box
+        // around it.
+        let x = card.x + inset + render::advance(font, &row.text[..byte_at(row.text, ch)]) as u32;
+        render::rect(
+            buf,
+            w,
+            bottom,
+            x,
+            y,
+            s.max(1),
+            (y + font.row_h).min(bottom) - y,
+            render::dim(render::FG_SEL, fade),
+        );
     }
     let fg = render::dim(
         if mark == RowMark::None {
@@ -787,6 +817,7 @@ mod tests {
             &scene.viewport,
             Some(selection),
             None,
+            None,
             true,
             "",
             "",
@@ -812,6 +843,7 @@ mod tests {
             &scene.viewport,
             None,
             marked,
+            None,
             true,
             "",
             "",
@@ -871,6 +903,7 @@ mod tests {
                 &scene.transcript,
                 &scene.input,
                 &scene.viewport,
+                None,
                 None,
                 None,
                 true,
@@ -942,6 +975,7 @@ mod tests {
                 &scene.viewport,
                 None,
                 None,
+                None,
                 true,
                 "",
                 "",
@@ -986,6 +1020,7 @@ mod tests {
                 &scene.transcript,
                 &scene.input,
                 &scene.viewport,
+                None,
                 None,
                 None,
                 true,
@@ -1103,6 +1138,7 @@ mod tests {
                 &scene.viewport,
                 None,
                 None,
+                None,
                 true,
                 preedit,
                 "",
@@ -1151,6 +1187,7 @@ mod tests {
                 &scene.viewport,
                 None,
                 None,
+                None,
                 caret,
                 "",
                 hint,
@@ -1162,7 +1199,7 @@ mod tests {
             buf
         };
         let typing = paint_with("", true);
-        let prefix = paint_with("press [ to enter vim mode", false);
+        let prefix = paint_with("press [ to enter copy mode", false);
         let px = |buf: &Vec<u8>, x: u32, y: u32| buf[at(bw, x, y)..][..4].to_vec();
         // The bar's body is the mode tone, not the glass.
         let mid = h - f.row_h / 2;
@@ -1183,10 +1220,77 @@ mod tests {
         assert_eq!(back, typing, "the bar comes back byte for byte");
     }
 
-    /// Vim mode has to say so: the bar reads `-- VIM --` on the right and the
+    /// The copy cursor is a bar at the character it is on, drawn inside a selection
+    /// without changing it: both are visible in the same frame.
+    #[test]
+    fn the_copy_cursor_is_drawn_where_the_cursor_is() {
+        let f = font();
+        let mut scene = scene(&f, 60.0);
+        scene.transcript = Transcript::default();
+        scene
+            .transcript
+            .add_note("one two three four five six seven", &f, 60.0);
+        let (w, h) = (500u32, height_for(4 * f.row_h, &f, 1));
+        let (bw, _) = frame(w, h);
+        let paint_cursor = |cursor: Option<(usize, usize)>| {
+            let mut buf = vec![0u8; (bw * (h + 2 * render::SHADOW) * 4) as usize];
+            let (bw2, bh2) = frame(w, h);
+            draw(
+                &mut buf,
+                bw2,
+                bh2,
+                &f,
+                &scene.transcript,
+                &scene.input,
+                &scene.viewport,
+                None,
+                Some(0),
+                cursor,
+                true,
+                "",
+                "",
+                "",
+                Look::settled(State::Replies),
+                None,
+                1,
+            );
+            buf
+        };
+        let without = paint_cursor(None);
+        let at_start = paint_cursor(Some((0, 0)));
+        let later = paint_cursor(Some((0, 6)));
+        assert_ne!(without, at_start, "the cursor is drawn");
+        assert_ne!(at_start, later, "and it moves with the character");
+        // It sits on the row, in the text's own column: the only pixels it adds are
+        // the bar's, so the columns that changed are exactly the bar.
+        let bar = |buf: &Vec<u8>| {
+            let changed: Vec<u32> = (crate::PAD..crate::PAD + 160)
+                .filter(|&x| {
+                    (0..f.row_h).any(|y| buf[at(bw, x, y)..][..4] != without[at(bw, x, y)..][..4])
+                })
+                .collect();
+            changed
+        };
+        // The bar sits where the row's text begins: the row's own padding, plus the
+        // two pixels the highlighted line is inset by.
+        let start = bar(&at_start);
+        assert_eq!(start.len(), 1, "one column wide");
+        assert!(
+            (crate::PAD..crate::PAD + 6).contains(&start[0]),
+            "at the start of the line: {start:?}"
+        );
+        let later_bar = bar(&later);
+        assert_eq!(later_bar.len(), 1, "still one column wide");
+        assert!(
+            later_bar[0] > crate::PAD,
+            "a later character is further along: {later_bar:?}"
+        );
+    }
+
+    /// Copy mode has to say so: the bar reads `-- COPY --` on the right and the
     /// caret is gone, so a swallowed keystroke is never a mystery.
     #[test]
-    fn the_bar_says_when_vim_mode_is_on() {
+    fn the_bar_says_when_copy_mode_is_on() {
         let f = font();
         let scene = scene(&f, 300.0);
         let (w, h) = sized(&scene, &f);
@@ -1203,6 +1307,7 @@ mod tests {
                 &scene.viewport,
                 None,
                 None,
+                None,
                 caret,
                 "",
                 "",
@@ -1214,7 +1319,7 @@ mod tests {
             buf
         };
         let plain = paint_with("", true);
-        let vim = paint_with("-- VIM --", false);
+        let copy = paint_with("-- COPY --", false);
         // The label's ink is in the bar's right half, and only there.
         // Inside the rim's bands: the bar's own text rows.
         let rows = (h - f.row_h + 2)..(h - 2);
@@ -1230,11 +1335,15 @@ mod tests {
             0,
             "nothing there when typing"
         );
-        assert!(ink(&vim, right.0, right.1) > 0, "the mode is on the bar");
+        assert!(ink(&copy, right.0, right.1) > 0, "the mode is on the bar");
         // The caret is gone: with an empty input it sits at the padding, and only
         // the typing frame has it.
         assert!(ink(&plain, crate::PAD, crate::PAD + 3) > 0, "the caret");
-        assert_eq!(ink(&vim, crate::PAD, crate::PAD + 3), 0, "no caret in vim");
+        assert_eq!(
+            ink(&copy, crate::PAD, crate::PAD + 3),
+            0,
+            "no caret in copy mode"
+        );
     }
 
     #[test]
@@ -1335,6 +1444,7 @@ mod tests {
                 &scene.transcript,
                 &scene.input,
                 &scene.viewport,
+                None,
                 None,
                 None,
                 true,
@@ -1607,6 +1717,7 @@ mod tests {
                 &scene.viewport,
                 None,
                 None,
+                None,
                 true,
                 "",
                 "",
@@ -1676,6 +1787,7 @@ mod tests {
                 &scene.transcript,
                 &scene.input,
                 &scene.viewport,
+                None,
                 None,
                 None,
                 true,

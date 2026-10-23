@@ -40,7 +40,7 @@ impl Blocks {
 /// renders no shaped scripts (see README), so the rules it would need are the
 /// two that matter. `shortcut: no hyphenation/kinsoku tables; add
 /// unicode-linebreak if a script beyond Latin and CJK needs breaking.`
-fn breaks_after(c: char) -> bool {
+pub(crate) fn breaks_after(c: char) -> bool {
     matches!(c as u32,
         0x1100..=0x11FF      // Hangul jamo
         | 0x2E80..=0x303E    // CJK radicals, punctuation, kana

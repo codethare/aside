@@ -32,14 +32,16 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    clipboard into the input line, at the caret, and a missing `wl-paste` shows one
    line in the transcript instead of doing nothing. Paste it somewhere and check
    there is no extra whitespace or transcript around it.
-5b. `Ctrl+T`: the bar changes tone, takes no input and reads `press [ to enter vim
+5b. `Ctrl+T`: the bar changes tone, takes no input and reads `press [ to enter copy
    mode`, with no caret; any other key leaves it and types nothing, and the bar
-   returns exactly as it was. Then `Ctrl+T` then `[`: the bar reads `-- VIM --` and
-   the caret is gone. `hjkl`
-   move the panel (16 px), `Ctrl+hjkl` move it 160 px, and it stops at the screen
-   edges; `n`/`p` page the transcript, `Ctrl+n`/`Ctrl+p` move one line, `g`/`G` go
-   to the first/last line. No letter reaches the input line. `Esc` leaves the
-   mode, and a second `Esc` cancels a stream that was running the whole time.
+   returns exactly as it was. Then `Ctrl+T` then `[`: the bar reads `-- COPY --`,
+   the caret is gone, and a cursor sits in the replies.
+5b2. In copy mode `h`/`l` move a character, `j`/`k` a line, `w`/`b` a word,
+   `Ctrl+d`/`Ctrl+u` half a page, `g`/`G` to the ends. `Space` selects and `Enter`
+   copies and leaves, with `copied N lines` in the bar; `q` leaves without copying.
+   No letter reaches the input line.
+5b3. `Alt+hjkl` moves the panel in every mode and `Alt+Ctrl+hjkl` ten times as far;
+   it stops at the screen edges.
 5c. Press the left button on the bar and move at once: the panel follows from the
    first motion, in both directions, stays on screen, and does not change size
    while it moves. A click without moving does nothing, and a new run starts where

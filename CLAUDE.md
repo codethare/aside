@@ -23,8 +23,9 @@ change.
    `argv`. See `specs/chat-sandbox`.
 3. **Keyboard first.** One meaning per key; every action reachable without a
    pointer. The key table in `specs/chat-panel` is the contract, and it is
-   per-mode: typing, the `Ctrl+T` prefix (one key wide), and vim mode. A key
-   consumed by the prefix or by vim mode never reaches the input line.
+   per-mode: typing, the `Ctrl+T` prefix (one key wide), and tmux's copy mode. A
+   key consumed by the prefix or by copy mode never reaches the input line, and
+   `Alt+hjkl` moves the panel in every mode.
 4. **The chrome is `plush`'s.** Copied exactly: radius 12, `PAD` 16, 8 px gap,
    `SEPARATION` 16 (which must clear `SHADOW_REACH_UP`), the 26 px shadow margin
    with the tight and wide layers, the rim's lit and dark profiles with the band one

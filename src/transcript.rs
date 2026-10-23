@@ -310,6 +310,39 @@ impl Transcript {
         None
     }
 
+    /// The next word's start after `(row, ch)`, crossing lines: a word starts after
+    /// whitespace, and a CJK character starts one of its own, which is where the
+    /// wrapper breaks too. Clamps to the end of the transcript when there is none.
+    pub fn word_forward(&self, (row, ch): (usize, usize), blocks: Blocks) -> (usize, usize) {
+        let rows = self.rows(blocks);
+        let from = (row.min(rows.len().saturating_sub(1)), ch);
+        for (index, row) in rows.iter().enumerate() {
+            for (at, c) in row.text.char_indices() {
+                if (index, at) > from && starts_word(c, prev_of(row.text, at)) {
+                    return (index, at);
+                }
+            }
+        }
+        let last = rows.len().saturating_sub(1);
+        (last, rows.get(last).map_or(0, |r| r.text.len()))
+    }
+
+    /// The start of the word before `(row, ch)`, crossing lines. Stops at the first
+    /// word of the transcript.
+    pub fn word_back(&self, (row, ch): (usize, usize), blocks: Blocks) -> (usize, usize) {
+        let rows = self.rows(blocks);
+        let from = (row.min(rows.len().saturating_sub(1)), ch);
+        let mut found = (0, 0);
+        for (index, row) in rows.iter().enumerate() {
+            for (at, c) in row.text.char_indices() {
+                if (index, at) < from && starts_word(c, prev_of(row.text, at)) {
+                    found = (index, at);
+                }
+            }
+        }
+        found
+    }
+
     /// Height of everything the transcript draws, gaps included.
     pub fn total_height(&self) -> u32 {
         self.height
@@ -339,6 +372,27 @@ impl Transcript {
             }
         }
         turns
+    }
+}
+
+/// The character before byte `at`, if there is one.
+fn prev_of(text: &str, at: usize) -> Option<char> {
+    text[..at].chars().next_back()
+}
+
+/// Whether a word begins at `c`: after whitespace, and at every CJK character,
+/// which the wrapper breaks after and which no dictionary would join into one word.
+fn starts_word(c: char, prev: Option<char>) -> bool {
+    if c.is_whitespace() {
+        return false;
+    }
+    match prev {
+        None => true,
+        Some(prev) => {
+            prev.is_whitespace()
+                || crate::layout::breaks_after(prev)
+                || crate::layout::breaks_after(c)
+        }
     }
 }
 
@@ -620,6 +674,55 @@ mod tests {
         let gap = cards[0].0 + cards[0].1 + blocks.gap / 2;
         assert_eq!(t.row_at(gap, blocks), None, "a gap names no row");
         assert_eq!(t.row_at(u32::MAX, blocks), None, "past the end");
+    }
+
+    /// `w` and `b`: words are whitespace-separated runs, a CJK character is a word
+    /// of its own, and both cross lines — the same rule the wrapper uses, so the two
+    /// never disagree about where a word begins.
+    #[test]
+    fn words_are_walked_forwards_and_backwards() {
+        let f = font();
+        let blocks = Blocks::new(&f);
+        let mut t = Transcript::default();
+        t.ask("q", &f);
+        // Two rows: the second is a different line of the same block.
+        t.delta("alpha beta\ngamma delta", &f, 400.0);
+        t.finish_answer(&f);
+        let rows: Vec<String> = t.rows(blocks).iter().map(|r| r.text.to_string()).collect();
+        assert_eq!(rows, ["alpha beta", "gamma delta"], "two lines as written");
+
+        // Forwards: the start of each word, and across the line boundary.
+        let mut at = (0, 0);
+        for want in [(0, 6), (1, 0), (1, 6)] {
+            at = t.word_forward(at, blocks);
+            assert_eq!(at, want, "word start");
+        }
+        assert_eq!(
+            t.word_forward(at, blocks),
+            (1, 11),
+            "the end when there is more"
+        );
+
+        // Backwards: the same starts, in reverse, and from the middle of a word.
+        let mut at = (1, 11);
+        for want in [(1, 6), (1, 0), (0, 6), (0, 0)] {
+            at = t.word_back(at, blocks);
+            assert_eq!(at, want, "word start backwards");
+        }
+        assert_eq!(t.word_back(at, blocks), (0, 0), "the first word");
+
+        // CJK: one character is one word.
+        let mut c = Transcript::default();
+        c.ask("q", &f);
+        c.delta("\u{4e2d}\u{6587}\u{6d4b}\u{8bd5}", &f, 400.0);
+        c.finish_answer(&f);
+        assert_eq!(
+            c.word_forward((0, 0), blocks),
+            (0, 3),
+            "the second ideograph"
+        );
+        assert_eq!(c.word_forward((0, 3), blocks), (0, 6), "the third");
+        assert_eq!(c.word_back((0, 6), blocks), (0, 3));
     }
 
     /// A row knows where it is, because the viewport scrolls in pixels.

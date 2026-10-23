@@ -126,19 +126,26 @@ Paste the clipboard into the input line with
 Enter the prefix mode, the way a terminal multiplexer does: it takes exactly one
 key.  In this release that key is
 .B [
-which enters vim control mode; any other key leaves the prefix and does nothing.
-While the prefix waits the bar takes no input, changes tone and reads
-\fBpress [ to enter vim mode\fP.
+which enters copy mode; any other key leaves the prefix and does nothing.  While
+the prefix waits the bar takes no input, changes tone and reads
+\fBpress [ to enter copy mode\fP.
 .TP
-.B "[", h ", " j ", " k ", " l ", " n ", " p ", " g ", " G
-In vim control mode the spatial keys move the panel on the output: 16 pixels left,
-down, up or right (\fBh\fP, \fBj\fP, \fBk\fP, \fBl\fP), and ten times that with
-\fBCtrl\fP held, always kept on the output.  The transcript keeps its own keys:
-\fBn\fP/\fBp\fP a page down or up, \fBCtrl+n\fP/\fBCtrl+p\fP one line, and
-\fBg\fP/\fBG\fP the first or last line.  Letters do not type while the mode is on.
+.B Alt+h ", " Alt+j ", " Alt+k ", " Alt+l
+Move the panel 16 pixels left, down, up or right, in every mode; ten times that
+with \fBCtrl\fP held.  The panel stays on the output.
+.TP
+.B "[", h ", " l ", " 0 ", " $ ", " j ", " k ", " w ", " b ", " g ", " G ", " Space ", " y
+Copy mode, entered with \fBCtrl+T\fP then \fB[\fP: \fBh\fP/\fBl\fP move a
+character, \fB0\fP/\fB$\fP to the ends of the line, \fBj\fP/\fBk\fP a line,
+\fBw\fP/\fBb\fP a word, \fBCtrl+d\fP/\fBCtrl+u\fP half a page,
+\fBCtrl+f\fP/\fBCtrl+b\fP or \fBPageDown\fP/\fBPageUp\fP a page, and
+\fBg\fP/\fBG\fP to the first or last line.  \fBSpace\fP starts a selection;
+\fBEnter\fP or \fBy\fP copies it and leaves the mode; \fBq\fP leaves without
+copying.  Letters do not type while the mode is on.
 .TP
 .B Esc
-In vim control mode, or in the prefix mode, leave it without cancelling anything.
+In copy mode, clear the selection or leave the mode; in the prefix mode, leave it.
+Neither cancels anything.
 In typing mode, cancel a streaming answer or close the panel.
 .TP
 .B Left ", " Right ", " Home ", " End ", " Backspace ", " Delete
