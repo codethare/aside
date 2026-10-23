@@ -219,8 +219,6 @@ pub fn draw(
     hint: &str,
     // The bar's right-hand label: `-- VIM --` while vim mode owns the keyboard.
     label: &str,
-    // How much of the replies card has grown out of the bar: 1 is fully shown.
-    reveal: f32,
     // Which shape this frame is, and how far it has morphed into it.
     look: Look,
     // Where the working light is on the bar's rim, 0..1 round the perimeter; the
@@ -310,13 +308,11 @@ pub fn draw(
         ..panel
     };
     let room = bar.y.saturating_sub(panel.y).saturating_sub(sep);
-    // The card is the room's full height for as long as the panel is up: the
-    // transcript scrolls inside it rather than resizing it. The reveal only makes
-    // it appear from the bar, so `reveal = 0` is no card at all and 1 is the box.
-    let card_h = (reveal.clamp(0.0, 1.0) * room as f32).round() as u32;
-    let replies = (card_h > 0).then(|| render::Panel {
-        y: bar.y - sep - card_h,
-        h: card_h,
+    // The card is the room itself: the panel grew into it on its way here, so it is
+    // not grown a second time, and the transcript scrolls inside it.
+    let replies = (room > 0).then(|| render::Panel {
+        y: bar.y - sep - room,
+        h: room,
         ..panel
     });
     let cards: Vec<render::Panel> = match replies {
@@ -685,21 +681,10 @@ mod tests {
     }
 
     fn paint(scene: &Scene, w: u32, h: u32) -> Vec<u8> {
-        paint_revealed(scene, w, h, 1.0)
+        paint_highlighted(scene, w, h, None)
     }
 
-    /// One frame of the panel with the replies card revealed to `reveal`.
-    fn paint_revealed(scene: &Scene, w: u32, h: u32, reveal: f32) -> Vec<u8> {
-        paint_highlighted(scene, w, h, None, reveal)
-    }
-
-    fn paint_highlighted(
-        scene: &Scene,
-        w: u32,
-        h: u32,
-        highlight: Option<usize>,
-        reveal: f32,
-    ) -> Vec<u8> {
+    fn paint_highlighted(scene: &Scene, w: u32, h: u32, highlight: Option<usize>) -> Vec<u8> {
         let f = font();
         let (bw, bh) = frame(w, h);
         let mut buf = vec![0u8; (bw * bh * 4) as usize];
@@ -716,7 +701,6 @@ mod tests {
             "",
             "",
             "",
-            reveal,
             Look::settled(State::Replies),
             None,
             1,
@@ -777,7 +761,6 @@ mod tests {
                 "",
                 "",
                 "",
-                1.0,
                 Look::moving(State::Bar, State::Bar, 1.0, rise, spread),
                 None,
                 1,
@@ -846,7 +829,6 @@ mod tests {
                 "",
                 "",
                 "",
-                1.0,
                 look,
                 None,
                 1,
@@ -881,8 +863,8 @@ mod tests {
             let mut buf = vec![0u8; (bw2 * bh2 * 4) as usize];
             draw(
                 &mut buf,
-                bw,
-                h + 2 * render::SHADOW,
+                bw2,
+                bh2,
                 &f,
                 &scene.transcript,
                 &scene.input,
@@ -892,7 +874,6 @@ mod tests {
                 "",
                 "",
                 "",
-                1.0,
                 Look::moving(State::Bar, State::Bar, 1.0, rise, 1.0),
                 None,
                 1,
@@ -1007,7 +988,6 @@ mod tests {
                 preedit,
                 "",
                 "",
-                1.0,
                 Look::settled(State::Replies),
                 None,
                 1,
@@ -1055,7 +1035,6 @@ mod tests {
                 "",
                 hint,
                 "",
-                1.0,
                 Look::settled(State::Replies),
                 None,
                 1,
@@ -1107,7 +1086,6 @@ mod tests {
                 "",
                 "",
                 label,
-                1.0,
                 Look::settled(State::Replies),
                 None,
                 1,
@@ -1143,8 +1121,8 @@ mod tests {
         let f = font();
         let scene = scene(&f, 300.0);
         let (w, h) = sized(&scene, &f);
-        let plain = paint_highlighted(&scene, w, h, None, 1.0);
-        let lit = paint_highlighted(&scene, w, h, Some(0), 1.0);
+        let plain = paint_highlighted(&scene, w, h, None);
+        let lit = paint_highlighted(&scene, w, h, Some(0));
         let (bw, _) = frame(w, h);
         // Nothing in the margin changes: the mark is the text, so every pixel left
         // of the text column is identical with and without the highlight.
@@ -1215,42 +1193,65 @@ mod tests {
         assert_eq!(px(12, h - f.row_h / 2), glass(), "the bar card");
     }
 
-    /// The card grows out of the bar: at half the reveal, nothing above the height
-    /// it has reached is painted, and the bar is untouched.
+    /// The reported defect: the panel opened, and then the card inside it grew a
+    /// second time. The growth is the morph and nothing else, so once the panel is
+    /// the panel the card fills it in that same frame.
     #[test]
-    fn the_reveal_clips_the_card_and_leaves_the_bar_alone() {
+    fn the_card_grows_once_while_the_panel_does() {
         let f = font();
         let scene = scene(&f, 300.0);
         let (w, h) = sized(&scene, &f);
         let (bw, _) = frame(w, h);
-        let full = paint_revealed(&scene, w, h, 1.0);
-        let half = paint_revealed(&scene, w, h, 0.5);
         let px = |buf: &Vec<u8>, x: u32, y: u32| buf[at(bw, x, y)..][..4].to_vec();
-        let replies_h = h - f.row_h - render::SEPARATION;
-        let revealed = replies_h / 2;
-        // The top half of the replies card is not on screen yet.
-        assert_eq!(
-            px(&half, 12, revealed / 2),
-            vec![0, 0, 0, 0],
-            "nothing above the reveal"
-        );
-        assert_eq!(
-            px(&full, 12, revealed / 2),
+        let paint_look = |look: Look| {
+            let (bw2, bh2) = frame(w, h);
+            let mut buf = vec![0u8; (bw2 * bh2 * 4) as usize];
+            draw(
+                &mut buf,
+                bw2,
+                bh2,
+                &f,
+                &scene.transcript,
+                &scene.input,
+                &scene.viewport,
+                None,
+                true,
+                "",
+                "",
+                "",
+                look,
+                None,
+                1,
+            );
+            buf
+        };
+        // Half way through the panel's growth: the card's top is still below the
+        // panel's own top, so nothing is painted there.
+        let growing = paint_look(Look::moving(State::Replies, State::Bar, 0.5, 1.0, 1.0));
+        assert_ne!(
+            px(&growing, 12, 2),
             glass(),
-            "and it is there when finished"
+            "the card has not reached the top yet"
         );
-        // What has been revealed sits against the bar: the card grows upwards out
-        // of it, so the area just above the gap is glass in both frames.
+        // Settled: the same frame that ends the morph fills the panel, with no
+        // further animation to come.
+        let settled = paint_look(Look::settled(State::Replies));
+        assert_eq!(px(&settled, 12, 2), glass(), "the card fills the panel");
+        // Its last rows belong to the rim, so the probe is a couple of rows above
+        // the gap: the card, not its edge.
         assert_eq!(
-            px(&half, 12, revealed + revealed / 2),
+            px(&settled, 30, h - f.row_h - render::SEPARATION - 4),
             glass(),
-            "the card grows up from the bar"
+            "right down to the gap above the bar"
         );
-        // The bar is pixel-identical: it does not move, so it cannot animate.
-        for y in h - f.row_h..h {
-            for x in 0..w {
-                assert_eq!(px(&half, x, y), px(&full, x, y), "bar moved at ({x},{y})");
-            }
+        // The card is anchored on the bottom row in both frames: the bar does not
+        // travel while the panel grows above it.
+        for frame in [&growing, &settled] {
+            assert_eq!(
+                px(frame, 30, h - f.row_h / 2),
+                glass(),
+                "the bar's row is the card's bottom, mid-growth and settled"
+            );
         }
     }
 
@@ -1382,7 +1383,6 @@ mod tests {
                 "",
                 "",
                 "",
-                1.0,
                 Look::settled(State::Bar),
                 head,
                 1,
@@ -1453,7 +1453,6 @@ mod tests {
                 "",
                 "",
                 "",
-                1.0,
                 Look::settled(State::Replies),
                 None,
                 scale,

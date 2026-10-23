@@ -66,13 +66,14 @@ painters exactly as before, and neither transition SHALL re-wrap the transcript.
 
 ## MODIFIED Requirements
 
-### Requirement: The reveal is the replies card's own animation
+### Requirement: The panel enters once
 
-The replies card appearing inside the answering panel SHALL keep its 240 ms reveal,
-and SHALL start when the ball-to-panel morph ends rather than on top of it, so a
-reply is seen once: first the card forming, then its content arriving.
+The replies SHALL enter with the panel's own growth and SHALL NOT be animated again
+after it: once the panel has become the answering panel, the replies card fills it
+in that frame. A second animation inside the finished panel reads as the panel
+opening twice, which is the defect this rule exists to prevent.
 
-#### Scenario: One motion at a time
+#### Scenario: One motion, not two
 
 - **WHEN** the first answer arrives
-- **THEN** the ball grows into the panel, and only then does the replies card reveal
+- **THEN** the panel grows into the answering panel and the reply is on screen when it arrives, with nothing animating after it

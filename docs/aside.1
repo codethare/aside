@@ -43,12 +43,14 @@ three lines, a continuous delta is taken as pixels.
 Only the model's text about the question just asked is drawn -- its answer, and a
 failure or note that belongs to it, 8 pixels apart.  Earlier turns are kept for
 the request and drawn nowhere, and so is the question you typed.  The highlighted line is marked by brighter ink, two pixels in from its
-neighbours.  The first reply of a run grows out of the bar in 260 milliseconds.
+neighbours.  The replies arrive with the panel's own growth and are not animated a
+second time.
 While a request is out the bar stays exactly where it is and a light runs round its
 rim, one lap every 1.4 seconds, until the answer begins.  The states are animated
 rather than snapped: opening takes 520 milliseconds -- a line spreads out of a
 point and the card unfolds up out of it -- and the first text grows the bar into the
-panel in 460, inside one buffer so the surface is resized once per state.  Closing is the opening run backwards in 460 milliseconds, and the process
+panel in 460, inside one buffer so the surface is resized once per state.  That
+growth is the reply's entrance: nothing plays after it.  Closing is the opening run backwards in 460 milliseconds, and the process
 exits when it has finished.  The expanded panel never exceeds the output height less 64 pixels, and
 scrolls inside that limit.
 .PP

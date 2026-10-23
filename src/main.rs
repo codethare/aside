@@ -63,8 +63,6 @@ const EDGE_SHARE: i32 = 38;
 /// How tall the replies may be, as a multiple of that same gap: the field's own
 /// distance to the screen's bottom is the yardstick the panel grows by.
 const REPLY_SHARE: u32 = 1;
-/// How long the replies card takes to grow out of the bar.
-const REVEAL_MS: u128 = 260;
 /// How long a shape change takes at its shortest. The morph is the point, so it is
 /// long enough to be seen rather than only to be over.
 const MORPH_IN_MS: u128 = 360;
@@ -256,7 +254,6 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         "",
         "",
         "",
-        1.0,
         panel::Look::settled(panel::State::Replies),
         None,
         1,
@@ -342,9 +339,6 @@ fn run(
         morph: None,
         enter_start: None,
         close_start: None,
-        reveal_pending: false,
-        reveal_start: None,
-        revealed: false,
         phase_start: std::time::Instant::now(),
         focused: false,
         output_w: None,
@@ -405,7 +399,7 @@ fn run(
         }
         let timeout = if state.holding() {
             Duration::from_millis(30)
-        } else if state.morphing() || state.rising() || state.revealing() {
+        } else if state.morphing() || state.rising() {
             // The card is growing: a frame every step of the ease.
             Duration::from_millis(16)
         } else if state.phase == Phase::Thinking {
@@ -630,14 +624,6 @@ fn room_for_replies(output_h: Option<u32>) -> u32 {
     reply_cap(output_h, gap).min(rows)
 }
 
-/// How much of the replies card has grown out of the bar after `elapsed_ms`: an
-/// ease-out, so it leaves fast and settles instead of stopping dead. Read off the
-/// clock like the working light, so a late frame lands at the right height.
-pub fn reveal_at(elapsed_ms: u128) -> f32 {
-    let t = (elapsed_ms as f32 / REVEAL_MS as f32).clamp(0.0, 1.0);
-    1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
-}
-
 /// An ease-out over one track of an opening or closing.
 fn track_at(elapsed_ms: u128, over: u128) -> f32 {
     let t = (elapsed_ms as f32 / over.max(1) as f32).clamp(0.0, 1.0);
@@ -850,15 +836,7 @@ struct State {
     enter_start: Option<std::time::Instant>,
     /// When the panel started closing, which is what makes it exit.
     close_start: Option<std::time::Instant>,
-    /// A reply arrived while the panel was still morphing: the card's own
-    /// reveal waits for the shape change to end instead of running on top of it.
-    reveal_pending: bool,
-    /// When the replies card started growing out of the bar, once per run.
-    reveal_start: Option<std::time::Instant>,
-    /// Whether this run has already revealed its first card.
-    revealed: bool,
-    /// When the current phase began: the working light and the reveal are read off
-    /// this clock.
+    /// When the current phase began: the working light is read off this clock.
     phase_start: std::time::Instant,
     /// Whether the compositor has handed this surface the keyboard.
     focused: bool,
@@ -982,32 +960,12 @@ impl State {
             self.morph = None;
             self.apply_size();
             self.dirty = true;
-            // The replies card grows out of the bar once the panel is the panel,
-            // so a reply is seen as one motion and then as its own content.
-            if self.reveal_pending {
-                self.reveal_pending = false;
-                self.revealed = true;
-                self.reveal_start = Some(std::time::Instant::now());
-            }
         }
     }
 
     /// Where the light is on the rim, while a request is open.
     fn head(&self) -> Option<f32> {
         (self.phase == Phase::Thinking).then(|| orbit_at(self.phase_start.elapsed().as_millis()))
-    }
-
-    /// How much of the replies card is on screen: 1 unless the reveal is running.
-    fn reveal(&self) -> f32 {
-        match self.reveal_start {
-            Some(start) => reveal_at(start.elapsed().as_millis()),
-            None => 1.0,
-        }
-    }
-
-    /// Whether the reveal needs a frame: it drives its own wake-ups while it runs.
-    fn revealing(&self) -> bool {
-        self.reveal() < 1.0
     }
 
     /// Give the surface the size its phase wants, centred on the output, and
@@ -1190,11 +1148,6 @@ impl State {
             // Cancelling settles the panel now: no one waits for a morph to watch a
             // stream that has already stopped.
             self.morph = None;
-            self.reveal_pending = false;
-            if !self.revealed {
-                self.revealed = true;
-                self.reveal_start = None;
-            }
             self.set_phase(Phase::Answering);
         } else if self.close_start.is_none() {
             // Nothing to cancel: the panel closes, rolling up and then pulling in
@@ -1393,10 +1346,6 @@ impl State {
             // A shape change or the rise into place: every frame has to be painted.
             self.dirty = true;
         }
-        if self.revealing() {
-            // The card is growing: every frame of the ease has to be painted.
-            self.dirty = true;
-        }
         // A finished shape change hands the surface its new size, once.
         self.settle_morph();
         // The round is over: keys the input method never claimed are the panel's own
@@ -1441,12 +1390,9 @@ impl State {
             }
         }
         if text_arrived {
-            // The first text ends the wait: the bar grows into the panel, and the
-            // replies card's own reveal waits until that shape change is over, so a
-            // reply is seen as one motion and then as its content.
-            if !self.revealed && self.transcript.total_height() > 0 {
-                self.reveal_pending = true;
-            }
+            // The first text ends the wait: the bar grows into the panel, and that
+            // growth is the reply's entrance. Nothing follows it: a second
+            // animation inside the finished panel reads as the panel opening twice.
             self.set_phase(Phase::Answering);
         }
         if self.dirty {
@@ -1474,8 +1420,6 @@ impl State {
         let look = self.look();
         let head = self.head();
         let stride = w as i32 * 4;
-        // Read before the canvas borrows the pool: the reveal moves every frame.
-        let reveal = self.reveal();
         let label = self.mode_label();
         let hint = self.mode_hint();
         let typing = self.mode == Mode::Typing;
@@ -1517,7 +1461,6 @@ impl State {
             &self.ime.preedit,
             hint,
             label,
-            reveal,
             look,
             head,
             self.scale,
@@ -2437,24 +2380,6 @@ mod tests {
         );
         // A no-op change is the shape itself.
         assert_eq!(morph_size(Phase::Idle, Phase::Idle, Some(1080)), (bw, bh));
-    }
-
-    /// The reveal is a deadline: two frames at the same elapsed time paint the
-    /// same height, and it is done at the deadline.
-    #[test]
-    fn the_reveal_is_read_off_the_clock() {
-        assert_eq!(reveal_at(0), 0.0);
-        assert_eq!(reveal_at(REVEAL_MS), 1.0);
-        assert_eq!(reveal_at(REVEAL_MS * 10), 1.0, "a late frame is done");
-        // Monotonic, and busy in between: an ease, not a step.
-        let mut previous = 0.0;
-        for ms in 0..=REVEAL_MS {
-            let at = reveal_at(ms);
-            assert!(at >= previous, "the reveal never goes backwards");
-            previous = at;
-        }
-        let half = reveal_at(REVEAL_MS / 2);
-        assert!(half > 0.5 && half < 1.0, "ease-out: {half} at half time");
     }
 
     /// The light's position comes from the clock, so a late frame lands where the

@@ -61,9 +61,9 @@ the lower one, and nothing but their shadows between them. Only the model's text
 is on screen: an answer, a failure and the panel's own notes, separated by 8 px
 gaps. A question you sent is kept for the next request and drawn nowhere.
 `Up`/`Down` mark the highlighted line with brighter ink two pixels in from its
-neighbours, so there is no mark in the margin at all. The first reply of a run
-grows out of the bar in 260 ms; a follow-up does not. The wheel scrolls the
-replies while the pointer is over them — three lines a notch, a touchpad's own
+neighbours, so there is no mark in the margin at all. The replies arrive with the
+panel's own growth and are not animated a second time; a follow-up's answer simply
+appears. The wheel scrolls the replies while the pointer is over them — three lines a notch, a touchpad's own
 delta otherwise — and does nothing over the bar.
 
 The sizes are the panel's own; the layer surface adds the shadow margin on every
@@ -79,8 +79,8 @@ one buffer, so the surface is resized once per state and never per frame. Openin
 takes 520 ms: a line spreads out of a point at the centre, and once it has the
 panel's width the card unfolds up out of it. Sending a question moves nothing: the
 bar stays, and a light runs round its rim — one lap in 1.4 s — until the first text
-arrives, which grows the panel out of the bar in 460 ms. Inside it, the replies card
-grows out of the bar in 260 ms once that shape change has finished. Closing is the opening
+arrives, which grows the panel out of the bar in 460 ms — that growth is the reply's
+entrance, and nothing plays after it. Closing is the opening
 run backwards, over 460 ms: the card rolls up into a line, the line pulls in from
 both ends, and only then does the process exit.
 
