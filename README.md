@@ -16,8 +16,9 @@ and why it is built the way it is.
 aside
 ```
 
-It needs a Wayland session, and four programs on `PATH`: `bwrap`, `curl`,
-`wl-copy`, and a compositor that speaks `xdg-shell`. Bind it in your compositor,
+It needs a Wayland session, and the programs on `PATH`: `bwrap`, `curl`,
+`wl-copy` and `wl-paste` (both from `wl-clipboard`), and a compositor that speaks
+`wlr-layer-shell`. Bind it in your compositor,
 for example in Hyprland:
 
 ```
@@ -28,7 +29,16 @@ Press the key again while it is open and the running panel is raised rather than
 duplicated.
 
 Configuration is optional: `~/.config/aside/config.toml` with flat `key = "value"`
-lines, `model`, `base_url` and `proxy` only. The credential is environment-only:
+lines, and five keys — `model`, `base_url`, `proxy`, `font_size` and `font_family`:
+
+```toml
+model = "deepseek/deepseek-v4.1-flash"
+font_size = "24"                 # 8 to 72 logical px; the bar follows it
+font_family = "Noto Sans Mono"    # a name nothing provides falls back to the chain
+```
+
+A size that is not a size is an error naming the file and the line, and nothing
+opens. The credential is environment-only:
 
 ```sh
 export COMMAND_CODE_API_KEY=...
@@ -40,7 +50,9 @@ is checked on a machine with no compositor.
 
 ## What it looks like
 
-A `wlr-layer-shell` surface on the overlay layer, anchored to the bottom of the
+A `wlr-layer-shell` surface on the overlay layer with on-demand keyboard focus: it
+takes the keyboard while it is focused and gives it back when you click another
+window, so the panel stays open while you work elsewhere. Anchored to the bottom of the
 output and centred, its bottom edge 38 % of the output height above the screen's
 bottom edge: the field lands just below the vertical centre, where the eye already
 is, and the replies grow upwards out of it. The bottom anchor is what keeps the
@@ -100,7 +112,8 @@ both ends, and only then does the process exit.
 | `g` / `G` | vim | move it to the first / last line |
 | `Up` / `Down` | typing | move the highlighted transcript line |
 | `PageUp` / `PageDown` | typing | move it a page |
-| `Alt+C` | typing, vim | copy the highlighted line to the clipboard |
+| `Alt+C` / `Ctrl+C` | typing, vim | copy the highlighted line to the clipboard |
+| `Ctrl+V` | typing | paste the clipboard into the input line |
 
 `Ctrl+T` is tmux's prefix shape rather than a vim toggle: it takes exactly one
 key, and `[` is the only command it has so far — later settings commands belong

@@ -109,6 +109,7 @@ enum Key {
     PageUp,
     PageDown,
     Copy,
+    Paste,
     Backspace,
     Delete,
     Left,
@@ -141,6 +142,8 @@ fn key_action(keysym: Keysym, alt: bool, ctrl: bool, has_text: bool) -> Key {
         Keysym::Home => Key::Home,
         Keysym::End => Key::End,
         Keysym::c if alt && !ctrl => Key::Copy,
+        Keysym::c if ctrl && !alt => Key::Copy,
+        Keysym::v if ctrl && !alt => Key::Paste,
         Keysym::t if ctrl && !alt => Key::Prefix,
         _ if has_text && plain => Key::Text,
         _ => Key::Ignore,
@@ -163,6 +166,28 @@ fn main() {
             .and_then(|i| args.get(i + 1))
             .cloned()
     };
+    // The configuration and the font, before anything is drawn or previewed: a bad
+    // value is one line naming its line, and the preview then shows the panel the
+    // next real run would show.
+    let file = match provider::entries() {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("aside: {e}");
+            exit(2);
+        }
+    };
+    let font_size = file
+        .iter()
+        .find(|(k, _)| k == "font_size")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(font::SIZE);
+    let font_family = file
+        .iter()
+        .find(|(k, _)| k == "font_family")
+        .map(|(_, v)| v.clone())
+        .filter(|v| !v.trim().is_empty());
+    font::configure(font_size, font_family);
+
     if let Some(path) = flag("--preview") {
         if let Err(e) = preview(std::path::Path::new(&path)) {
             eprintln!("aside: {e}");
@@ -187,6 +212,7 @@ fn main() {
         flag("--model").as_deref(),
         flag("--base-url").as_deref(),
         flag("--proxy").as_deref(),
+        &file,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -212,7 +238,7 @@ fn main() {
 /// `--preview FILE`: the panel's real layout and paint code, offscreen. This is
 /// how the look is checked on a machine with no compositor.
 fn preview(path: &std::path::Path) -> Result<(), String> {
-    let font = PanelFont::load(font::SIZE).map_err(|e| format!("no usable font: {e}"))?;
+    let font = PanelFont::load(font::size()).map_err(|e| format!("no usable font: {e}"))?;
     let max_w = chat::answer_width(WIDTH, 1);
     let mut transcript = Transcript::default();
     transcript.ask(
@@ -287,7 +313,7 @@ fn run(
 
     // Fonts load on a thread while the handshake happens: the first frame must
     // not wait for a font file.
-    let load = font::spawn_load(font::SIZE);
+    let load = font::spawn_load(font::size());
 
     let compositor = CompositorState::bind(&globals, &qh)
         .map_err(|e| format!("wl_compositor is missing: {e}"))?;
@@ -307,7 +333,12 @@ fn run(
     // keeps its own width, and `left_margin` centres it.
     layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT);
     layer.set_margin(0, 0, bottom_margin(None, 0), 0);
-    layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+    // On demand, never exclusive: an exclusive layer surface puts the compositor's
+    // whole keyboard focus on the panel and refuses to give it to any other window
+    // until the layer goes away, so a terminal behind it could be clicked but not
+    // typed into. On demand takes the keyboard while the panel is focused and hands
+    // it back when another window is clicked.
+    layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
     // Collapsed to the bar. The first commit is buffer-less: it asks for the
     // configure, and nothing may be attached before that one arrives.
     let (sw, sh) = surface_size((WIDTH, panel::bar_height()));
@@ -1301,6 +1332,28 @@ impl State {
     }
 
     /// `Alt+C`: the only path to the clipboard, and it copies one line.
+    /// `Ctrl+V`: the clipboard comes in once, at the caret, and stays only in the
+    /// input line. A failure is shown in the transcript, not swallowed.
+    fn paste_clipboard(&mut self) {
+        match clipboard::paste() {
+            Ok(text) if !text.is_empty() => {
+                self.input.insert(&text);
+                self.after_typing();
+            }
+            Ok(_) => {}
+            Err(e) => {
+                let max_w = self.text_width();
+                let State {
+                    transcript, font, ..
+                } = self;
+                if let Some(font) = font.as_ref() {
+                    transcript.fail(&e, font, max_w);
+                }
+                self.dirty = true;
+            }
+        }
+    }
+
     fn copy_highlight(&mut self) {
         let Some(font) = self.font.as_ref() else {
             return;
@@ -1541,6 +1594,7 @@ impl State {
             Key::PageUp => self.move_highlight(-self.page_rows()),
             Key::PageDown => self.move_highlight(self.page_rows()),
             Key::Copy => self.copy_highlight(),
+            Key::Paste => self.paste_clipboard(),
             Key::Backspace => {
                 self.input.backspace();
                 self.after_typing();
@@ -1694,7 +1748,7 @@ impl CompositorHandler for State {
         self.scale = scale;
         self.layer.wl_surface().set_buffer_scale(scale as i32);
         // A different density means different glyphs and different wrapping.
-        if let Ok(font) = PanelFont::load(font::SIZE * scale as f32) {
+        if let Ok(font) = PanelFont::load(font::size() * scale as f32) {
             self.font = Some(font);
         }
         let max_w = self.text_width();
@@ -2421,11 +2475,14 @@ mod tests {
             key_action(Keysym::Right, false, true, false),
             Key::WordRight
         );
+        // Both copies and the paste are deliberate chords, and nothing else.
         assert_eq!(key_action(Keysym::c, true, false, true), Key::Copy);
+        assert_eq!(key_action(Keysym::c, false, true, true), Key::Copy);
+        assert_eq!(key_action(Keysym::v, false, true, true), Key::Paste);
     }
 
     #[test]
-    fn only_alt_c_reaches_the_clipboard() {
+    fn only_a_copy_chord_reaches_the_clipboard() {
         // The clipboard is a deliberate action or it is nothing: no other key,
         // in any modifier combination, maps to Copy.
         for k in [
@@ -2448,11 +2505,11 @@ mod tests {
             for alt in [false, true] {
                 for ctrl in [false, true] {
                     if key_action(k, alt, ctrl, true) == Key::Copy {
-                        assert_eq!(
-                            (k, alt, ctrl),
-                            (Keysym::c, true, false),
-                            "only Alt+C copies"
-                        );
+                        assert_eq!(k, Keysym::c, "only a c copies");
+                        assert!(alt ^ ctrl, "and only with one modifier: {alt} {ctrl}");
+                    }
+                    if key_action(k, alt, ctrl, true) == Key::Paste {
+                        assert_eq!((k, alt, ctrl), (Keysym::v, false, true), "only Ctrl+V");
                     }
                 }
             }
@@ -2461,7 +2518,7 @@ mod tests {
 
     #[test]
     fn a_modified_key_does_not_type_text() {
-        assert_eq!(key_action(Keysym::c, false, true, true), Key::Ignore);
+        assert_eq!(key_action(Keysym::x, false, true, true), Key::Ignore);
         assert_eq!(key_action(Keysym::a, true, false, true), Key::Ignore);
     }
 

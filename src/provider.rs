@@ -80,17 +80,24 @@ pub fn pick(
         .or_else(|| file?.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()))
 }
 
+/// The configuration file's entries, for a caller that needs more than the
+/// provider's own keys. Absent file is an empty list, not an error.
+pub fn entries() -> Result<Vec<(String, String)>, ConfigError> {
+    match config_path() {
+        Some(path) => read_config(&path),
+        None => Ok(Vec::new()),
+    }
+}
+
 /// Resolve the model, base URL and proxy: flag, then environment, then config
 /// file, then the built-in default.
 pub fn resolve(
     flag_model: Option<&str>,
     flag_base_url: Option<&str>,
     flag_proxy: Option<&str>,
+    file: &[(String, String)],
 ) -> Result<Config, ConfigError> {
-    let file = match config_path() {
-        Some(path) => read_config(&path)?,
-        None => Vec::new(),
-    };
+    let file = file.to_vec();
     let defaults = Config::default();
     Ok(Config {
         model: pick(
@@ -141,9 +148,10 @@ fn read_config(path: &std::path::Path) -> Result<Vec<(String, String)>, ConfigEr
     })
 }
 
-/// Flat `key = "value"` lines with `#` comments. `model`, `base_url` and `proxy`
-/// are the only known keys; anything else is an error rather than a silent shrug,
-/// so a typo cannot quietly change nothing.
+/// Flat `key = "value"` lines with `#` comments. `model`, `base_url`, `proxy`,
+/// `font_size` and `font_family` are the only known keys; anything else is an error
+/// rather than a silent shrug, so a typo cannot quietly change nothing. A size is
+/// validated here, where its line number is known.
 pub fn parse_config(text: &str) -> Result<Vec<(String, String)>, (usize, String)> {
     let mut out = Vec::new();
     for (i, raw) in text.lines().enumerate() {
@@ -163,7 +171,29 @@ pub fn parse_config(text: &str) -> Result<Vec<(String, String)>, (usize, String)
             }
         };
         match key {
-            "model" | "base_url" | "proxy" => out.push((key.to_string(), value)),
+            "font_size" => {
+                let size: f32 = value.parse().map_err(|_| {
+                    (
+                        line,
+                        format!("`font_size` must be a number of pixels: {value:?}"),
+                    )
+                })?;
+                let range = crate::font::SIZE_RANGE;
+                if !range.contains(&(size as u32)) || size <= 0.0 {
+                    return Err((
+                        line,
+                        format!(
+                            "`font_size` must be between {} and {} pixels: {value:?}",
+                            range.start(),
+                            range.end()
+                        ),
+                    ));
+                }
+                out.push((key.to_string(), value));
+            }
+            "model" | "base_url" | "proxy" | "font_family" => {
+                out.push((key.to_string(), value));
+            }
             other => return Err((line, format!("unknown key `{other}`"))),
         }
     }
@@ -324,6 +354,34 @@ mod tests {
                 ("proxy".to_string(), "socks5h://127.0.0.1:1080".to_string()),
             ]
         );
+    }
+
+    /// The font keys live in the same file, and a size that is not a size is a
+    /// configuration error with its line — the panel must not open at a size nobody
+    /// asked for.
+    #[test]
+    fn the_font_keys_are_read_and_a_bad_size_is_refused() {
+        let ok = parse_config("font_size = \"28\"\nfont_family = \"DejaVu Sans Mono\"\n")
+            .expect("valid");
+        assert_eq!(
+            ok,
+            [
+                ("font_size".to_string(), "28".to_string()),
+                ("font_family".to_string(), "DejaVu Sans Mono".to_string())
+            ]
+        );
+        // The range is inclusive at both ends, and fractions are sizes too.
+        for good in ["8", "72", "13.5"] {
+            assert!(
+                parse_config(&format!("font_size = \"{good}\"")).is_ok(),
+                "{good} is a size"
+            );
+        }
+        for bad in ["huge", "2", "73", "-4", ""] {
+            let err = parse_config(&format!("font_size = \"{bad}\"")).expect_err(bad);
+            assert_eq!(err.0, 1, "the line is named");
+            assert!(err.1.contains("font_size"), "the key is named: {}", err.1);
+        }
     }
 
     #[test]

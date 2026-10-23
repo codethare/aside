@@ -85,3 +85,5 @@ change.
 - No Markdown, code blocks or tables: answers are plain wrapped text.
 - The sandbox does not filter the network: the provider sees the question.
 - `wl-copy` keeps a process alive holding whatever was copied to it.
+- `wl-paste` is read once, when `Ctrl+V` is pressed; what it returns lives in the
+  input line and nowhere else.

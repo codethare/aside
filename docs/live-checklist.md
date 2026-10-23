@@ -27,7 +27,9 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 4. `Up`, `Down`, `PageUp`, `PageDown` move the highlighted line and the view
    follows it; the highlighted line is brighter than its neighbours and starts
    2 px further right, and nothing is drawn in the left margin.
-5. `Alt+C` copies exactly the highlighted line. Paste it somewhere and check
+5. `Alt+C` or `Ctrl+C` copies exactly the highlighted line. `Ctrl+V` pastes the
+   clipboard into the input line, at the caret, and a missing `wl-paste` shows one
+   line in the transcript instead of doing nothing. Paste it somewhere and check
    there is no extra whitespace or transcript around it.
 5b. `Ctrl+T`: the bar changes tone, takes no input and reads `press [ to enter vim
    mode`, with no caret; any other key leaves it and types nothing, and the bar
@@ -52,6 +54,11 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    the panel stays open, and `pgrep -a bwrap` now finds nothing.
 7. Press `Esc` again: the panel closes. Repeat the keybinding while it is open:
    the *same* window comes forward, and no second window appears.
+7b. With the panel open, click a terminal behind it and type: the text goes to the
+   terminal, not to the panel. Click the panel and type: it goes to the panel.
+7c. Put `font_size = "28"` and `font_family = "DejaVu Sans Mono"` in the config and
+   start again: the text is that size and that face, the bar is taller, and Chinese
+   still renders. A `font_size = "2"` refuses to start, naming the file and line.
 
 ## Typing, including an input method
 

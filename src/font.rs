@@ -35,10 +35,41 @@ pub type GlyphKey = (u8, u16, u8, u8, u8);
 /// advance in pixels.
 pub type GlyphLookup = (usize, GlyphId, f32);
 
-/// Pixel size of the panel's text: `wlmenu`'s bar size, so the two read as one
-/// product. 15 pt at 96 dpi; `row_h_for` keeps the 1.5× line height and `PAD`
-/// stays 0.8 em, so the proportions follow from it.
+/// Pixel size of the panel's text when the configuration does not say otherwise:
+/// `wlmenu`'s bar size, so the two read as one product. 15 pt at 96 dpi;
+/// `row_h_for` keeps the 1.5× line height and `PAD` stays 0.8 em, so the
+/// proportions follow from it.
 pub const SIZE: f32 = 20.0;
+
+/// The smallest and largest configured size, in logical pixels. Below `8` the
+/// panel is unreadable; above `72` a row is taller than most panels have room for.
+pub const SIZE_RANGE: std::ops::RangeInclusive<u32> = 8..=72;
+
+/// What the configuration said about the font, resolved once at startup. The
+/// panel is a single font at a single size for the whole run, so this is a
+/// process-wide setting rather than a parameter threaded through every sizing
+/// function.
+static CONFIGURED_SIZE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+static CONFIGURED_FAMILY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Take the configured font. Called once, before the first frame.
+pub fn configure(size: f32, family: Option<String>) {
+    let _ = CONFIGURED_SIZE.set(size);
+    if let Some(family) = family {
+        let _ = CONFIGURED_FAMILY.set(family);
+    }
+}
+
+/// The panel's text size: the configured one, or [`SIZE`].
+pub fn size() -> f32 {
+    CONFIGURED_SIZE.get().copied().unwrap_or(SIZE)
+}
+
+/// The configured family, if any. A name nothing provides is not an error: it is
+/// put at the head of the chain and the chain answers for it when it cannot.
+pub fn family() -> Option<&'static str> {
+    CONFIGURED_FAMILY.get().map(String::as_str)
+}
 
 /// Cap on the character lookup memo. Its keys come from the provider's text, so
 /// a long session of answers full of distinct characters must not grow it with
@@ -151,7 +182,8 @@ pub(crate) type FontLoad = std::thread::JoinHandle<Result<PanelFont, String>>;
 /// Load on a thread, so the read + parse overlap the handshake instead of
 /// preceding it. Joining is the caller's business.
 pub(crate) fn spawn_load(size: f32) -> FontLoad {
-    std::thread::spawn(move || PanelFont::load(size))
+    let family = family().map(str::to_string);
+    std::thread::spawn(move || PanelFont::load_with(size, family.as_deref()))
 }
 
 /// Row height incl. padding, from the size alone: a line is the requested size
@@ -214,8 +246,16 @@ const CANDIDATES: &[Candidate] = &[
 ];
 
 impl PanelFont {
+    /// The configured font, or the built-in chain: what every caller but a test
+    /// wants.
     pub fn load(size: f32) -> Result<PanelFont, String> {
-        let chain = chain();
+        Self::load_with(size, family())
+    }
+
+    /// `family` is put at the head of the chain; a family nothing provides is
+    /// skipped, so a typo in the configuration cannot stop the panel starting.
+    pub fn load_with(size: f32, family: Option<&str>) -> Result<PanelFont, String> {
+        let chain = chain(family);
         let (path, index) = chain
             .first()
             .cloned()
@@ -328,8 +368,18 @@ impl PanelFont {
 /// every installed font header (~655 files here) and the first frame waits for
 /// the primary face. The scan runs only on a machine whose fonts live somewhere
 /// this list does not know.
-fn chain() -> Vec<(PathBuf, u32)> {
+fn chain(family: Option<&str>) -> Vec<(PathBuf, u32)> {
     let mut out: Vec<(PathBuf, u32)> = Vec::new();
+    // The configured family first, whatever else the known paths hold: it is what
+    // the user asked for, and the rest of the chain is the fallback for the
+    // scripts it cannot draw.
+    if let Some(family) = family.filter(|f| !f.trim().is_empty()) {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        if let Some(found) = query_path(&db, family) {
+            out.push(found);
+        }
+    }
     for c in CANDIDATES {
         let path = PathBuf::from(c.path);
         if !path.exists() {
@@ -346,6 +396,9 @@ fn chain() -> Vec<(PathBuf, u32)> {
     if out.is_empty() {
         return system_chain();
     }
+    // A configured family is a preference for the text, not a replacement for the
+    // CJK fallback: one face covers those glyphs, and without it an answer in
+    // Chinese would render as blanks.
     if !out.iter().any(|(p, _)| is_cjk_path(p))
         && let Some(cjk) = system_chain().into_iter().find(|(p, _)| is_cjk_path(p))
     {
@@ -474,11 +527,42 @@ mod tests {
         );
     }
 
+    /// The configured family goes first, and a name nothing provides is skipped
+    /// rather than fatal — a typo in the file must not stop the panel starting.
+    #[test]
+    fn a_configured_family_leads_the_chain_and_a_bad_one_is_skipped() {
+        let plain = chain(None);
+        let first = plain.first().cloned().expect("a system font");
+        let family = family_of(&first.0, first.1).expect("a family name");
+        let named = chain(Some(&family));
+        assert_eq!(
+            named.first(),
+            Some(&first),
+            "the family it names is already first; asking for it changes nothing"
+        );
+        let nonsense = chain(Some("No Such Family 1234"));
+        assert_eq!(
+            nonsense.first(),
+            plain.first(),
+            "an unknown family falls back to the built-in chain"
+        );
+        assert!(!nonsense.is_empty(), "and the panel still has a font");
+    }
+
+    /// The family of the face at `index` in `path`, for a test that has to name one.
+    fn family_of(path: &Path, index: u32) -> Option<String> {
+        let mut db = fontdb::Database::new();
+        db.load_font_file(path).ok()?;
+        db.faces()
+            .find(|f| f.index == index)
+            .and_then(|f| f.families.first().map(|(name, _)| name.clone()))
+    }
+
     #[test]
     fn chain_takes_one_cjk_face_only() {
         // SC/TC/JP/文泉驿/思源 are alternates, not complements (usually faces of
         // the same ~20MB TTC): the chain must never hold more than one big face.
-        let chain = chain();
+        let chain = chain(None);
         let big = chain
             .iter()
             .filter(|(p, _)| {

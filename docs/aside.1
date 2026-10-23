@@ -23,6 +23,8 @@ text: there is no Markdown, code-block or table rendering.
 The panel is a
 .B wlr\-layer\-shell
 surface on the overlay layer, anchored to the bottom of the output and centred,
+with on-demand keyboard focus: it takes the keyboard while it is focused and gives
+it back when another window is clicked, so it does not hold the session's typing,
 its bottom edge 38 per cent of the output height above the screen's bottom edge:
 the field lands just below the vertical centre and the replies grow upwards out
 of it.  The chrome is the one
@@ -108,9 +110,13 @@ Move the highlighted transcript line.
 .B PageUp ", " PageDown
 Move it one page.
 .TP
-.B Alt+C
+.B Alt+C ", " Ctrl+C
 Copy the highlighted line to the clipboard with
 .BR wl\-copy (1).
+.TP
+.B Ctrl+V
+Paste the clipboard into the input line with
+.BR wl\-paste (1).
 .TP
 .B Ctrl+T
 Enter the prefix mode, the way a terminal multiplexer does: it takes exactly one
@@ -162,10 +168,18 @@ Read, never written.  Flat
 .I key = "value"
 lines, with
 .IR model ,
-.I base_url
+.IR base_url ,
+.IR proxy ,
+.I font_size
 and
-.I proxy
-recognised.  No credential may be stored here.
+.I font_family
+recognised.  A
+.I font_size
+outside 8 to 72 logical pixels is an error naming the file and the line, and the
+panel does not open; a
+.I font_family
+nothing provides falls back to the built-in chain.  No credential may be stored
+here.
 .SH EXIT STATUS
 .TP
 .B 0

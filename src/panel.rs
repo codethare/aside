@@ -617,7 +617,7 @@ pub fn height_for(content: u32, font: &PanelFont, scale: u32) -> u32 {
 /// pixels (it is derived at `SIZE * scale`), so this is the one number the layer
 /// surface, which is sized logically, needs.
 pub fn bar_height() -> u32 {
-    crate::font::row_h_for(crate::font::SIZE)
+    crate::font::row_h_for(crate::font::size())
 }
 
 /// A PPM of the current frame: what `--preview` writes, so the layout can be

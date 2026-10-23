@@ -25,7 +25,7 @@ pub struct Blocks {
 
 impl Blocks {
     pub fn new(font: &PanelFont) -> Blocks {
-        let s = (font.size / crate::font::SIZE).round().max(1.0) as u32;
+        let s = (font.size / crate::font::size()).round().max(1.0) as u32;
         Blocks {
             row_h: font.row_h,
             gap: render::PROMPT_GAP as u32 * s,
