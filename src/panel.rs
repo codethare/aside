@@ -104,7 +104,9 @@ fn draw_content(
     transcript: &Transcript,
     input: &Input,
     viewport: &Viewport,
-    highlight: Option<usize>,
+    // The rows the panel marks: a pointer's selection, or one line from the
+    // keyboard. Nothing when there is nothing to mark.
+    marked: Option<(usize, usize)>,
     caret_visible: bool,
     preedit: &str,
     hint: &str,
@@ -149,7 +151,7 @@ fn draw_content(
             font,
             transcript,
             viewport,
-            highlight,
+            marked,
             card,
             card.y..(card.y + card.h),
             fade,
@@ -212,7 +214,9 @@ pub fn draw(
     transcript: &Transcript,
     input: &Input,
     viewport: &Viewport,
-    highlight: Option<usize>,
+    // The rows the panel marks: a pointer's selection, or one line from the
+    // keyboard. Nothing when there is nothing to mark.
+    marked: Option<(usize, usize)>,
     caret_visible: bool,
     preedit: &str,
     // What the bar says instead of the input line: the prefix mode's instruction.
@@ -259,7 +263,7 @@ pub fn draw(
             transcript,
             input,
             viewport,
-            highlight,
+            marked,
             caret_visible,
             preedit,
             hint,
@@ -282,7 +286,7 @@ pub fn draw(
             transcript,
             input,
             viewport,
-            highlight,
+            marked,
             caret_visible,
             preedit,
             hint,
@@ -333,7 +337,7 @@ pub fn draw(
         // out of the bar with it instead of being wiped in place.
         let clip = replies.y..(replies.y + replies.h);
         draw_replies(
-            buf, w, font, transcript, viewport, highlight, replies, clip, 1.0, aa, s,
+            buf, w, font, transcript, viewport, marked, replies, clip, 1.0, aa, s,
         );
     }
     render::body(buf, w, &bar, bar_tone);
@@ -398,7 +402,7 @@ fn draw_replies(
     font: &PanelFont,
     transcript: &Transcript,
     viewport: &Viewport,
-    highlight: Option<usize>,
+    marked: Option<(usize, usize)>,
     card: &render::Panel,
     clip: std::ops::Range<u32>,
     fade: f32,
@@ -424,7 +428,7 @@ fn draw_replies(
             card,
             row,
             y,
-            highlight == Some(index),
+            marked.is_some_and(|(from, to)| (from..=to).contains(&index)),
             clip.end,
             fade,
             aa,
@@ -684,7 +688,7 @@ mod tests {
         paint_highlighted(scene, w, h, None)
     }
 
-    fn paint_highlighted(scene: &Scene, w: u32, h: u32, highlight: Option<usize>) -> Vec<u8> {
+    fn paint_highlighted(scene: &Scene, w: u32, h: u32, marked: Option<(usize, usize)>) -> Vec<u8> {
         let f = font();
         let (bw, bh) = frame(w, h);
         let mut buf = vec![0u8; (bw * bh * 4) as usize];
@@ -696,7 +700,7 @@ mod tests {
             &scene.transcript,
             &scene.input,
             &scene.viewport,
-            highlight,
+            marked,
             true,
             "",
             "",
@@ -1122,7 +1126,7 @@ mod tests {
         let scene = scene(&f, 300.0);
         let (w, h) = sized(&scene, &f);
         let plain = paint_highlighted(&scene, w, h, None);
-        let lit = paint_highlighted(&scene, w, h, Some(0));
+        let lit = paint_highlighted(&scene, w, h, Some((0, 0)));
         let (bw, _) = frame(w, h);
         // Nothing in the margin changes: the mark is the text, so every pixel left
         // of the text column is identical with and without the highlight.
@@ -1318,6 +1322,45 @@ mod tests {
             "the replies end above the gap"
         );
         assert_eq!(px(w / 2, h - f.row_h), glass, "the bar starts below it");
+    }
+
+    /// A selected range is marked row by row, and the rows outside it are not: the
+    /// pointer's way of naming lines paints exactly what the keyboard's does.
+    #[test]
+    fn every_selected_row_is_inked() {
+        let f = font();
+        let mut scene = scene(&f, 300.0);
+        for i in 0..4 {
+            scene.transcript.add_note(&format!("note {i}"), &f, 300.0);
+        }
+        let (w, h) = (500u32, height_for(6 * f.row_h, &f, 1));
+        let (bw, _) = frame(w, h);
+        let plain = paint_highlighted(&scene, w, h, None);
+        let picked = paint_highlighted(&scene, w, h, Some((1, 3)));
+        // The lower half of the band: a descender from the row above can reach into
+        // its top pixels, and that ink belongs to the row above, not to this one.
+        let ink_in = |buf: &Vec<u8>, row: u32| {
+            let y0 = row * f.row_h + f.row_h / 2;
+            let y1 = row * f.row_h + f.row_h - 2;
+            (crate::PAD..crate::PAD + 60)
+                .flat_map(|x| (y0..y1).map(move |y| (x, y)))
+                .filter(|&(x, y)| buf[at(bw, x, y)..][..4][..3] != glass()[..3])
+                .count()
+        };
+        // Rows 1..=3 are inked by the selection; row 0 and row 4 are untouched.
+        for row in 1..=3 {
+            assert_ne!(
+                ink_in(&picked, row),
+                ink_in(&plain, row),
+                "row {row} is marked"
+            );
+        }
+        assert_eq!(ink_in(&picked, 0), ink_in(&plain, 0), "row 0 is not");
+        // Nothing moved: the two frames differ only in ink, never in where a line is.
+        let changed: Vec<u32> = (0..8)
+            .filter(|row| ink_in(&picked, *row) != ink_in(&plain, *row))
+            .collect();
+        assert_eq!(changed, [1, 2, 3], "exactly the three selected rows");
     }
 
     #[test]

@@ -39,10 +39,14 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    edges; `n`/`p` page the transcript, `Ctrl+n`/`Ctrl+p` move one line, `g`/`G` go
    to the first/last line. No letter reaches the input line. `Esc` leaves the
    mode, and a second `Esc` cancels a stream that was running the whole time.
-5c. Hold the left button for a quarter of a second and move: the panel follows
-   the pointer in both directions, stays on screen, and does not change size while
-   it moves. A short click moves nothing, and a new run starts where the anchor
-   puts it.
+5c. Press the left button on the bar and move at once: the panel follows from the
+   first motion, in both directions, stays on screen, and does not change size
+   while it moves. A click without moving does nothing, and a new run starts where
+   the anchor puts it.
+5c2. Press on the first line of an answer and drag to its third line: those three
+   lines are drawn highlighted, no text moves, and `Ctrl+C` puts exactly those
+   three lines on the clipboard. `Esc` clears the selection and leaves the panel
+   open; a second `Esc` closes it.
 5d0. Put the pointer over the replies and turn the wheel (and slide two fingers):
    the transcript scrolls, three lines a notch, and it stops at both ends. Over the
    bar, nothing scrolls.

@@ -288,6 +288,28 @@ impl Transcript {
         None
     }
 
+    /// Which row a transcript-local `y` falls on: the walk `row_y` does, in the
+    /// other direction. A pointer lands between two rows' ink (in a gap, or in a
+    /// block's padding) as easily as on one, so a y inside a block's own span finds
+    /// the row nearest it.
+    pub fn row_at(&self, y: u32, blocks: Blocks) -> Option<usize> {
+        let mut index = 0;
+        for entry in &self.entries[self.current_start()..] {
+            let rows = entry.lines.total_rows();
+            if rows == 0 {
+                continue;
+            }
+            let top = entry.y;
+            let bottom = entry.y + entry.h;
+            if y >= top && y < bottom {
+                let row = ((y - top) / blocks.row_h).min(rows as u32 - 1);
+                return Some(index + row as usize);
+            }
+            index += rows;
+        }
+        None
+    }
+
     /// Height of everything the transcript draws, gaps included.
     pub fn total_height(&self) -> u32 {
         self.height
@@ -564,6 +586,40 @@ mod tests {
         t.rewrap(&f, 40.0);
         assert_eq!(t.rows(blocks)[0].y, 0);
         assert_eq!(t.request_turns().len(), 4, "nothing was lost");
+    }
+
+    /// The pointer's way in: a y inside a block names that block's row, and a y in
+    /// the gap between blocks names nothing rather than the block above it.
+    #[test]
+    fn a_pointer_position_names_a_row() {
+        let f = font();
+        let blocks = Blocks::new(&f);
+        let mut t = Transcript::default();
+        t.ask("why", &f);
+        t.delta(
+            "a first answer long enough to wrap at a narrow width",
+            &f,
+            80.0,
+        );
+        t.finish_answer(&f);
+        t.add_note("and a note", &f, 80.0);
+        for index in 0..t.total_rows() {
+            let y = t.row_y(index, blocks).expect("every row has a place");
+            assert_eq!(t.row_at(y, blocks), Some(index), "row {index} at {y}");
+            assert_eq!(
+                t.row_at(y + blocks.row_h - 1, blocks),
+                Some(index),
+                "the row is found by any pixel of it"
+            );
+        }
+        // The gap between two blocks belongs to neither.
+        let rows = t.rows(blocks);
+        let mut cards: Vec<(u32, u32)> = rows.iter().map(|r| r.block).collect();
+        cards.dedup();
+        assert!(cards.len() > 1, "two blocks to have a gap between");
+        let gap = cards[0].0 + cards[0].1 + blocks.gap / 2;
+        assert_eq!(t.row_at(gap, blocks), None, "a gap names no row");
+        assert_eq!(t.row_at(u32::MAX, blocks), None, "past the end");
     }
 
     /// A row knows where it is, because the viewport scrolls in pixels.

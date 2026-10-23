@@ -84,8 +84,11 @@ side and sits that margin inside the visible gap. The answering panel is a
 bar's own gap above the screen's bottom edge (38 % of the output, clamped by the
 room left above it). It does not grow as the answer does — a longer answer scrolls
 inside the box and shows a 3 px scroll indicator on the right edge. Holding the
-left button for a quarter of a second and moving drags the panel, in both axes;
-it stays on the output, keeps its size, and where it was is never written down.
+left button on the bar and moving drags the panel, in both axes, from the first
+motion; it stays on the output, keeps its size, and where it was is never written
+down. Dragging across the replies selects whole lines instead — press on a line,
+drag, release — and `Alt+C` or `Ctrl+C` copies every selected line, one per line.
+`Esc` clears a selection before it closes the panel.
 State changes are animated, and always as one card changing shape, painted inside
 one buffer, so the surface is resized once per state and never per frame. Opening
 takes 520 ms: a line spreads out of a point at the centre, and once it has the

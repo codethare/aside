@@ -78,9 +78,6 @@ const CLOSE_MS: u128 = 460;
 /// How much of an opening or closing the first track takes: the line gets its
 /// width first, and the closing run gives up its height first.
 const TRACK_SHARE: u128 = 55;
-/// How long the left button is held before moving the panel starts: a click on
-/// the panel must not be a one-pixel jump.
-const DRAG_HOLD_MS: u64 = 250;
 /// Left button, from `linux/input-event-codes.h`.
 const BTN_LEFT: u32 = 0x110;
 /// Output height assumed for the height cap until the real one is known.
@@ -275,7 +272,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         &transcript,
         &input,
         &viewport,
-        Some(0),
+        Some((0, 0)),
         true,
         "",
         "",
@@ -366,6 +363,8 @@ fn run(
         press: None,
         pointer_at: (0.0, 0.0),
         dragging: None,
+        selecting: false,
+        selection: None,
         pointer: None,
         morph: None,
         enter_start: None,
@@ -424,13 +423,7 @@ fn run(
     while !state.exit {
         // While a request is open, a byte can arrive at any moment; when idle
         // there is nothing to poll for, so the loop sleeps.
-        if state.holding() {
-            // Waiting out the hold before a drag begins.
-            state.check_hold();
-        }
-        let timeout = if state.holding() {
-            Duration::from_millis(30)
-        } else if state.morphing() || state.rising() {
+        let timeout = if state.morphing() || state.rising() {
             // The card is growing: a frame every step of the ease.
             Duration::from_millis(16)
         } else if state.phase == Phase::Thinking {
@@ -595,6 +588,24 @@ fn drag_for_bottom(output_h: Option<u32>, bottom: i32) -> i32 {
 /// The gap the anchor asks for, before any drag.
 fn base_gap(output_h: Option<u32>) -> i32 {
     output_h.unwrap_or(FALLBACK_OUTPUT_H) as i32 * EDGE_SHARE / 100
+}
+
+/// The rows a mark covers: the pointer's selection, either end first, or the one
+/// line the keyboard highlight names.
+fn marked_rows(selection: Option<(usize, usize)>, highlight: usize) -> (usize, usize) {
+    match selection {
+        Some((a, b)) => (a.min(b), a.max(b)),
+        None => (highlight, highlight),
+    }
+}
+
+/// A pointer's logical y turned into an offset in the replies card, in buffer
+/// pixels, plus how far the view is scrolled. The card's top is the panel's top,
+/// which is the shadow margin in from the surface's.
+fn transcript_y(pointer_y: f64, scale: u32, viewport_top: u32) -> u32 {
+    let s = scale.max(1) as f64;
+    let y = (pointer_y * s - render::SHADOW as f64 * s).max(0.0);
+    y.round() as u32 + viewport_top
 }
 
 /// Whether a pointer at `y` in surface coordinates is over the replies card rather
@@ -854,12 +865,18 @@ struct State {
     mode: Mode,
     /// Moved by dragging, in logical px from the anchored place.
     drag: Drag,
-    /// The left button is down, and since when.
-    press: Option<std::time::Instant>,
+    /// Where the left button came down, while it is down: the drag's own origin, so
+    /// the panel follows from the first motion rather than from the second.
+    press: Option<(f64, f64)>,
     /// Where the pointer is, latest first.
     pointer_at: (f64, f64),
-    /// The pointer position a drag started from, once the hold has elapsed.
+    /// The pointer position the drag last reported, while one is running.
     dragging: Option<(f64, f64)>,
+    /// Whether the press that is down started a selection rather than a drag.
+    selecting: bool,
+    /// The reply lines a pointer selected, anchor first or last: whole lines,
+    /// because a line is what the panel copies.
+    selection: Option<(usize, usize)>,
     pointer: Option<wl_pointer::WlPointer>,
     /// The shape change in progress, if any.
     morph: Option<Morph>,
@@ -1157,6 +1174,9 @@ impl State {
         viewport.follow(transcript.total_height());
         *highlight = rows.saturating_sub(1);
         self.morph = None;
+        // The lines a selection named are about to be gone.
+        self.selection = None;
+        self.selecting = false;
         self.set_phase(if started {
             Phase::Thinking
         } else {
@@ -1180,6 +1200,11 @@ impl State {
             // stream that has already stopped.
             self.morph = None;
             self.set_phase(Phase::Answering);
+        } else if self.selection.is_some() {
+            // A selection is the first thing Escape takes: it cancels nothing and
+            // closes nothing.
+            self.selection = None;
+            self.dirty = true;
         } else if self.close_start.is_none() {
             // Nothing to cancel: the panel closes, rolling up and then pulling in
             // from both ends, and the process goes when that has run.
@@ -1188,20 +1213,38 @@ impl State {
         }
     }
 
-    /// The left button is down: once it has been held long enough, the panel
-    /// follows the pointer. Checked by the loop rather than by a timer of its own,
-    /// so a press that is released early never starts anything.
-    fn check_hold(&mut self) {
-        let Some(at) = self.press else { return };
-        if self.dragging.is_some() || at.elapsed() < Duration::from_millis(DRAG_HOLD_MS) {
-            return;
-        }
-        self.dragging = Some(self.pointer_at);
+    /// What a press on the panel starts. On a reply line it anchors a selection;
+    /// anywhere else it leaves the panel ready to be dragged, from the press itself.
+    fn press_on(&mut self, position: (f64, f64)) {
+        let row = self.reply_row(position);
+        self.selecting = row.is_some();
+        self.selection = row.map(|row| (row, row));
+        self.dragging = row.is_none().then_some(position);
+        self.dirty = true;
     }
 
-    /// Whether a frame is needed for the hold deadline.
-    fn holding(&self) -> bool {
-        self.press.is_some() && self.dragging.is_none()
+    /// Which reply line a pointer position is on, if any: the same walk the
+    /// transcript does for the keyboard, in the other direction.
+    fn reply_row(&self, position: (f64, f64)) -> Option<usize> {
+        if !over_replies(self.height, position.1) {
+            return None;
+        }
+        let font = self.font.as_ref()?;
+        let blocks = layout::Blocks::new(font);
+        let y = transcript_y(position.1, self.scale, self.viewport.top);
+        self.transcript.row_at(y, blocks)
+    }
+
+    /// A motion with the button down extends a selection or carries the panel.
+    fn motion_to(&mut self, position: (f64, f64)) {
+        if self.selecting {
+            if let (Some(row), Some((anchor, _))) = (self.reply_row(position), self.selection) {
+                self.selection = Some((anchor, row));
+            }
+            self.dirty = true;
+            return;
+        }
+        self.drag_to(position);
     }
 
     /// Move the panel by the pointer's delta since the drag began. The margins are
@@ -1354,16 +1397,31 @@ impl State {
         }
     }
 
+    /// The rows the panel marks: what a pointer selected, or the one line the
+    /// keyboard highlight names when nothing is selected.
+    fn marked(&self) -> Option<(usize, usize)> {
+        Some(marked_rows(self.selection, self.highlight))
+    }
+
+    /// Copy the marked lines, one per line. The selection is what a pointer chose;
+    /// without one it is the highlighted line, which is what `Alt+C` has always
+    /// meant.
     fn copy_highlight(&mut self) {
         let Some(font) = self.font.as_ref() else {
             return;
         };
-        let text = self
-            .transcript
-            .rows(layout::Blocks::new(font))
-            .get(self.highlight)
-            .map(|row| row.text.to_string());
-        let Some(text) = text else { return };
+        let (from, to) = self.marked().expect("always at least the highlight");
+        let rows = self.transcript.rows(layout::Blocks::new(font));
+        let lines: Vec<&str> = rows
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| (from..=to).contains(i))
+            .map(|(_, row)| row.text)
+            .collect();
+        if lines.is_empty() {
+            return;
+        }
+        let text = lines.join("\n");
         if let Err(e) = clipboard::copy(&text) {
             let max_w = self.text_width();
             let State {
@@ -1471,6 +1529,7 @@ impl State {
         }
         // The shape this frame paints, and how far into it the panel has morphed.
         let look = self.look();
+        let marked = self.marked();
         let head = self.head();
         let stride = w as i32 * 4;
         let label = self.mode_label();
@@ -1509,7 +1568,7 @@ impl State {
             &self.transcript,
             &self.input,
             &self.viewport,
-            Some(self.highlight),
+            marked,
             typing,
             &self.ime.preedit,
             hint,
@@ -2051,16 +2110,17 @@ impl PointerHandler for State {
             }
             self.pointer_at = event.position;
             match event.kind {
-                // Held down and not yet moving: the loop starts the drag when the
-                // hold elapses, so a click moves nothing.
+                // Where the press lands decides the gesture: on a reply line it
+                // selects text, anywhere else it will move the panel.
                 PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
-                    self.press = Some(std::time::Instant::now());
+                    self.press = Some(event.position);
+                    self.press_on(event.position);
                 }
                 PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
                     self.press = None;
                     self.dragging = None;
                 }
-                PointerEventKind::Motion { .. } => self.drag_to(event.position),
+                PointerEventKind::Motion { .. } => self.motion_to(event.position),
                 PointerEventKind::Axis { vertical, .. }
                     if over_replies(self.height, event.position.1) =>
                 {
@@ -2514,6 +2574,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The marked rows: a pointer's selection normalised so either end can be the
+    /// anchor, or the one line the keyboard names when nothing is selected.
+    #[test]
+    fn a_mark_is_a_normalised_range_or_the_keyboard_line() {
+        assert_eq!(marked_rows(Some((3, 1)), 5), (1, 3), "dragged upwards");
+        assert_eq!(marked_rows(Some((1, 3)), 5), (1, 3), "dragged downwards");
+        assert_eq!(marked_rows(Some((2, 2)), 5), (2, 2), "a click");
+        assert_eq!(marked_rows(None, 5), (5, 5), "the keyboard's line");
+        assert_eq!(marked_rows(Some((0, 1)), 9), (0, 1), "the pointer wins");
+    }
+
+    /// A configured size reaches the panel's own geometry: the bar, the box under it
+    /// and the row cap are all expressed in rows of the configured text.
+    #[test]
+    fn the_panel_follows_the_configured_font_size() {
+        let size = font::size();
+        assert_eq!(size, font::SIZE, "no configuration in a test run");
+        let bar = panel::bar_height();
+        assert_eq!(bar, font::row_h_for(size), "the bar is one row of the text");
+        let (_, h) = size_for(Phase::Answering, Some(1080));
+        assert_eq!(h, bar + render::SEPARATION + room_for_replies(Some(1080)));
+        // The room is the gap clamped by the rows a frame may draw, so a very tall
+        // output stops at the row cap rather than at the gap.
+        assert_eq!(
+            room_for_replies(Some(3000)),
+            (layout::MAX_ROWS as u32 * bar).min(reply_cap(Some(3000), edge_gap(Some(3000), 0))),
+            "the row cap is expressed in rows of this size"
+        );
+        assert!(font::row_h_for(30.0) > bar, "a larger size is a taller row");
     }
 
     #[test]
