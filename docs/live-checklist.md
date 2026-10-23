@@ -20,7 +20,8 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    size: a light starts running round its rim and laps it about every 1.4 s. When
    the first text arrives the bar grows into the panel and only then does the reply
    card rise out of it. Opening the panel is a line spreading out of a point and
-   unfolding up, not a snap.
+   unfolding up, not a snap, and the input line is revealed as the bar reaches it
+   rather than appearing on the line before it.
 3. Ask a follow-up. The panel does not change size at all: the light starts on its
    bar's rim and the box stays where it was. The box then holds the new answer alone
    — the earlier one is not on screen — and the answer still takes the earlier
@@ -46,6 +47,13 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    first motion, in both directions, stays on screen, and does not change size
    while it moves. A click without moving does nothing, and a new run starts where
    the anchor puts it.
+5c1. Type `hello world`, press `Left` five times: the caret walks back through the
+   text and `Backspace` deletes the character it just passed. `Home`/`End` jump to
+   the ends, `Ctrl+Left`/`Ctrl+Right` by word, and the pre-edit of a Chinese input
+   method appears at the caret, underlined.
+5c1b. Type a question past the width of the bar: the line scrolls under the caret,
+   the caret stays inside the field, and `Home` brings the first characters back.
+   Submit it: the whole question reaches the provider.
 5c2. Move the pointer across the replies without holding a button: nothing is
    selected, and a selection made a moment ago stays exactly as it was.
 5c3. Press on the first line of an answer and drag to its third line: those three

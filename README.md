@@ -134,7 +134,9 @@ the bar, hides the caret and shows a cursor in the replies, so a swallowed
 keystroke is never a mystery.
 
 Editing is the usual set: `Left`, `Right`, `Home`, `End`, `Backspace`, `Delete`,
-and `Ctrl+Left`/`Ctrl+Right` by word.
+and `Ctrl+Left`/`Ctrl+Right` by word. The caret is drawn where the input holds it,
+and a question longer than the bar scrolls under the caret rather than running off
+the card.
 
 Typing goes through `zwp_text_input_v3` when an input method is there and through
 the keysyms when it is not — decided per keystroke, not once: a key pressed while

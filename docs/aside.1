@@ -149,7 +149,9 @@ Neither cancels anything.
 In typing mode, cancel a streaming answer or close the panel.
 .TP
 .B Left ", " Right ", " Home ", " End ", " Backspace ", " Delete
-Edit the input line.
+Edit the input line.  The caret is drawn at the input's own position, so a
+backspace removes the character before it.  A question wider than the bar scrolls
+under the caret instead of being cut off.
 .TP
 .B Ctrl+Left ", " Ctrl+Right
 Move the caret by a word.

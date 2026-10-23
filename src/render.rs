@@ -658,8 +658,8 @@ const BUCKETS_PER_PX: f32 = 4.0;
 /// (costing one frame) instead of growing without bound.
 const GLYPH_CACHE_CAP: usize = 8192;
 
-/// Draw `s` starting at (x, baseline), clipped to `max_w` px wide.
-/// Returns the x position just past the last drawn advance.
+/// Draw `s` starting at (x, baseline), clipped to `max_w` px wide and to the
+/// `rows` it may paint on. Returns the x position just past the last drawn advance.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_text(
     buf: &mut [u8],
@@ -671,6 +671,9 @@ pub fn draw_text(
     s: &str,
     color: Bgra,
     max_w: f32,
+    // The rows the text may paint on: a bar still unfolding upward shows only the
+    // part of its line the card has reached.
+    rows: std::ops::Range<u32>,
     subpixel: Subpixel,
 ) -> f32 {
     let mut cx = x;
@@ -734,15 +737,15 @@ pub fn draw_text(
         let dx = cx.floor() as i32;
         let dy = baseline.floor() as i32;
         match subpixel {
-            Subpixel::Gray => blit_plane(buf, w, h, &bmp.planes[0], dx, dy, color, None),
+            Subpixel::Gray => blit_plane(buf, w, h, &bmp.planes[0], dx, dy, color, None, &rows),
             Subpixel::Rgb => {
                 for (k, plane) in bmp.planes.iter().enumerate() {
-                    blit_plane(buf, w, h, plane, dx, dy, color, Some(RGB_CHAN[k]));
+                    blit_plane(buf, w, h, plane, dx, dy, color, Some(RGB_CHAN[k]), &rows);
                 }
             }
             Subpixel::Bgr => {
                 for (k, plane) in bmp.planes.iter().enumerate() {
-                    blit_plane(buf, w, h, plane, dx, dy, color, Some(BGR_CHAN[k]));
+                    blit_plane(buf, w, h, plane, dx, dy, color, Some(BGR_CHAN[k]), &rows);
                 }
             }
         }
@@ -963,6 +966,7 @@ fn blit_plane(
     dy: i32,
     color: Bgra,
     chan: Option<usize>,
+    rows: &std::ops::Range<u32>,
 ) {
     for gy in 0..plane.h {
         for gx in 0..plane.w {
@@ -973,6 +977,9 @@ fn blit_plane(
             let px = dx + plane.min_x + gx as i32;
             let py = dy + plane.min_y + gy as i32;
             if px < 0 || py < 0 || px >= w as i32 || py >= h as i32 {
+                continue;
+            }
+            if (py as u32) < rows.start || (py as u32) >= rows.end {
                 continue;
             }
             let a = (cov as u32 * color[3] as u32) / 255;
@@ -1026,6 +1033,7 @@ mod tests {
             text,
             FG_PROMPT,
             10_000.0,
+            0..h,
             aa,
         )
     }
@@ -1120,6 +1128,7 @@ mod tests {
             &long,
             FG_PROMPT,
             max_w,
+            0..h,
             Subpixel::Gray,
         );
         assert!(drawn <= start + max_w, "advance {drawn} ran past the limit");
@@ -1165,6 +1174,7 @@ mod tests {
             "wrapping 折行",
             FG_PROMPT,
             10_000.0,
+            0..h,
             Subpixel::Gray,
         );
         assert!(

@@ -165,7 +165,7 @@ fn draw_content(
                 card,
                 font,
                 input,
-                card.h,
+                card.y..(card.y + card.h),
                 caret_visible,
                 preedit,
                 hint,
@@ -406,7 +406,7 @@ pub fn draw(
         &bar,
         font,
         input,
-        bar_h,
+        bar.y..(bar.y + bar.h),
         caret_visible,
         preedit,
         hint,
@@ -504,7 +504,7 @@ fn draw_bar(
     panel: &render::Panel,
     font: &PanelFont,
     input: &Input,
-    row_h: u32,
+    clip: std::ops::Range<u32>,
     caret_visible: bool,
     preedit: &str,
     hint: &str,
@@ -516,9 +516,10 @@ fn draw_bar(
     let p = crate::PAD * s;
     // A morph fades the whole line; a settled frame draws it whole.
     let ink = render::dim(render::FG_PROMPT, fade);
-    // The bar is the last row of the panel; the surface hangs from the bottom
-    // edge, so that row keeps one place on screen while replies grow above it.
-    let bar_y = panel.y + panel.h.saturating_sub(row_h);
+    // The bar is one row tall, anchored to the card's bottom edge whatever the card
+    // is doing mid-morph: the line keeps the place it will settle in, and only the
+    // rows the card has unfolded are painted on, so it forms as the bar rises.
+    let bar_y = (panel.y + panel.h).saturating_sub(font.row_h);
     let baseline = render::row_baseline(font, bar_y);
     // No label rail: `wlmenu` draws one only when it is given a prompt label, and
     // this bar has none, so the text starts at the padding.
@@ -527,20 +528,63 @@ fn draw_bar(
     // While the prefix waits, the bar carries the instruction and no input: the
     // caret and the pre-edit belong to a line nobody is typing on.
     let composing = hint.is_empty();
-    let typed = if composing { input.text() } else { hint };
     let preedit = if composing { preedit } else { "" };
+    let typed = input.text();
+    let caret_byte = input.caret().min(typed.len());
+    let (before, after) = if composing {
+        (&typed[..caret_byte], &typed[caret_byte..])
+    } else {
+        ("", hint)
+    };
+    let caret_w = 2 * s;
+    // A question longer than the bar scrolls: the caret stays inside the field, so
+    // a word typed wrong three sentences back can still be corrected.
+    let before_w = render::advance(font, before);
+    let scroll = if composing {
+        caret_scroll(font, input, limit, preedit, s)
+    } else {
+        0.0
+    };
+    // Whole characters only: the line is drawn from a character boundary, shifted
+    // by the bit of a glyph still hanging off the left edge.
+    let (skip, shift) = if scroll > 0.0 {
+        scroll_to(font, before, scroll)
+    } else {
+        (0, 0.0)
+    };
     let mut end = render::draw_text(
         buf,
         w,
         h,
         font,
-        text_x,
+        text_x - shift,
         baseline,
-        typed,
+        &before[skip..],
         ink,
-        limit.max(0.0),
+        limit + shift,
+        clip.clone(),
         aa,
     );
+    // The caret sits between what is typed and what is still being composed, at the
+    // byte index the input holds — which is what makes `Left` and a mid-word
+    // backspace visible at all.
+    if caret_visible && composing {
+        let caret_bottom = (baseline - font.descent_px).round().max(0.0) as u32;
+        let caret_top = caret_bottom.saturating_sub(font.line_h.ceil() as u32);
+        let x = (text_x + before_w - scroll).max(text_x) as u32 + s;
+        let right = (panel.x + panel.w).saturating_sub(caret_w);
+        band(
+            buf,
+            w,
+            h,
+            clip.clone(),
+            x.min(right),
+            caret_top,
+            caret_w,
+            caret_bottom.saturating_sub(caret_top),
+            ink,
+        );
+    }
     // A composition in flight is not committed text: it is drawn where it will
     // land, underlined, so the line shows what the input method still owns. With
     // no pre-edit the bar is exactly what it was.
@@ -554,14 +598,16 @@ fn draw_bar(
             baseline,
             preedit,
             ink,
-            (text_x + limit.max(0.0) - end).max(0.0),
+            (text_x + limit - end).max(0.0),
+            clip.clone(),
             aa,
         );
         let underline = (baseline - font.descent_px).round().max(0.0) as u32;
-        render::rect(
+        band(
             buf,
             w,
             h,
+            clip.clone(),
             end as u32,
             underline,
             (end_x - end).max(1.0) as u32,
@@ -569,6 +615,21 @@ fn draw_bar(
             ink,
         );
         end = end_x;
+    }
+    if !after.is_empty() {
+        render::draw_text(
+            buf,
+            w,
+            h,
+            font,
+            end,
+            baseline,
+            after,
+            ink,
+            (text_x + limit - end).max(0.0),
+            clip.clone(),
+            aa,
+        );
     }
     if !label.is_empty() {
         // Right-aligned and in the dimmer ink: it explains why a key did not
@@ -584,32 +645,56 @@ fn draw_bar(
             label,
             render::dim(render::FG_NORMAL, fade),
             width,
+            clip,
             aa,
         );
     }
-    let caret_w = 2 * s;
-    let caret_bottom = (baseline - font.descent_px).round().max(0.0) as u32;
-    let caret_h = font.line_h.ceil() as u32;
-    if caret_visible && composing && caret_bottom > 0 {
-        let caret_top = caret_bottom.saturating_sub(caret_h);
-        let caret_x = if typed.is_empty() && preedit.is_empty() {
-            text_x
-        } else {
-            end
-        } as u32
-            + s;
-        let right = (panel.x + panel.w).saturating_sub(caret_w);
-        render::rect(
-            buf,
-            w,
-            h,
-            caret_x.min(right),
-            caret_top,
-            caret_w,
-            caret_bottom.saturating_sub(caret_top),
-            ink,
-        );
+}
+
+/// A filled band, clipped to the rows a card has unfolded.
+#[allow(clippy::too_many_arguments)]
+fn band(
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    clip: std::ops::Range<u32>,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    color: render::Bgra,
+) {
+    let top = y.max(clip.start);
+    let bottom = (y + height).min(clip.end);
+    if bottom > top {
+        render::rect(buf, w, h, x, top, width, bottom - top, color);
     }
+}
+
+/// How far the input line is scrolled left, in buffer px, to keep the caret inside a
+/// bar `limit` px wide. The painter and the input method's cursor rectangle both
+/// need the same answer, so both ask here.
+pub fn caret_scroll(font: &PanelFont, input: &Input, limit: f32, preedit: &str, s: u32) -> f32 {
+    let at = input.caret().min(input.text().len());
+    let before = render::advance(font, &input.text()[..at]);
+    (before + render::advance(font, preedit) + (2 * s) as f32 - limit).max(0.0)
+}
+
+/// The byte to start drawing at, and the sub-character shift, that put `scroll`
+/// pixels off the left of a line: `scroll` is how far the caret would otherwise
+/// sit past the bar's right edge.
+fn scroll_to(font: &PanelFont, text: &str, scroll: f32) -> (usize, f32) {
+    let mut gone = 0.0;
+    for (at, ch) in text.char_indices() {
+        let step = render::advance(font, ch.encode_utf8(&mut [0; 4]));
+        // Keep one character back when the next would pass the scroll: a glyph
+        // that is only half off the edge is drawn, shifted, not dropped.
+        if gone + step > scroll {
+            return (at, scroll - gone);
+        }
+        gone += step;
+    }
+    (text.len(), (scroll - gone).max(0.0))
 }
 
 /// How one reply line is marked.
@@ -698,6 +783,7 @@ fn draw_row(
         row.text,
         fg,
         (card.w.saturating_sub(2 * inset)) as f32,
+        y..(y + font.row_h).min(bottom),
         aa,
     );
 }
@@ -1045,6 +1131,86 @@ mod tests {
         assert_eq!(up, settled, "the last frame is the idle bar");
     }
 
+    /// The line forms as the bar unfolds: at a third of the rise the text is not
+    /// floating above the card it belongs to, it is simply not painted yet.
+    #[test]
+    fn the_line_forms_with_the_bar() {
+        let f = font();
+        let mut scene = scene(&f, 300.0);
+        scene.transcript = Transcript::default();
+        scene.input.insert("what the bar is typing");
+        let (w, h) = (500u32, f.row_h);
+        let (bw, bh) = frame(w, h);
+        let paint_rise = |rise: f32| {
+            let mut buf = vec![0u8; (bw * bh * 4) as usize];
+            draw(
+                &mut buf,
+                bw,
+                bh,
+                &f,
+                &scene.transcript,
+                &scene.input,
+                &scene.viewport,
+                None,
+                None,
+                None,
+                true,
+                "",
+                "",
+                "",
+                Look::moving(State::Bar, State::Bar, 1.0, rise, 1.0),
+                None,
+                1,
+            );
+            buf
+        };
+        // Text is much brighter than the card's fill, so any column with a lit pixel
+        // is text or the caret.
+        let luma = |px: &[u8]| px[0] as u32 + px[1] as u32 + px[2] as u32;
+        let lit_rows = |buf: &[u8]| -> Vec<u32> {
+            (0..h)
+                .filter(|&y| (0..w).any(|x| luma(&buf[at(bw, x, y)..][..4]) > 400))
+                .collect()
+        };
+        let quarter = lit_rows(&paint_rise(0.25));
+        let half = lit_rows(&paint_rise(0.5));
+        let full = lit_rows(&paint_rise(1.0));
+        assert!(!full.is_empty(), "the line is on a settled bar");
+        assert!(
+            quarter.len() < half.len() && half.len() < full.len(),
+            "the line grows with the bar: {quarter:?} {half:?} {full:?}"
+        );
+        // Nothing is painted above the card's top: the fade is already all but full
+        // at these rises, so only the clip can explain a row being missing - which is
+        // what stops the text hovering over a bar that has not unfolded yet. (Below
+        // half the card is only the row's descender space, where there is no line to
+        // cut.)
+        let card_top = |rise: f32| -> u32 {
+            let card = card_of(
+                State::Bar,
+                &render::Panel {
+                    x: 0,
+                    y: 0,
+                    w,
+                    h,
+                    r: 0,
+                },
+                f.row_h,
+            );
+            let risen_h = 2.0 + (card.h as f32 - 2.0) * rise;
+            (card.y + card.h) - risen_h.round() as u32
+        };
+        let three_quarters = lit_rows(&paint_rise(0.75));
+        for (rise, rows) in [(0.5, &half), (0.75, &three_quarters)] {
+            let top = *rows.first().expect("some of the line has unfolded");
+            assert!(
+                top >= card_top(rise),
+                "text above the card at {rise}: {top} < {}",
+                card_top(rise)
+            );
+        }
+    }
+
     #[test]
     fn the_panel_floats_in_a_shadow_margin() {
         let f = font();
@@ -1284,6 +1450,162 @@ mod tests {
         assert!(
             later_bar[0] > crate::PAD,
             "a later character is further along: {later_bar:?}"
+        );
+    }
+
+    /// The caret is the input's own byte index, not the end of the line: without
+    /// that, `Left` moved the model's caret and nothing on screen moved with it.
+    #[test]
+    fn the_caret_sits_where_the_input_caret_is() {
+        let f = font();
+        let mut scene = scene(&f, 300.0);
+        scene.transcript = Transcript::default();
+        scene.input.insert("hello");
+        let (w, h) = (500u32, height_for(2 * f.row_h, &f, 1));
+        let (bw, bh) = frame(w, h);
+        // The caret's column in the bar: the pixel it paints that the line does not.
+        let caret_column = |input: &Input| {
+            let (mut with, without) = (vec![0u8; (bw * bh * 4) as usize], {
+                let mut b = vec![0u8; (bw * bh * 4) as usize];
+                draw(
+                    &mut b,
+                    bw,
+                    bh,
+                    &f,
+                    &scene.transcript,
+                    input,
+                    &scene.viewport,
+                    None,
+                    None,
+                    None,
+                    false,
+                    "",
+                    "",
+                    "",
+                    Look::settled(State::Bar),
+                    None,
+                    1,
+                );
+                b
+            });
+            draw(
+                &mut with,
+                bw,
+                bh,
+                &f,
+                &scene.transcript,
+                input,
+                &scene.viewport,
+                None,
+                None,
+                None,
+                true,
+                "",
+                "",
+                "",
+                Look::settled(State::Bar),
+                None,
+                1,
+            );
+            let bar_top = crate::PAD;
+            (crate::PAD..w - crate::PAD)
+                .filter(|&x| {
+                    (bar_top..h).any(|y| with[at(bw, x, y)..][..4] != without[at(bw, x, y)..][..4])
+                })
+                .max()
+                .expect("the caret paints")
+        };
+        let mut at_end = Input::default();
+        at_end.insert("hello");
+        let mut at_start = at_end.clone();
+        at_start.home();
+        let mut mid = at_end.clone();
+        mid.home();
+        for _ in 0..3 {
+            mid.right();
+        }
+        let (start, middle, end) = (
+            caret_column(&at_start),
+            caret_column(&mid),
+            caret_column(&at_end),
+        );
+        assert!(start < middle, "the caret follows left: {start} {middle}");
+        assert!(middle < end, "and right: {middle} {end}");
+    }
+
+    /// A question longer than the bar scrolls instead of running off the card, and
+    /// the caret stays inside the field where it can be seen.
+    #[test]
+    fn a_long_question_scrolls_to_keep_its_caret() {
+        let f = font();
+        let mut scene = scene(&f, 300.0);
+        scene.transcript = Transcript::default();
+        let mut input = Input::default();
+        input.insert(&"wide words keep coming ".repeat(8));
+        let (w, h) = (500u32, height_for(2 * f.row_h, &f, 1));
+        let (bw, bh) = frame(w, h);
+        let paint = |input: &Input, caret: bool| {
+            let mut buf = vec![0u8; (bw * bh * 4) as usize];
+            draw(
+                &mut buf,
+                bw,
+                bh,
+                &f,
+                &scene.transcript,
+                input,
+                &scene.viewport,
+                None,
+                None,
+                None,
+                caret,
+                "",
+                "",
+                "",
+                Look::settled(State::Bar),
+                None,
+                1,
+            );
+            buf
+        };
+        // A column carrying text: the ink is far brighter than the bar's own fill,
+        // so anything over the fill's luma is a glyph (or the caret).
+        let luma = |px: &[u8]| px[0] as u32 + px[1] as u32 + px[2] as u32;
+        let lit =
+            |buf: &[u8], x: u32| (crate::PAD..h).any(|y| luma(&buf[at(bw, x, y)..][..4]) > 400);
+        let end_frame = paint(&input, false);
+        // The line runs to the bar's right padding instead of stopping short: that
+        // was the "the input only takes so many characters" of a line that simply
+        // stopped being painted.
+        assert!(
+            (w - crate::PAD - 40..w - crate::PAD).any(|x| lit(&end_frame, x)),
+            "the line fills the bar"
+        );
+        assert!(
+            lit(&end_frame, crate::PAD + 1),
+            "and starts at its left edge"
+        );
+        // The caret is inside the field with the caret at the very end of a long
+        // line, which is the whole point of scrolling.
+        let with_caret = paint(&input, true);
+        let caret_column = (crate::PAD..w - crate::PAD)
+            .filter(|&x| {
+                (crate::PAD..h)
+                    .any(|y| with_caret[at(bw, x, y)..][..4] != end_frame[at(bw, x, y)..][..4])
+            })
+            .max()
+            .expect("the caret paints");
+        assert!(
+            caret_column <= w - crate::PAD,
+            "the caret stays inside the bar: {caret_column}"
+        );
+        // Home scrolls back, so the line moves under the caret rather than being
+        // cut off: the two frames are not the same picture.
+        let mut home = input.clone();
+        home.home();
+        assert_ne!(end_frame, paint(&home, false), "the line scrolled");
+        assert!(
+            lit(&paint(&home, false), crate::PAD + 1),
+            "still starts at the edge"
         );
     }
 

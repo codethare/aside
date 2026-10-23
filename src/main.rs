@@ -1920,16 +1920,20 @@ impl State {
             return;
         };
         let s = self.scale;
-        let before = self.input.text();
-        let max_w = self.text_width();
         let mo = render::SHADOW * s;
+        // The caret's own place, not the end of the line: a scrolled bar would put the
+        // candidate window past the panel otherwise.
+        let at = self.input.caret().min(self.input.text().len());
+        let limit = self.text_width();
+        let scroll = panel::caret_scroll(font, &self.input, limit, "", s);
         // No rail in the bar: the text starts at the padding.
-        let x = (mo + PAD * s) as f32 + render::measure(font, before, max_w);
+        let x =
+            (mo + PAD * s) as f32 + render::measure(font, &self.input.text()[..at], limit) - scroll;
         // Both offsets are byte offsets into the surrounding text.
         let caret = self.input.caret() as i32;
         // The bar is the last row of the panel, inside the shadow margin.
         let bar_top = mo + (self.height - panel::bar_height()) * s;
-        text_input.set_surrounding_text(before.to_string(), caret, caret);
+        text_input.set_surrounding_text(self.input.text().to_string(), caret, caret);
         text_input.set_cursor_rectangle(
             x as i32,
             bar_top as i32,
