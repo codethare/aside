@@ -54,7 +54,9 @@ rim, one lap every 1.4 seconds, until the answer begins.  The states are animate
 rather than snapped: opening takes 520 milliseconds -- a line spreads out of a
 point and the card unfolds up out of it -- and the first text grows the bar into the
 panel in 460, inside one buffer so the surface is resized once per state.  That
-growth is the reply's entrance: nothing plays after it.  Closing is the opening run backwards in 460 milliseconds, and the process
+growth is the reply's entrance: nothing plays after it.  A follow-up keeps the box
+it was asked from -- the panel does not shrink and grow again -- and the light runs
+on its bar's rim until the new answer starts.  Closing is the opening run backwards in 460 milliseconds, and the process
 exits when it has finished.  The expanded panel never exceeds the output height less 64 pixels, and
 scrolls inside that limit.
 .PP

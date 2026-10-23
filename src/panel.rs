@@ -23,6 +23,38 @@ pub enum State {
     Replies,
 }
 
+/// A pointer's selection, in characters: where it was anchored and where it has been
+/// dragged to. Either end may be the earlier one, so a drag upwards selects the
+/// same text as a drag downwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor: (usize, usize),
+    pub cursor: (usize, usize),
+}
+
+impl Selection {
+    /// The selection's two ends, earlier first.
+    pub fn ends(&self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.cursor {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+
+    /// The characters of `row` this selection covers: whole rows between the two
+    /// ends, and the anchored and dragged rows only in part.
+    pub fn columns(&self, row: usize, len: usize) -> Option<(usize, usize)> {
+        let ((r0, c0), (r1, c1)) = self.ends();
+        if row < r0 || row > r1 {
+            return None;
+        }
+        let from = if row == r0 { c0.min(len) } else { 0 };
+        let to = if row == r1 { c1.min(len) } else { len };
+        (from < to).then_some((from, to))
+    }
+}
+
 /// Which shape is being painted, where it is coming from, and how far it has got:
 /// `t = 1` and `rise = 1` is settled, anything less is a transition.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -104,9 +136,10 @@ fn draw_content(
     transcript: &Transcript,
     input: &Input,
     viewport: &Viewport,
-    // The rows the panel marks: a pointer's selection, or one line from the
-    // keyboard. Nothing when there is nothing to mark.
-    marked: Option<(usize, usize)>,
+    // A pointer's selection, in characters; `None` when the pointer has not chosen.
+    selection: Option<Selection>,
+    // The line the keyboard names.
+    highlight: Option<usize>,
     caret_visible: bool,
     preedit: &str,
     hint: &str,
@@ -151,7 +184,8 @@ fn draw_content(
             font,
             transcript,
             viewport,
-            marked,
+            selection,
+            highlight,
             card,
             card.y..(card.y + card.h),
             fade,
@@ -214,9 +248,10 @@ pub fn draw(
     transcript: &Transcript,
     input: &Input,
     viewport: &Viewport,
-    // The rows the panel marks: a pointer's selection, or one line from the
-    // keyboard. Nothing when there is nothing to mark.
-    marked: Option<(usize, usize)>,
+    // A pointer's selection, in characters; `None` when the pointer has not chosen.
+    selection: Option<Selection>,
+    // The line the keyboard names.
+    highlight: Option<usize>,
     caret_visible: bool,
     preedit: &str,
     // What the bar says instead of the input line: the prefix mode's instruction.
@@ -263,7 +298,8 @@ pub fn draw(
             transcript,
             input,
             viewport,
-            marked,
+            selection,
+            highlight,
             caret_visible,
             preedit,
             hint,
@@ -286,7 +322,8 @@ pub fn draw(
             transcript,
             input,
             viewport,
-            marked,
+            selection,
+            highlight,
             caret_visible,
             preedit,
             hint,
@@ -337,7 +374,7 @@ pub fn draw(
         // out of the bar with it instead of being wiped in place.
         let clip = replies.y..(replies.y + replies.h);
         draw_replies(
-            buf, w, font, transcript, viewport, marked, replies, clip, 1.0, aa, s,
+            buf, w, font, transcript, viewport, selection, highlight, replies, clip, 1.0, aa, s,
         );
     }
     render::body(buf, w, &bar, bar_tone);
@@ -371,7 +408,8 @@ pub fn draw(
         s,
     );
     // The working light, over the rim the bar has just painted: a request in flight
-    // is shown by the field's own edge, not by taking the field away.
+    // is shown by the field's own edge, not by taking the field away. It runs while
+    // the box stays up for a follow-up, so the box is never without a sign.
     if let Some(head) = head {
         render::orbit(buf, w, h, &bar, head, s);
     }
@@ -402,7 +440,8 @@ fn draw_replies(
     font: &PanelFont,
     transcript: &Transcript,
     viewport: &Viewport,
-    marked: Option<(usize, usize)>,
+    selection: Option<Selection>,
+    highlight: Option<usize>,
     card: &render::Panel,
     clip: std::ops::Range<u32>,
     fade: f32,
@@ -417,23 +456,28 @@ fn draw_replies(
         // The row's position inside the card is its place in the transcript less
         // how far the view has been scrolled: without the subtraction a long answer
         // is drawn below the card and nothing shows.
-        let y = card.y + row.y.saturating_sub(viewport.top);
-        if y + blocks.row_h <= clip.start || y >= clip.end {
+        // Signed on purpose: `saturating_sub` would clamp a partly scrolled row to
+        // the card's top and paint it over the row below, which is exactly the
+        // squashed pair of lines a scrolled view showed.
+        let y = card.y as i64 + row.y as i64 - viewport.top as i64;
+        if y < clip.start as i64 {
             continue;
         }
-        draw_row(
-            buf,
-            w,
-            font,
-            card,
-            row,
-            y,
-            marked.is_some_and(|(from, to)| (from..=to).contains(&index)),
-            clip.end,
-            fade,
-            aa,
-            s,
-        );
+        let y = y as u32;
+        if y >= clip.end {
+            continue;
+        }
+        // A row is either inside a pointer's selection — a band behind these
+        // characters — or it is the keyboard's line, inked. A pointer that has
+        // selected text wins, because that is what the copy would take.
+        let len = row.text.chars().count();
+        let columns = selection.and_then(|sel| sel.columns(index, len));
+        let mark = match columns {
+            Some(cols) => RowMark::Band(cols),
+            None if highlight == Some(index) => RowMark::Ink,
+            None => RowMark::None,
+        };
+        draw_row(buf, w, font, card, row, y, mark, clip.end, fade, aa, s);
     }
 }
 
@@ -554,8 +598,20 @@ fn draw_bar(
     }
 }
 
-/// One reply line: the text in its ink, brighter and 2 px in when it is the
-/// highlighted one. No rail, no band: `aside` has no list to mark.
+/// How one reply line is marked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowMark {
+    /// Nothing: the line is drawn like its neighbours.
+    None,
+    /// The keyboard's line: brighter ink, two pixels in.
+    Ink,
+    /// A pointer's selection: these characters, on a band of their own.
+    Band((usize, usize)),
+}
+
+/// One reply line: the text in its ink, marked as the keyboard or the pointer
+/// asked. The band is measured from the characters themselves, so a selection ends
+/// where the pointer said rather than at the end of the line.
 #[allow(clippy::too_many_arguments)] // a row is where it goes plus what it says
 fn draw_row(
     buf: &mut [u8],
@@ -564,20 +620,40 @@ fn draw_row(
     card: &render::Panel,
     row: &Row<'_>,
     y: u32,
-    highlighted: bool,
+    mark: RowMark,
     bottom: u32,
     fade: f32,
     aa: Subpixel,
     s: u32,
 ) {
-    // The highlighted line moves in by 2 px and takes the primary ink, so the mark
-    // is the text itself and nothing changes size.
-    let inset = crate::PAD * s + if highlighted { 2 * s } else { 0 };
+    // The keyboard's line moves in by 2 px and takes the primary ink, so that mark
+    // is the text itself and nothing changes size. A pointer's selection is a band
+    // under exactly the characters it covers, with the text in the primary ink on
+    // top of it.
+    let inset = crate::PAD * s + if mark == RowMark::Ink { 2 * s } else { 0 };
+    if let RowMark::Band((from, to)) = mark {
+        let text = row.text;
+        let prefix = |byte: usize| render::advance(font, &text[..byte]);
+        let start = card.x + inset + prefix(byte_at(text, from)) as u32;
+        let end = card.x + inset + prefix(byte_at(text, to)) as u32;
+        if end > start {
+            render::rect(
+                buf,
+                w,
+                bottom,
+                start,
+                y,
+                end - start,
+                (y + font.row_h).min(bottom) - y,
+                render::BG_SEL,
+            );
+        }
+    }
     let fg = render::dim(
-        if highlighted {
-            render::FG_SEL
-        } else {
+        if mark == RowMark::None {
             colours(row.kind)
+        } else {
+            render::FG_SEL
         },
         fade,
     );
@@ -594,6 +670,14 @@ fn draw_row(
         (card.w.saturating_sub(2 * inset)) as f32,
         aa,
     );
+}
+
+/// The byte offset of character `index` in `text`: the selection counts characters,
+/// the painter counts bytes.
+fn byte_at(text: &str, index: usize) -> usize {
+    text.char_indices()
+        .nth(index)
+        .map_or(text.len(), |(byte, _)| byte)
 }
 
 /// A reply's ink: the secondary one for what the model said, so a failure or a
@@ -688,7 +772,8 @@ mod tests {
         paint_highlighted(scene, w, h, None)
     }
 
-    fn paint_highlighted(scene: &Scene, w: u32, h: u32, marked: Option<(usize, usize)>) -> Vec<u8> {
+    /// One frame with a pointer selection.
+    fn paint_selected(scene: &Scene, w: u32, h: u32, selection: Selection) -> Vec<u8> {
         let f = font();
         let (bw, bh) = frame(w, h);
         let mut buf = vec![0u8; (bw * bh * 4) as usize];
@@ -700,6 +785,32 @@ mod tests {
             &scene.transcript,
             &scene.input,
             &scene.viewport,
+            Some(selection),
+            None,
+            true,
+            "",
+            "",
+            "",
+            Look::settled(State::Replies),
+            None,
+            1,
+        );
+        buf
+    }
+
+    fn paint_highlighted(scene: &Scene, w: u32, h: u32, marked: Option<usize>) -> Vec<u8> {
+        let f = font();
+        let (bw, bh) = frame(w, h);
+        let mut buf = vec![0u8; (bw * bh * 4) as usize];
+        draw(
+            &mut buf,
+            bw,
+            bh,
+            &f,
+            &scene.transcript,
+            &scene.input,
+            &scene.viewport,
+            None,
             marked,
             true,
             "",
@@ -760,6 +871,7 @@ mod tests {
                 &scene.transcript,
                 &scene.input,
                 &scene.viewport,
+                None,
                 None,
                 true,
                 "",
@@ -829,6 +941,7 @@ mod tests {
                 &scene.input,
                 &scene.viewport,
                 None,
+                None,
                 true,
                 "",
                 "",
@@ -873,6 +986,7 @@ mod tests {
                 &scene.transcript,
                 &scene.input,
                 &scene.viewport,
+                None,
                 None,
                 true,
                 "",
@@ -988,6 +1102,7 @@ mod tests {
                 &scene.input,
                 &scene.viewport,
                 None,
+                None,
                 true,
                 preedit,
                 "",
@@ -1034,6 +1149,7 @@ mod tests {
                 &scene.transcript,
                 &scene.input,
                 &scene.viewport,
+                None,
                 None,
                 caret,
                 "",
@@ -1086,6 +1202,7 @@ mod tests {
                 &scene.input,
                 &scene.viewport,
                 None,
+                None,
                 caret,
                 "",
                 "",
@@ -1126,7 +1243,7 @@ mod tests {
         let scene = scene(&f, 300.0);
         let (w, h) = sized(&scene, &f);
         let plain = paint_highlighted(&scene, w, h, None);
-        let lit = paint_highlighted(&scene, w, h, Some((0, 0)));
+        let lit = paint_highlighted(&scene, w, h, Some(0));
         let (bw, _) = frame(w, h);
         // Nothing in the margin changes: the mark is the text, so every pixel left
         // of the text column is identical with and without the highlight.
@@ -1219,6 +1336,7 @@ mod tests {
                 &scene.input,
                 &scene.viewport,
                 None,
+                None,
                 true,
                 "",
                 "",
@@ -1257,6 +1375,47 @@ mod tests {
                 "the bar's row is the card's bottom, mid-growth and settled"
             );
         }
+    }
+
+    /// The reported defect: a scrolled view drew the row that was half above the
+    /// card, and its descenders landed on the row below — two lines squashed into
+    /// one. A row that does not fit the card is dropped whole.
+    #[test]
+    fn a_half_scrolled_row_is_not_drawn() {
+        let f = font();
+        let mut scene = scene(&f, 60.0);
+        scene.transcript = Transcript::default();
+        scene.transcript.add_note(
+            "one two three four five six seven eight nine ten eleven twelve",
+            &f,
+            60.0,
+        );
+        let room = 3 * f.row_h;
+        let (w, h) = (500u32, height_for(room, &f, 1));
+        let (bw, _) = frame(w, h);
+        // Scrolled by half a row: the first row's band is above the card's top, and
+        // the second starts a half row down, inside the card.
+        scene.viewport = Viewport::new(transcript_px(h, &f, 1));
+        scene.viewport.top = f.row_h / 2;
+        let buf = paint(&scene, w, h);
+        let ink = |from: u32, to: u32| {
+            (crate::PAD..w - crate::PAD)
+                .flat_map(|x| (from..to).map(move |y| (x, y)))
+                .filter(|&(x, y)| buf[at(bw, x, y)..][..4][..3] != glass()[..3])
+                .count()
+        };
+        // Nothing of the dropped row's lower half is left in the card's first half
+        // row: that is the half line that used to sit squashed above the next one.
+        assert_eq!(
+            ink(0, f.row_h / 2),
+            0,
+            "the dropped row left nothing behind"
+        );
+        // The row below is drawn where its place says, a half row down.
+        assert!(
+            ink(f.row_h / 2, f.row_h + f.row_h / 2) > 0,
+            "the next row is drawn"
+        );
     }
 
     /// The reported defect: an answer taller than the box drew nothing at all,
@@ -1324,43 +1483,68 @@ mod tests {
         assert_eq!(px(w / 2, h - f.row_h), glass, "the bar starts below it");
     }
 
-    /// A selected range is marked row by row, and the rows outside it are not: the
-    /// pointer's way of naming lines paints exactly what the keyboard's does.
+    /// A pointer's selection is a band under the characters it names: the rows
+    /// between its ends whole, and the last one cut where the pointer stopped.
     #[test]
-    fn every_selected_row_is_inked() {
+    fn a_selection_is_a_band_under_its_characters() {
         let f = font();
-        let mut scene = scene(&f, 300.0);
-        for i in 0..4 {
-            scene.transcript.add_note(&format!("note {i}"), &f, 300.0);
-        }
+        // One block of many rows, so a row index is a row band with no gap in it.
+        let mut scene = scene(&f, 60.0);
+        scene.transcript = Transcript::default();
+        scene.transcript.add_note(
+            "one two three four five six seven eight nine ten eleven twelve",
+            &f,
+            60.0,
+        );
+        assert!(
+            scene.transcript.total_rows() >= 6,
+            "enough rows to select in"
+        );
         let (w, h) = (500u32, height_for(6 * f.row_h, &f, 1));
         let (bw, _) = frame(w, h);
         let plain = paint_highlighted(&scene, w, h, None);
-        let picked = paint_highlighted(&scene, w, h, Some((1, 3)));
-        // The lower half of the band: a descender from the row above can reach into
-        // its top pixels, and that ink belongs to the row above, not to this one.
-        let ink_in = |buf: &Vec<u8>, row: u32| {
-            let y0 = row * f.row_h + f.row_h / 2;
-            let y1 = row * f.row_h + f.row_h - 2;
-            (crate::PAD..crate::PAD + 60)
-                .flat_map(|x| (y0..y1).map(move |y| (x, y)))
-                .filter(|&(x, y)| buf[at(bw, x, y)..][..4][..3] != glass()[..3])
+        let picked = paint_selected(
+            &scene,
+            w,
+            h,
+            Selection {
+                anchor: (1, 0),
+                cursor: (3, 2),
+            },
+        );
+        // The band is translucent over the card, so what it looks like is the
+        // composite, not the token.
+        let mut band_px = render::premul(render::BG_PROMPT);
+        render::blend_px(
+            &mut band_px,
+            [render::BG_SEL[0], render::BG_SEL[1], render::BG_SEL[2]],
+            render::BG_SEL[3] as u32,
+        );
+        // Count the band itself, not the ink: the band is what a selection adds.
+        let band = |buf: &Vec<u8>, row: u32, x0: u32, x1: u32| {
+            (x0..x1)
+                .flat_map(|x| (row * f.row_h..(row + 1) * f.row_h).map(move |y| (x, y)))
+                .filter(|&(x, y)| buf[at(bw, x, y)..][..4] == band_px)
                 .count()
         };
-        // Rows 1..=3 are inked by the selection; row 0 and row 4 are untouched.
+        let row_all = (crate::PAD, w - crate::PAD);
+        assert_eq!(band(&picked, 0, row_all.0, row_all.1), 0, "row 0 is not");
         for row in 1..=3 {
-            assert_ne!(
-                ink_in(&picked, row),
-                ink_in(&plain, row),
-                "row {row} is marked"
-            );
+            assert!(band(&picked, row, row_all.0, row_all.1) > 0, "row {row} is");
         }
-        assert_eq!(ink_in(&picked, 0), ink_in(&plain, 0), "row 0 is not");
-        // Nothing moved: the two frames differ only in ink, never in where a line is.
-        let changed: Vec<u32> = (0..8)
-            .filter(|row| ink_in(&picked, *row) != ink_in(&plain, *row))
-            .collect();
-        assert_eq!(changed, [1, 2, 3], "exactly the three selected rows");
+        assert_eq!(band(&picked, 4, row_all.0, row_all.1), 0, "row 4 is not");
+        // The last row's band stops after its second character.
+        assert!(
+            band(&picked, 3, crate::PAD, crate::PAD + 30) > 0,
+            "it starts"
+        );
+        assert_eq!(
+            band(&picked, 3, crate::PAD + 120, w - crate::PAD),
+            0,
+            "and ends there"
+        );
+        // Nothing moved: without a selection there is no band at all.
+        assert_eq!(band(&plain, 2, row_all.0, row_all.1), 0);
     }
 
     #[test]
@@ -1421,6 +1605,7 @@ mod tests {
                 &scene.transcript,
                 &scene.input,
                 &scene.viewport,
+                None,
                 None,
                 true,
                 "",
@@ -1491,6 +1676,7 @@ mod tests {
                 &scene.transcript,
                 &scene.input,
                 &scene.viewport,
+                None,
                 None,
                 true,
                 "",

@@ -95,7 +95,9 @@ takes 520 ms: a line spreads out of a point at the centre, and once it has the
 panel's width the card unfolds up out of it. Sending a question moves nothing: the
 bar stays, and a light runs round its rim — one lap in 1.4 s — until the first text
 arrives, which grows the panel out of the bar in 460 ms — that growth is the reply's
-entrance, and nothing plays after it. Closing is the opening
+entrance, and nothing plays after it. A follow-up keeps the box it was asked from:
+the panel does not fold shut and open again, the light simply runs on its bar's rim
+until the new answer starts. Closing is the opening
 run backwards, over 460 ms: the card rolls up into a line, the line pulls in from
 both ends, and only then does the process exit.
 

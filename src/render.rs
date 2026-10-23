@@ -115,6 +115,11 @@ pub const LABEL_ACCENT: Bgra = bgra(0x2e, 0x4a, 0x5c, 0xff);
 /// The highlighted line's ink: opaque white, so the line the panel would copy is
 /// the brightest one on screen without a mark in the margin.
 pub const FG_SEL: Bgra = bgra(0xff, 0xff, 0xff, 0xff);
+/// Under a pointer's selection the text needs a band to sit on, not just brighter
+/// ink: the selection can be a few characters wide, where a brighter word reads as
+/// emphasis rather than as "this is selected". `#ffffff` on it is 6.77:1, so the
+/// selected text is also the readable one.
+pub const BG_SEL: Bgra = bgra(0x0b, 0x62, 0x85, 0xee);
 
 /// Horizontal pixel span `[x0, x1)` of the rounded panel at row `y`
 /// (x0 inclusive, x1 exclusive). Corner pixels fall outside the span;
@@ -748,6 +753,34 @@ pub fn draw_text(
 
 /// Advance width of `s` under the same face-chain rules as `draw_text`, capped
 /// at `max_w`. The layout uses it to decide where a row must break.
+/// Width of `s` with no cap: what a selection's band is measured with.
+pub(crate) fn advance(font: &crate::font::PanelFont, s: &str) -> f32 {
+    measure(font, s, f32::MAX)
+}
+
+/// How many bytes of `s` are to the left of `x` — the character a pointer is over,
+/// for a selection that is finer than a line.
+pub(crate) fn char_at(font: &crate::font::PanelFont, s: &str, x: f32) -> usize {
+    if x <= 0.0 {
+        return 0;
+    }
+    let mut width = 0.0;
+    for (i, ch) in s.char_indices() {
+        let Some((_, _, adv)) = font.glyph(ch) else {
+            continue;
+        };
+        // The nearer half of a character counts as that character.
+        if x < width + adv / 2.0 {
+            return i;
+        }
+        width += adv;
+        if x < width {
+            return i + ch.len_utf8();
+        }
+    }
+    s.len()
+}
+
 pub(crate) fn measure(font: &crate::font::PanelFont, s: &str, max_w: f32) -> f32 {
     let mut cx = 0.0;
     for ch in s.chars() {
@@ -1173,6 +1206,25 @@ mod tests {
     /// The band one pixel inside the rim is what makes the lit edge read as glass
     /// with thickness: under the bottom edge where the body shadows its lower wall,
     /// and absent at the top where there is no wall below it.
+    /// A selection is finer than a line: the pointer's x names the character under
+    /// it, so a band can start and end mid-line.
+    #[test]
+    fn a_pointer_x_names_a_character() {
+        let font = PanelFont::load(crate::font::SIZE).expect("system font available");
+        let text = "abc";
+        assert_eq!(char_at(&font, text, -10.0), 0, "left of the line");
+        assert_eq!(char_at(&font, text, 0.0), 0, "the first character");
+        assert_eq!(char_at(&font, text, 1000.0), text.len(), "past the line");
+        // Every boundary names a character boundary, never the middle of one.
+        for step in 0..40 {
+            let at = char_at(&font, text, step as f32 * 2.0);
+            assert!(text.is_char_boundary(at), "{at} splits a character");
+        }
+        // A wide character is named by the pointer over it.
+        let first = font.glyph('\u{4e2d}').expect("CJK glyph").2;
+        assert_eq!(char_at(&font, "\u{4e2d}\u{6587}", first * 0.75), 3);
+    }
+
     #[test]
     fn a_dark_band_sits_inside_the_bottom_rim() {
         let (rw, rh, r) = (120u32, 90u32, 12u32);

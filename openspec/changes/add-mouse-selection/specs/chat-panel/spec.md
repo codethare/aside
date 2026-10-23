@@ -83,16 +83,17 @@ line, or the lines a pointer selected, SHALL be drawn in the highlight ink.
 
 ### Requirement: Reply lines can be selected with the pointer
 
-A press of the left button on a reply line SHALL anchor a selection at that line;
-motion with the button down SHALL extend it over every line between, releasing
-SHALL leave it in place, and pressing again SHALL replace it. The selection SHALL
-cover whole lines, because a line is what the panel copies and what its keyboard
-highlight names. A press that is not on a reply line SHALL NOT start a selection,
-and SHALL move the panel instead if it moves. Lines inside the selection SHALL be
-drawn in the highlight ink, without moving any text.
+A press of the left button on a reply line SHALL anchor a selection at the
+**character** under the pointer; motion with the button down SHALL extend it to the
+character under the pointer, releasing SHALL leave it in place, and pressing again
+SHALL replace it. The selection SHALL be drawn as a band behind exactly the
+characters it covers — the rows between its ends whole, the first and last cut where
+the pointer named — with the text in the primary ink on top of it, and SHALL NOT
+move any text. A press that is not on a reply line SHALL NOT start a selection, and
+SHALL move the panel instead if it moves.
 
-`Alt+C` and `Ctrl+C` SHALL copy the selected lines, one per line, in the order they
-appear. `Esc` SHALL clear the selection before it cancels a stream or closes the
+`Alt+C` and `Ctrl+C` SHALL copy the selected characters: the first and last lines
+in part, the lines between whole, one line per line. `Esc` SHALL clear the selection before it cancels a stream or closes the
 panel, sending a question SHALL clear it, and a selection MUST NOT survive a turn
 change: the lines it named are no longer on screen.
 
@@ -100,6 +101,11 @@ change: the lines it named are no longer on screen.
 
 - **WHEN** the user presses on the first line of an answer, drags to its third line, releases, and presses `Ctrl+C`
 - **THEN** the clipboard holds those three lines, one per line, and nothing else
+
+#### Scenario: A selection can stop mid-word
+
+- **WHEN** the user drags from the fourth word of a line to the second word of the next
+- **THEN** only those characters are banded and copied, and the rest of each line is not
 
 #### Scenario: Escape clears before it closes
 

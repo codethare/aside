@@ -21,9 +21,10 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    the first text arrives the bar grows into the panel and only then does the reply
    card rise out of it. Opening the panel is a line spreading out of a point and
    unfolding up, not a snap.
-3. Ask a follow-up. The box holds the new answer alone — the earlier one is not on
-   screen — the bar does not move, and the answer still takes the earlier exchange
-   into account.
+3. Ask a follow-up. The panel does not change size at all: the light starts on its
+   bar's rim and the box stays where it was. The box then holds the new answer alone
+   — the earlier one is not on screen — and the answer still takes the earlier
+   exchange into account.
 4. `Up`, `Down`, `PageUp`, `PageDown` move the highlighted line and the view
    follows it; the highlighted line is brighter than its neighbours and starts
    2 px further right, and nothing is drawn in the left margin.
@@ -49,7 +50,8 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    open; a second `Esc` closes it.
 5d0. Put the pointer over the replies and turn the wheel (and slide two fingers):
    the transcript scrolls, three lines a notch, and it stops at both ends. Over the
-   bar, nothing scrolls.
+   bar, nothing scrolls. Mid-scroll, no two lines ever overlap: a line that is
+   partly scrolled out is not drawn at all.
 5d. Ask something long enough to overflow the box: the panel is the same size it
    was, the newest lines are the ones on screen, and scrolling reaches the older
    ones.

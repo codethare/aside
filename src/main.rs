@@ -272,7 +272,8 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         &transcript,
         &input,
         &viewport,
-        Some((0, 0)),
+        None,
+        Some(0),
         true,
         "",
         "",
@@ -358,6 +359,7 @@ fn run(
         height: panel::bar_height(),
         scale: 1,
         phase: Phase::Idle,
+        shape: panel::State::Bar,
         mode: Mode::Typing,
         drag: Drag::default(),
         press: None,
@@ -590,13 +592,12 @@ fn base_gap(output_h: Option<u32>) -> i32 {
     output_h.unwrap_or(FALLBACK_OUTPUT_H) as i32 * EDGE_SHARE / 100
 }
 
-/// The rows a mark covers: the pointer's selection, either end first, or the one
-/// line the keyboard highlight names.
-fn marked_rows(selection: Option<(usize, usize)>, highlight: usize) -> (usize, usize) {
-    match selection {
-        Some((a, b)) => (a.min(b), a.max(b)),
-        None => (highlight, highlight),
-    }
+/// The byte offset of character `index` in `text`: a selection counts characters,
+/// a slice counts bytes.
+fn byte_index(text: &str, index: usize) -> usize {
+    text.char_indices()
+        .nth(index)
+        .map_or(text.len(), |(byte, _)| byte)
 }
 
 /// A pointer's logical y turned into an offset in the replies card, in buffer
@@ -715,6 +716,17 @@ fn state_of(phase: Phase) -> panel::State {
     match phase {
         Phase::Idle | Phase::Thinking => panel::State::Bar,
         Phase::Answering => panel::State::Replies,
+    }
+}
+
+/// The shape a phase is drawn as, given the shape already on screen. A request in
+/// flight keeps the box it was asked from: shrinking to the bar and growing back on
+/// every follow-up reads as the panel folding itself shut, and the answer that is
+/// coming will fill the same box anyway. The working light says the request is out.
+fn shape_after(current: panel::State, to: Phase) -> panel::State {
+    match (current, to) {
+        (panel::State::Replies, Phase::Thinking) => panel::State::Replies,
+        _ => state_of(to),
     }
 }
 
@@ -861,6 +873,9 @@ struct State {
     layer: LayerSurface,
     /// Which of the three states the panel is in.
     phase: Phase,
+    /// The shape it is drawn as, which is not always the phase's own: a request
+    /// keeps the box a follow-up was asked from.
+    shape: panel::State,
     /// Who owns the keyboard: the input line, the prefix, or vim mode.
     mode: Mode,
     /// Moved by dragging, in logical px from the anchored place.
@@ -874,9 +889,9 @@ struct State {
     dragging: Option<(f64, f64)>,
     /// Whether the press that is down started a selection rather than a drag.
     selecting: bool,
-    /// The reply lines a pointer selected, anchor first or last: whole lines,
-    /// because a line is what the panel copies.
-    selection: Option<(usize, usize)>,
+    /// What a pointer selected, in characters: an anchor and where it has been
+    /// dragged to, either end first.
+    selection: Option<panel::Selection>,
     pointer: Option<wl_pointer::WlPointer>,
     /// The shape change in progress, if any.
     morph: Option<Morph>,
@@ -968,7 +983,7 @@ impl State {
         let (spread, rise) = self.tracks();
         match self.morph.filter(|_| self.morphing()) {
             Some(m) => panel::Look::moving(
-                state_of(m.to),
+                self.shape,
                 state_of(m.from),
                 self.morph_progress(),
                 rise,
@@ -977,7 +992,7 @@ impl State {
             None => panel::Look {
                 rise,
                 spread,
-                ..panel::Look::settled(state_of(self.phase))
+                ..panel::Look::settled(self.shape)
             },
         }
     }
@@ -988,13 +1003,14 @@ impl State {
         if self.phase == to {
             return;
         }
-        // Only a change of shape is a morph: the bar is the bar, whether or not a
-        // request is running, so sending a question moves nothing.
-        self.morph = (state_of(self.phase) != state_of(to)).then(|| Morph {
+        let shape = shape_after(self.shape, to);
+        // Only a change of shape is a morph.
+        self.morph = (self.shape != shape).then(|| Morph {
             from: self.phase,
             to,
             start: std::time::Instant::now(),
         });
+        self.shape = shape;
         self.phase = to;
         self.phase_start = std::time::Instant::now();
         self.apply_size();
@@ -1216,11 +1232,32 @@ impl State {
     /// What a press on the panel starts. On a reply line it anchors a selection;
     /// anywhere else it leaves the panel ready to be dragged, from the press itself.
     fn press_on(&mut self, position: (f64, f64)) {
-        let row = self.reply_row(position);
-        self.selecting = row.is_some();
-        self.selection = row.map(|row| (row, row));
-        self.dragging = row.is_none().then_some(position);
+        let spot = self.reply_spot(position);
+        self.selecting = spot.is_some();
+        self.selection = spot.map(|(row, ch)| panel::Selection {
+            anchor: (row, ch),
+            cursor: (row, ch),
+        });
+        self.dragging = spot.is_none().then_some(position);
         self.dirty = true;
+    }
+
+    /// Which reply character a pointer position is over: the row, and how many
+    /// characters of it are to the left of the pointer.
+    fn reply_spot(&self, position: (f64, f64)) -> Option<(usize, usize)> {
+        let row_index = self.reply_row(position)?;
+        let font = self.font.as_ref()?;
+        let blocks = layout::Blocks::new(font);
+        let row = self
+            .transcript
+            .rows(blocks)
+            .get(row_index)?
+            .text
+            .to_string();
+        // The pointer's x, less the card's inset, is the text it is over.
+        let inset = (render::SHADOW + crate::PAD) as f64;
+        let x = position.0 - inset;
+        Some((row_index, render::char_at(font, &row, x as f32)))
     }
 
     /// Which reply line a pointer position is on, if any: the same walk the
@@ -1238,8 +1275,11 @@ impl State {
     /// A motion with the button down extends a selection or carries the panel.
     fn motion_to(&mut self, position: (f64, f64)) {
         if self.selecting {
-            if let (Some(row), Some((anchor, _))) = (self.reply_row(position), self.selection) {
-                self.selection = Some((anchor, row));
+            if let (Some((row, ch)), Some(sel)) = (self.reply_spot(position), self.selection) {
+                self.selection = Some(panel::Selection {
+                    cursor: (row, ch),
+                    ..sel
+                });
             }
             self.dirty = true;
             return;
@@ -1397,12 +1437,6 @@ impl State {
         }
     }
 
-    /// The rows the panel marks: what a pointer selected, or the one line the
-    /// keyboard highlight names when nothing is selected.
-    fn marked(&self) -> Option<(usize, usize)> {
-        Some(marked_rows(self.selection, self.highlight))
-    }
-
     /// Copy the marked lines, one per line. The selection is what a pointer chose;
     /// without one it is the highlighted line, which is what `Alt+C` has always
     /// meant.
@@ -1410,18 +1444,29 @@ impl State {
         let Some(font) = self.font.as_ref() else {
             return;
         };
-        let (from, to) = self.marked().expect("always at least the highlight");
         let rows = self.transcript.rows(layout::Blocks::new(font));
-        let lines: Vec<&str> = rows
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| (from..=to).contains(i))
-            .map(|(_, row)| row.text)
-            .collect();
-        if lines.is_empty() {
+        // What the pointer chose, character for character; without a selection the
+        // whole line the keyboard names, which is what Home/End then Alt+C did before
+        // there was a pointer.
+        let text = match self.selection {
+            Some(sel) => {
+                let mut lines = Vec::new();
+                for (index, row) in rows.iter().enumerate() {
+                    let Some((from, to)) = sel.columns(index, row.text.chars().count()) else {
+                        continue;
+                    };
+                    lines.push(&row.text[byte_index(row.text, from)..byte_index(row.text, to)]);
+                }
+                lines.join("\n")
+            }
+            None => match rows.get(self.highlight) {
+                Some(row) => row.text.to_string(),
+                None => return,
+            },
+        };
+        if text.is_empty() {
             return;
         }
-        let text = lines.join("\n");
         if let Err(e) = clipboard::copy(&text) {
             let max_w = self.text_width();
             let State {
@@ -1529,7 +1574,7 @@ impl State {
         }
         // The shape this frame paints, and how far into it the panel has morphed.
         let look = self.look();
-        let marked = self.marked();
+        let selection = self.selection;
         let head = self.head();
         let stride = w as i32 * 4;
         let label = self.mode_label();
@@ -1568,7 +1613,8 @@ impl State {
             &self.transcript,
             &self.input,
             &self.viewport,
-            marked,
+            selection,
+            Some(self.highlight),
             typing,
             &self.ime.preedit,
             hint,
@@ -2576,15 +2622,65 @@ mod tests {
         }
     }
 
-    /// The marked rows: a pointer's selection normalised so either end can be the
-    /// anchor, or the one line the keyboard names when nothing is selected.
+    /// A follow-up keeps the box it was asked from: the shape a phase is drawn as is
+    /// the phase's own, except that a request keeps the answering panel up. Shrinking
+    /// to the bar and growing back on every follow-up read as the panel folding shut.
     #[test]
-    fn a_mark_is_a_normalised_range_or_the_keyboard_line() {
-        assert_eq!(marked_rows(Some((3, 1)), 5), (1, 3), "dragged upwards");
-        assert_eq!(marked_rows(Some((1, 3)), 5), (1, 3), "dragged downwards");
-        assert_eq!(marked_rows(Some((2, 2)), 5), (2, 2), "a click");
-        assert_eq!(marked_rows(None, 5), (5, 5), "the keyboard's line");
-        assert_eq!(marked_rows(Some((0, 1)), 9), (0, 1), "the pointer wins");
+    fn a_request_keeps_the_box_it_was_asked_from() {
+        assert_eq!(
+            shape_after(panel::State::Bar, Phase::Thinking),
+            panel::State::Bar
+        );
+        assert_eq!(
+            shape_after(panel::State::Replies, Phase::Thinking),
+            panel::State::Replies,
+            "a follow-up does not fold the panel shut"
+        );
+        assert_eq!(
+            shape_after(panel::State::Replies, Phase::Answering),
+            panel::State::Replies
+        );
+        assert_eq!(
+            shape_after(panel::State::Bar, Phase::Answering),
+            panel::State::Replies
+        );
+        assert_eq!(
+            shape_after(panel::State::Bar, Phase::Idle),
+            panel::State::Bar
+        );
+    }
+
+    /// A selection is finer than a line: the first and last rows are cut at the
+    /// characters the pointer named, and the rows between are whole.
+    #[test]
+    fn a_selection_is_cut_at_the_characters_it_names() {
+        let sel = panel::Selection {
+            anchor: (1, 4),
+            cursor: (3, 2),
+        };
+        assert_eq!(sel.columns(0, 10), None, "above the selection");
+        assert_eq!(
+            sel.columns(1, 10),
+            Some((4, 10)),
+            "from the anchor to the end"
+        );
+        assert_eq!(sel.columns(2, 10), Some((0, 10)), "whole rows between");
+        assert_eq!(sel.columns(3, 10), Some((0, 2)), "up to the cursor");
+        assert_eq!(sel.columns(4, 10), None, "below the selection");
+        // Dragged the other way, the same characters.
+        let back = panel::Selection {
+            anchor: (3, 2),
+            cursor: (1, 4),
+        };
+        for row in 0..5 {
+            assert_eq!(back.columns(row, 10), sel.columns(row, 10), "row {row}");
+        }
+        // A click selects nothing: an empty range is no selection at all.
+        let click = panel::Selection {
+            anchor: (2, 3),
+            cursor: (2, 3),
+        };
+        assert_eq!(click.columns(2, 10), None);
     }
 
     /// A configured size reaches the panel's own geometry: the bar, the box under it
