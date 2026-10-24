@@ -14,8 +14,8 @@ pub const fn bgra(r: u8, g: u8, b: u8, a: u8) -> Bgra {
 /// Spotlight panel corner radius (logical px), clamped to half the panel size.
 pub const CORNER_RADIUS: u32 = 12;
 
-/// Space reserved around the panel for its drop shadow (logical px). The buffer
-/// and the layer surface grow by it; the panel keeps its size and position.
+/// Space reserved around the panel for its drop shadow (logical px). The buffer and
+/// the window grow by it; the panel keeps its size and position.
 /// `plush`'s current margin.
 pub const SHADOW: u32 = 26;
 

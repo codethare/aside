@@ -41,12 +41,15 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    `Ctrl+d`/`Ctrl+u` half a page, `g`/`G` to the ends. `Space` selects and `Enter`
    copies and leaves, with `copied N lines` in the bar; `q` leaves without copying.
    No letter reaches the input line.
-5b3. `Alt+hjkl` moves the panel in every mode and `Alt+Ctrl+hjkl` ten times as far;
-   it stops at the screen edges.
-5c. Press the left button on the bar and move at once: the panel follows from the
-   first motion, in both directions, stays on screen, and does not change size
-   while it moves. A click without moving does nothing, and a new run starts where
-   the anchor puts it.
+5b3. `Alt+hjkl` does nothing: no letter moves the panel, and no letter reaches the
+   input line. The compositor's own move binding moves the window, and the panel
+   neither joins the movement nor resizes.
+5c. On each of sway, niri and river: run `aside` from a keybinding with the float
+   rule from the README. The window appears focused — typing reaches the input line
+   without a click — and running it again from the keybinding focuses the running
+   panel instead of opening a second one. Click a terminal: it gets the keyboard;
+   click the panel: it takes it back. `swaymsg kill` (or the compositor's close)
+   ends the process.
 5c1. Type `hello world`, press `Left` five times: the caret walks back through the
    text and `Backspace` deletes the character it just passed. `Home`/`End` jump to
    the ends, `Ctrl+Left`/`Ctrl+Right` by word, and the pre-edit of a Chinese input
@@ -94,7 +97,7 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 12. On a 1× output, then a 1.5× and a 2× output: text is the same logical size on
     each; above 1× there are no colour fringes on glyph edges.
 13. Resize the window while an answer is on screen: the text re-wraps to the new
-    width, and dragging it narrow or wide does not leave stray clipped glyphs.
+    width, and resizing it narrow or wide does not leave stray clipped glyphs.
 14. Time the first frame on a cold start (`time aside` with no transcript): it
     should be well under 50 ms after the compositor has the surface.
 15. Put a `wlmenu` frame next to an `aside --preview out.ppm` frame and check the

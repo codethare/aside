@@ -20,28 +20,25 @@ Typed input goes through
 so an input method (fcitx, ibus) can compose text.  Answers are plain wrapped
 text: there is no Markdown, code-block or table rendering.
 .PP
-The panel is a
-.B wlr\-layer\-shell
-surface on the overlay layer, anchored to the bottom of the output and centred,
-with on-demand keyboard focus: it takes the keyboard while it is focused and gives
-it back when another window is clicked, so it does not hold the session's typing,
-its bottom edge 38 per cent of the output height above the screen's bottom edge:
-the field lands just below the vertical centre and the replies grow upwards out
-of it.  The chrome is the one
+The panel is an ordinary window with no decorations and the application id
+.BR aside :
+the compositor focuses it, places it, and keeps it wherever its window rules say,
+so appearing and being summoned again both come with the keyboard and neither
+costs a click.  A tiling compositor needs a float rule.  The chrome is the one
 .BR plush (1)
 draws (and
 .BR wlmenu (1)
 draws once it catches up): a translucent body with a lit rim, a dark underside
 and a dark band inside it, within a 26-pixel drop shadow,
 and a 3-pixel scroll indicator at the right edge while the replies overflow.
-Pressing the left button on the bar and moving drags the panel in both directions
-from the first motion; it stays on the output and keeps its size, and where it was
-is never written down.  Pressing on a reply line and dragging selects whole lines,
-which \fBAlt+C\fP or \fBCtrl+C\fP copies one per line; \fBEsc\fP clears the
-selection before it closes the panel.
+Nothing the panel does moves its window, and no position is ever written down: the
+compositor's own move binding is where a position comes from.  Pressing on a reply
+line and dragging selects text, which \fBAlt+C\fP or \fBCtrl+C\fP copies one line
+per line of it; \fBEsc\fP clears the selection before it closes the panel.
 Two cards of one tone, 16 pixels apart: the replies above, the field below, in a
-box of fixed height -- as tall as the field's gap above the screen's bottom edge --
-so a longer answer scrolls inside it instead of growing the panel.  With the
+box of fixed height -- 38 per cent of the output's height, capped by the 64 rows a
+frame may draw -- so a longer answer scrolls inside it instead of growing the
+window.  With the
 pointer over the replies, the wheel and a two-finger slide scroll them: a notch is
 three lines, a continuous delta is taken as pixels.
 Only the model's text about the question just asked is drawn -- its answer, and a
@@ -129,10 +126,6 @@ key.  In this release that key is
 which enters copy mode; any other key leaves the prefix and does nothing.  While
 the prefix waits the bar takes no input, changes tone and reads
 \fBpress [ to enter copy mode\fP.
-.TP
-.B Alt+h ", " Alt+j ", " Alt+k ", " Alt+l
-Move the panel 16 pixels left, down, up or right, in every mode; ten times that
-with \fBCtrl\fP held.  The panel stays on the output.
 .TP
 .B "[", h ", " l ", " 0 ", " $ ", " j ", " k ", " w ", " b ", " g ", " G ", " Space ", " y
 Copy mode, entered with \fBCtrl+T\fP then \fB[\fP: \fBh\fP/\fBl\fP move a

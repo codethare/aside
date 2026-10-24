@@ -34,9 +34,9 @@ use smithay_client_toolkit::seat::pointer::{
 };
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::WaylandSurface;
-use smithay_client_toolkit::shell::wlr_layer::{
-    Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
-    LayerSurfaceConfigure,
+use smithay_client_toolkit::shell::xdg::XdgShell;
+use smithay_client_toolkit::shell::xdg::window::{
+    Window, WindowConfigure, WindowDecorations, WindowHandler,
 };
 use smithay_client_toolkit::shm::Shm;
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
@@ -59,10 +59,9 @@ const WIDTH: u32 = 640;
 /// How far up the screen the panel's bottom edge sits, as a share of the output
 /// height: just below the vertical centre, where the eye already is, instead of
 /// hugging the bottom edge. The panel hangs from there and grows upwards.
-const EDGE_SHARE: i32 = 38;
+const BOX_SHARE: u32 = 38;
 /// How tall the replies may be, as a multiple of that same gap: the field's own
 /// distance to the screen's bottom is the yardstick the panel grows by.
-const REPLY_SHARE: u32 = 1;
 /// How long `copied N lines` stays in the bar.
 const COPY_NOTE_MS: u64 = 1_200;
 /// How long a shape change takes at its shortest. The morph is the point, so it is
@@ -110,7 +109,6 @@ enum Key {
     Copy,
     Paste,
     /// `Alt+hjkl`: move the panel itself.
-    Window,
     Backspace,
     Delete,
     Left,
@@ -146,8 +144,6 @@ fn key_action(keysym: Keysym, alt: bool, ctrl: bool, has_text: bool) -> Key {
         Keysym::c if ctrl && !alt => Key::Copy,
         Keysym::v if ctrl && !alt => Key::Paste,
         Keysym::t if ctrl && !alt => Key::Prefix,
-        Keysym::h | Keysym::j | Keysym::k | Keysym::l if alt && !ctrl => Key::Window,
-        Keysym::h | Keysym::j | Keysym::k | Keysym::l if alt && ctrl => Key::Window,
         _ if has_text && plain => Key::Text,
         _ => Key::Ignore,
     }
@@ -322,33 +318,25 @@ fn run(
 
     let compositor = CompositorState::bind(&globals, &qh)
         .map_err(|e| format!("wl_compositor is missing: {e}"))?;
-    // A layer surface, not an ordinary window: the compositor places the panel by
-    // anchor and margin, and workspaces or tiling never move it.
+    // An ordinary window, not a layer surface: only a toplevel can be focused and
+    // placed by the compositor and its window rules, which is what a keyboard-summoned
+    // panel needs to be typed into without a click.
     let shell =
-        LayerShell::bind(&globals, &qh).map_err(|e| format!("wlr-layer-shell is missing: {e}"))?;
+        XdgShell::bind(&globals, &qh).map_err(|e| format!("xdg_wm_base is missing: {e}"))?;
     let shm = Shm::bind(&globals, &qh).map_err(|e| format!("wl_shm is missing: {e}"))?;
     let activation = ActivationState::bind(&globals, &qh).ok();
     let ime_manager = ime::bind(&globals, &qh);
 
     let surface = compositor.create_surface(&qh);
     surface.set_buffer_scale(1);
-    let layer = shell.create_layer_surface(&qh, surface, Layer::Overlay, Some(APP_ID), None);
-    // Anchored bottom and left: a layer-shell margin only applies to an anchored
-    // edge, and the panel is moved on both axes. With no right anchor the surface
-    // keeps its own width, and `left_margin` centres it.
-    layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT);
-    layer.set_margin(0, 0, bottom_margin(None, 0), 0);
-    // On demand, never exclusive: an exclusive layer surface puts the compositor's
-    // whole keyboard focus on the panel and refuses to give it to any other window
-    // until the layer goes away, so a terminal behind it could be clicked but not
-    // typed into. On demand takes the keyboard while the panel is focused and hands
-    // it back when another window is clicked.
-    layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
+    // No decorations: the panel is its own chrome, and a titlebar would sit on top of
+    // the shadow margin it draws for itself.
+    let window = shell.create_window(surface, WindowDecorations::None, &qh);
+    window.set_app_id(APP_ID);
+    window.set_title(APP_ID);
     // Collapsed to the bar. The first commit is buffer-less: it asks for the
     // configure, and nothing may be attached before that one arrives.
-    let (sw, sh) = surface_size((WIDTH, panel::bar_height()));
-    layer.set_size(sw, sh);
-    layer.commit();
+    window.commit();
     let pool_size = surface_size((WIDTH, FALLBACK_OUTPUT_H));
     let pool = SlotPool::new((pool_size.0 * pool_size.1 * 4) as usize, &shm)
         .map_err(|e| format!("cannot create the shm pool: {e}"))?;
@@ -368,10 +356,8 @@ fn run(
         phase: Phase::Idle,
         shape: panel::State::Bar,
         mode: Mode::Typing,
-        drag: Drag::default(),
         press: None,
         pointer_at: (0.0, 0.0),
-        dragging: None,
         selecting: false,
         selection: None,
         copy_cursor: (0, 0),
@@ -382,7 +368,6 @@ fn run(
         close_start: None,
         phase_start: std::time::Instant::now(),
         focused: false,
-        output_w: None,
         output_h: None,
         first_frame: true,
         configured: false,
@@ -390,7 +375,7 @@ fn run(
         painted: false,
         dirty: true,
         exit: false,
-        layer,
+        window,
         keyboard: None,
         modifiers: Modifiers::default(),
         font: None,
@@ -556,54 +541,6 @@ fn surface_size(panel: (u32, u32)) -> (u32, u32) {
     (panel.0 + 2 * render::SHADOW, panel.1 + 2 * render::SHADOW)
 }
 
-/// How far the panel has been dragged from its anchored place, in logical px.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Drag {
-    left: i32,
-    bottom: i32,
-}
-
-/// The visible gap under the panel, in logical px: a share of the output height,
-/// plus whatever the user dragged it by. Negative drags are clamped by the caller.
-fn edge_gap(output_h: Option<u32>, drag: i32) -> u32 {
-    (base_gap(output_h) + drag).max(render::SHADOW as i32) as u32
-}
-
-/// The layer surface's bottom margin: the visible gap minus the shadow margin it
-/// already carries.
-fn bottom_margin(output_h: Option<u32>, drag: i32) -> i32 {
-    edge_gap(output_h, drag) as i32 - render::SHADOW as i32
-}
-
-/// Where a drag leaves the surface horizontally: the centred place plus the drag,
-/// kept on the output so the panel cannot be pushed off either side.
-fn dragged_left(output_w: Option<u32>, sw: u32, drag: i32) -> i32 {
-    let room = output_w
-        .map(|ow| (ow as i32 - sw as i32).max(0))
-        .unwrap_or(i32::MAX / 2);
-    (left_margin(output_w, sw) + drag).clamp(0, room)
-}
-
-/// The bottom margin a drag asks for, clamped so the whole surface stays on the
-/// output: it cannot go under the bar's own shadow, nor above the top edge.
-fn dragged_bottom(output_h: Option<u32>, sh: u32, drag: i32) -> i32 {
-    let room = output_h
-        .map(|oh| (oh as i32 - sh as i32).max(0))
-        .unwrap_or(i32::MAX / 2);
-    bottom_margin(output_h, drag).clamp(0, room)
-}
-
-/// The drag offset that produces a bottom margin: the inverse of `dragged_bottom`,
-/// so `edge_gap` — and the cap derived from it — matches what is on screen.
-fn drag_for_bottom(output_h: Option<u32>, bottom: i32) -> i32 {
-    bottom + render::SHADOW as i32 - base_gap(output_h)
-}
-
-/// The gap the anchor asks for, before any drag.
-fn base_gap(output_h: Option<u32>) -> i32 {
-    output_h.unwrap_or(FALLBACK_OUTPUT_H) as i32 * EDGE_SHARE / 100
-}
-
 /// The byte offset of character `index` in `text`: a selection counts characters,
 /// a slice counts bytes.
 fn byte_index(text: &str, index: usize) -> usize {
@@ -632,15 +569,12 @@ enum Motion {
     Hover,
     /// Extend the selection the press started.
     Extend,
-    /// Carry the panel.
-    Drag,
 }
 
-fn motion_with(press: Option<(f64, f64)>, selecting: bool) -> Motion {
-    match (press, selecting) {
-        (None, _) => Motion::Hover,
-        (Some(_), true) => Motion::Extend,
-        (Some(_), false) => Motion::Drag,
+fn motion_with(press: Option<(f64, f64)>) -> Motion {
+    match press {
+        None => Motion::Hover,
+        Some(_) => Motion::Extend,
     }
 }
 
@@ -659,24 +593,6 @@ fn over_replies(panel_h: u32, y: f64) -> bool {
     let top = render::SHADOW as f64;
     let bar = top + (panel_h.saturating_sub(panel::bar_height())) as f64;
     y >= top && y < bar
-}
-
-/// The tallest the replies may get: the gap below the bar, or the room left above
-/// it when the panel has been dragged so high that the gap is most of the screen.
-fn reply_cap(output_h: Option<u32>, gap: u32) -> u32 {
-    let h = output_h.unwrap_or(FALLBACK_OUTPUT_H);
-    // What is left above the bar once the bar and the gap between the cards are
-    // on screen: the panel must never leave the output.
-    let chrome = panel::bar_height() + render::SEPARATION;
-    let room = h.saturating_sub(gap + render::SHADOW + chrome);
-    (gap * REPLY_SHARE).min(room)
-}
-
-/// Horizontal margin that centres the surface on the output.
-fn left_margin(output_w: Option<u32>, surface_w: u32) -> i32 {
-    output_w
-        .map(|ow| ((ow as i64 - surface_w as i64) / 2).max(0) as i32)
-        .unwrap_or(0)
 }
 
 /// The logical size a phase wants: idle and thinking are the bar, because a running
@@ -703,12 +619,13 @@ fn morph_size(from: Phase, to: Phase, output_h: Option<u32>) -> (u32, u32) {
     (fw.max(tw), fh.max(th))
 }
 
-/// How tall the replies card always is: the anchored gap, clamped by the room left
-/// above the bar and by the 64 rows the frame may draw.
+/// How tall the replies card always is: a share of the output, capped by the 64 rows
+/// one frame may draw. It is a size rather than a margin, because the compositor
+/// decides where the window goes and the box has to fit wherever that is.
 fn room_for_replies(output_h: Option<u32>) -> u32 {
-    let gap = edge_gap(output_h, 0);
+    let h = output_h.unwrap_or(FALLBACK_OUTPUT_H);
     let rows = layout::MAX_ROWS as u32 * panel::bar_height();
-    reply_cap(output_h, gap).min(rows)
+    (h * BOX_SHARE / 100).min(rows)
 }
 
 /// An ease-out over one track of an opening or closing.
@@ -886,21 +803,6 @@ fn copy_key(keysym: Keysym, ctrl: bool, page: i64) -> Option<CopyKey> {
 
 /// How far one `Alt+hjkl` press moves the panel, in logical px: one padding step,
 /// and ten of them with `Ctrl` held, so the keyboard can cross the screen.
-const WINDOW_STEP: i32 = 16;
-
-/// The panel movement a chord asks for, in logical px: `dx` right, `dy` up.
-/// `hjkl` are spatial here, which is why the transcript's own keys moved.
-fn window_move(keysym: Keysym, ctrl: bool) -> Option<(i32, i32)> {
-    let step = if ctrl { WINDOW_STEP * 10 } else { WINDOW_STEP };
-    match keysym {
-        Keysym::h => Some((-step, 0)),
-        Keysym::l => Some((step, 0)),
-        Keysym::j => Some((0, -step)),
-        Keysym::k => Some((0, step)),
-        _ => None,
-    }
-}
-
 /// The panel's three states. Their sizes are fixed by the spec; this is the
 /// state machine behind them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -940,7 +842,7 @@ struct State {
     painted: bool,
     dirty: bool,
     exit: bool,
-    layer: LayerSurface,
+    window: Window,
     /// Which of the three states the panel is in.
     phase: Phase,
     /// The shape it is drawn as, which is not always the phase's own: a request
@@ -948,16 +850,12 @@ struct State {
     shape: panel::State,
     /// Who owns the keyboard: the input line, the prefix, or copy mode.
     mode: Mode,
-    /// Moved by dragging, in logical px from the anchored place.
-    drag: Drag,
     /// Where the left button came down, while it is down: the drag's own origin, so
     /// the panel follows from the first motion rather than from the second.
     press: Option<(f64, f64)>,
     /// Where the pointer is, latest first.
     pointer_at: (f64, f64),
-    /// The pointer position the drag last reported, while one is running.
-    dragging: Option<(f64, f64)>,
-    /// Whether the press that is down started a selection rather than a drag.
+    /// Whether the press that is down started a selection.
     selecting: bool,
     /// What a pointer selected, in characters: an anchor and where it has been
     /// dragged to, either end first.
@@ -978,7 +876,6 @@ struct State {
     /// Whether the compositor has handed this surface the keyboard.
     focused: bool,
     /// Logical size of the output the panel is on, once it has reported one.
-    output_w: Option<u32>,
     output_h: Option<u32>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     modifiers: Modifiers,
@@ -1106,14 +1003,10 @@ impl State {
         (self.phase == Phase::Thinking).then(|| orbit_at(self.phase_start.elapsed().as_millis()))
     }
 
-    /// Give the surface the size its phase wants, centred on the output, and
-    /// re-wrap once if the width changed.
+    /// Give the window the size its phase wants, and re-wrap once if the width
+    /// changed. The size is a buffer's size: where the window goes is not ours.
     fn apply_size(&mut self) {
         let (w, h) = self.target_size();
-        let (sw, sh) = surface_size((w, h));
-        let (left, bottom) = self.margins(sw, sh);
-        self.layer.set_margin(0, 0, bottom, left);
-        self.layer.set_size(sw, sh);
         let width_changed = w != self.width;
         if width_changed || h != self.height {
             self.width = w;
@@ -1131,25 +1024,17 @@ impl State {
         }
     }
 
-    /// Where the surface goes: centred plus the drag, kept on the output.
-    fn margins(&self, sw: u32, sh: u32) -> (i32, i32) {
-        let left = dragged_left(self.output_w, sw, self.drag.left);
-        let bottom = dragged_bottom(self.output_h, sh, self.drag.bottom);
-        (left, bottom)
-    }
-
-    /// Remember the output's logical size: it centres the panel and caps its height.
+    /// Remember the output's logical height: the reply box is a share of it.
     fn note_output(&mut self, output: &wl_output::WlOutput) {
         let Some(info) = self.output_state.info(output) else {
             return;
         };
-        let Some((w, h)) = info.logical_size else {
+        let Some((_w, h)) = info.logical_size else {
             return;
         };
-        if w <= 0 || h <= 0 {
+        if h <= 0 {
             return;
         }
-        self.output_w = Some(w as u32);
         self.output_h = Some(h as u32);
         self.apply_size();
     }
@@ -1209,7 +1094,7 @@ impl State {
                 &self.qh,
                 RequestData {
                     seat_and_serial: None,
-                    surface: Some(self.layer.wl_surface().clone()),
+                    surface: Some(self.window.wl_surface().clone()),
                     app_id: Some(APP_ID.to_string()),
                     udata: (),
                 },
@@ -1304,7 +1189,7 @@ impl State {
     }
 
     /// What a press on the panel starts. On a reply line it anchors a selection;
-    /// anywhere else it leaves the panel ready to be dragged, from the press itself.
+    /// anywhere else it does nothing. The window is the compositor's to move.
     fn press_on(&mut self, position: (f64, f64)) {
         let spot = self.reply_spot(position);
         self.selecting = spot.is_some();
@@ -1312,7 +1197,6 @@ impl State {
             anchor: (row, ch),
             cursor: (row, ch),
         });
-        self.dragging = spot.is_none().then_some(position);
         self.dirty = true;
     }
 
@@ -1346,50 +1230,19 @@ impl State {
         self.transcript.row_at(y, blocks)
     }
 
-    /// A motion extends a selection or carries the panel — but only while the
-    /// button is down. A pointer merely passing over the replies selects nothing:
-    /// that was the reported bug, a hover painting text as if it had been dragged.
+    /// A motion extends a selection — but only while the button is down. A pointer
+    /// merely passing over the replies selects nothing, and nothing the panel does
+    /// moves its window: that is the compositor's.
     fn motion_to(&mut self, position: (f64, f64)) {
-        match motion_with(self.press, self.selecting) {
-            Motion::Hover => {}
-            Motion::Drag => self.drag_to(position),
-            Motion::Extend => {
-                if let (Some((row, ch)), Some(sel)) = (self.reply_spot(position), self.selection) {
-                    self.selection = Some(panel::Selection {
-                        cursor: (row, ch),
-                        ..sel
-                    });
-                }
-                self.dirty = true;
-            }
+        if motion_with(self.press) == Motion::Hover {
+            return;
         }
-    }
-
-    /// Move the panel by the pointer's delta since the drag began. The margins are
-    /// the only way to move a layer surface; the drag is an offset from the
-    /// anchored place, clamped to the output by `margins`.
-    fn drag_to(&mut self, position: (f64, f64)) {
-        let Some(from) = self.dragging else { return };
-        // Up on screen is further from the bottom edge, so the bottom margin grows
-        // as the pointer's y shrinks.
-        let (dx, dy) = (position.0 - from.0, from.1 - position.1);
-        self.move_panel(dx.round() as i32, dy.round() as i32);
-        self.dragging = Some(position);
-    }
-
-    /// Move the panel by `(dx, dy)` logical px, clamped to the output. The one path
-    /// for both the pointer and the keyboard: the clamped margins are turned back
-    /// into an offset, so the gap the cap is derived from is the gap on screen.
-    fn move_panel(&mut self, dx: i32, dy: i32) {
-        let (sw, sh) = surface_size((self.width, self.height));
-        let centred = left_margin(self.output_w, sw);
-        let left = dragged_left(self.output_w, sw, self.drag.left.saturating_add(dx));
-        self.drag.left = left - centred;
-        let bottom = dragged_bottom(self.output_h, sh, self.drag.bottom.saturating_add(dy));
-        self.drag.bottom = drag_for_bottom(self.output_h, bottom);
-        // The cap is a share of the gap, so a move can change how tall the panel may
-        // grow: size it again before the margins go out.
-        self.apply_size();
+        if let (Some((row, ch)), Some(sel)) = (self.reply_spot(position), self.selection) {
+            self.selection = Some(panel::Selection {
+                cursor: (row, ch),
+                ..sel
+            });
+        }
         self.dirty = true;
     }
 
@@ -1416,14 +1269,6 @@ impl State {
     /// What a key means while copy mode owns the keyboard: tmux's table, a cursor
     /// in the replies, and a selection that is the same one the pointer writes.
     fn on_copy_key(&mut self, event: &KeyEvent) {
-        // The window chords work here too: reading is when the panel gets in the
-        // way most.
-        if self.modifiers.alt
-            && let Some((dx, dy)) = window_move(event.keysym, self.modifiers.ctrl)
-        {
-            self.move_panel(dx, dy);
-            return;
-        }
         let Some(font) = self.font.as_ref() else {
             return;
         };
@@ -1785,15 +1630,15 @@ impl State {
             head,
             self.scale,
         );
-        self.layer
+        self.window
             .wl_surface()
             .damage_buffer(0, 0, w as i32, h as i32);
-        if let Err(e) = buffer.attach_to(self.layer.wl_surface()) {
+        if let Err(e) = buffer.attach_to(self.window.wl_surface()) {
             eprintln!("aside: cannot attach the frame: {e}");
             self.exit = true;
             return;
         }
-        self.layer.commit();
+        self.window.commit();
         self.painted = true;
         self.buffer = Some(buffer);
     }
@@ -1862,11 +1707,6 @@ impl State {
             Key::PageDown => self.move_highlight(self.page_rows()),
             Key::Copy => self.copy_highlight(),
             Key::Paste => self.paste_clipboard(),
-            Key::Window => {
-                if let Some((dx, dy)) = window_move(event.keysym, self.modifiers.ctrl) {
-                    self.move_panel(dx, dy);
-                }
-            }
             Key::Backspace => {
                 self.input.backspace();
                 self.after_typing();
@@ -2022,7 +1862,7 @@ impl CompositorHandler for State {
             return;
         }
         self.scale = scale;
-        self.layer.wl_surface().set_buffer_scale(scale as i32);
+        self.window.wl_surface().set_buffer_scale(scale as i32);
         // A different density means different glyphs and different wrapping.
         if let Ok(font) = PanelFont::load(font::size() * scale as f32) {
             self.font = Some(font);
@@ -2086,9 +1926,10 @@ impl CompositorHandler for State {
     }
 }
 
-impl LayerShellHandler for State {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
-        // The compositor closed us: exit rather than live with no way to be seen.
+impl WindowHandler for State {
+    fn request_close(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _window: &Window) {
+        // The compositor asked us to close: exit rather than live with no way to be
+        // seen.
         self.exit = true;
     }
 
@@ -2096,8 +1937,8 @@ impl LayerShellHandler for State {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _layer: &LayerSurface,
-        _configure: LayerSurfaceConfigure,
+        _window: &Window,
+        _configure: WindowConfigure,
         _serial: u32,
     ) {
         self.configured = true;
@@ -2167,7 +2008,7 @@ impl SeatHandler for State {
         // The text-input object belongs to a seat, so it is created when one
         // turns up rather than at startup.
         if let Some(manager) = self.ime_manager.clone() {
-            let surface = self.layer.wl_surface().clone();
+            let surface = self.window.wl_surface().clone();
             self.text_input = Some(ime::attach(&manager, &seat, &surface, qh));
             self.report_cursor();
         }
@@ -2192,7 +2033,6 @@ impl SeatHandler for State {
             pointer.release();
             // A device that went away mid-drag leaves no press behind.
             self.press = None;
-            self.dragging = None;
         }
     }
 
@@ -2210,7 +2050,7 @@ impl KeyboardHandler for State {
         _raw: &[u32],
         _keysyms: &[Keysym],
     ) {
-        if self.layer.wl_surface() == surface
+        if self.window.wl_surface() == surface
             && let Some(text_input) = self.text_input.as_ref()
         {
             self.focused = true;
@@ -2228,7 +2068,7 @@ impl KeyboardHandler for State {
         surface: &wl_surface::WlSurface,
         _serial: u32,
     ) {
-        if self.layer.wl_surface() == surface {
+        if self.window.wl_surface() == surface {
             self.focused = false;
             // Stop composing, or an input method keeps a pre-edit open while the
             // panel is not focused.
@@ -2297,7 +2137,7 @@ impl ActivationHandler for State {
 
     fn new_token(&mut self, token: String, _data: &RequestData<()>) {
         if let Some(activation) = self.activation.as_ref() {
-            activation.activate::<State>(self.layer.wl_surface(), token);
+            activation.activate::<State>(self.window.wl_surface(), token);
         }
     }
 }
@@ -2322,7 +2162,7 @@ impl PointerHandler for State {
         events: &[PointerEvent],
     ) {
         for event in events {
-            if &event.surface != self.layer.wl_surface() {
+            if &event.surface != self.window.wl_surface() {
                 continue;
             }
             self.pointer_at = event.position;
@@ -2335,7 +2175,6 @@ impl PointerHandler for State {
                 }
                 PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
                     self.press = None;
-                    self.dragging = None;
                     // The selection stays where it was chosen; the gesture that made
                     // it is over, so a later hover cannot extend it.
                     self.selecting = false;
@@ -2344,7 +2183,6 @@ impl PointerHandler for State {
                 // behind too, or the next hover would carry it on.
                 PointerEventKind::Leave { .. } => {
                     self.press = None;
-                    self.dragging = None;
                     self.selecting = false;
                 }
                 PointerEventKind::Motion { .. } => self.motion_to(event.position),
@@ -2468,12 +2306,9 @@ mod tests {
         assert_eq!(size_for(Phase::Answering, Some(1080)), answering);
         // Before the output reports, a 1080-pixel one is assumed.
         assert_eq!(size_for(Phase::Answering, None), answering);
-        // A tiny output cannot make the room negative.
-        assert_eq!(
-            size_for(Phase::Answering, Some(10)).1,
-            bar + render::SEPARATION
-        );
-        // The row cap bounds the box as well as the viewport: past ~5000 px the gap
+        // A tiny output asks for a tiny box, never a negative one.
+        assert_eq!(room_for_replies(Some(10)), 3);
+        // The row cap bounds the box as well as the viewport: past ~5000 px the share
         // alone would allow more rows than a frame may draw.
         let tall = Some(8000u32);
         assert_eq!(
@@ -2483,41 +2318,29 @@ mod tests {
         );
     }
 
-    /// The bar sits a share of the output height above the bottom edge, and the
-    /// height cap is derived from the same number.
+    /// The reply box is a share of the output, and the same share of a short output:
+    /// the number is a size now, not a margin under an anchor.
     #[test]
-    fn the_bar_sits_a_share_of_the_output_up_the_screen() {
-        for (output, gap) in [(1080u32, 410u32), (1440, 547), (600, 228)] {
-            assert_eq!(edge_gap(Some(output), 0), gap, "38 % of {output}");
-            // The surface margin is the gap less the shadow margin it carries.
-            assert_eq!(
-                bottom_margin(Some(output), 0),
-                (gap - render::SHADOW) as i32
-            );
-            // A drag moves the gap, and with it the cap.
-            assert_eq!(edge_gap(Some(output), 100), gap + 100);
-            // The box is the gap, whatever the transcript holds.
+    fn the_reply_box_is_a_share_of_the_output() {
+        let bar = panel::bar_height();
+        for (output, share) in [(1080u32, 410u32), (1440, 547), (600, 228)] {
+            assert_eq!(room_for_replies(Some(output)), share, "38 % of {output}");
+            // The window is the bar, the gap between the cards and that box.
             let (_, h) = size_for(Phase::Answering, Some(output));
             assert_eq!(
                 h,
-                panel::bar_height() + render::SEPARATION + gap,
+                bar + render::SEPARATION + share,
                 "the panel is its bar, the gap between the cards and the replies"
             );
         }
-        // Too small an output cannot make the margin negative.
-        assert_eq!(edge_gap(Some(10), 0), render::SHADOW);
-        assert_eq!(bottom_margin(Some(10), 0), 0);
-        // Dragged so high that the gap is most of the screen: the room above the
-        // bar clamps the cap instead, and the panel still fits.
-        let gap = edge_gap(Some(1080), 500);
-        let cap = reply_cap(Some(1080), gap);
-        let chrome = panel::bar_height() + render::SEPARATION;
+        // The rows a frame may draw bound it on a tall screen, however tall it is.
         assert_eq!(
-            cap,
-            1080 - gap - render::SHADOW - chrome,
-            "clamped by the room above"
+            room_for_replies(Some(8000)),
+            layout::MAX_ROWS as u32 * bar,
+            "never more than the rows the frame may draw"
         );
-        assert!(chrome + cap <= 1080 - gap);
+        // And a screen too short to hold a share still gets a box, not a panic.
+        assert_eq!(room_for_replies(Some(0)), 0);
     }
 
     /// `Ctrl+T` opens the prefix, and the prefix is one key wide: `[` goes to copy
@@ -2585,10 +2408,8 @@ mod tests {
     #[test]
     fn a_hover_selects_nothing() {
         let down = Some((10.0, 10.0));
-        assert_eq!(motion_with(None, true), Motion::Hover, "a stale flag");
-        assert_eq!(motion_with(None, false), Motion::Hover);
-        assert_eq!(motion_with(down, true), Motion::Extend);
-        assert_eq!(motion_with(down, false), Motion::Drag);
+        assert_eq!(motion_with(None), Motion::Hover, "a stale selecting flag");
+        assert_eq!(motion_with(down), Motion::Extend, "the button is down");
     }
 
     /// The copy note counts the lines that went out, and a single line says so.
@@ -2613,66 +2434,24 @@ mod tests {
         assert_eq!(copied_lines(&three, &rows), 3, "three lines");
     }
 
-    /// The window chords: `Alt+hjkl` a padding step, `Alt+Ctrl+hjkl` ten of them,
-    /// and nothing else in the Alt row moves the panel.
+    /// Nothing in the key table moves the window: the compositor's window rules and
+    /// its own move binding are the only things that do. `Alt` is still the copy.
     #[test]
-    fn the_window_moves_by_chord() {
-        assert_eq!(window_move(Keysym::h, false), Some((-16, 0)));
-        assert_eq!(window_move(Keysym::l, false), Some((16, 0)));
-        assert_eq!(window_move(Keysym::j, false), Some((0, -16)));
-        assert_eq!(window_move(Keysym::k, false), Some((0, 16)));
-        assert_eq!(window_move(Keysym::h, true), Some((-160, 0)));
-        assert_eq!(window_move(Keysym::k, true), Some((0, 160)));
-        for keysym in [Keysym::n, Keysym::p, Keysym::g, Keysym::a, Keysym::Escape] {
-            assert_eq!(window_move(keysym, false), None, "{keysym:?}");
+    fn no_key_moves_the_window() {
+        for (alt, ctrl) in [(true, false), (true, true), (false, true)] {
+            for keysym in [Keysym::h, Keysym::j, Keysym::k, Keysym::l] {
+                let action = key_action(keysym, alt, ctrl, true);
+                assert!(
+                    action == Key::Ignore,
+                    "{keysym:?} alt={alt} ctrl={ctrl} is {action:?}"
+                );
+            }
         }
-        // The chords reach the key table as a window move, and `Alt+C` is still the
-        // copy.
-        assert_eq!(key_action(Keysym::h, true, false, true), Key::Window);
-        assert_eq!(key_action(Keysym::j, true, true, true), Key::Window);
+        // Unmodified they type, which is what a letter is for.
+        assert_eq!(key_action(Keysym::h, false, false, true), Key::Text);
+        assert_eq!(key_action(Keysym::h, true, false, true), Key::Ignore);
+        assert_eq!(key_action(Keysym::j, true, true, true), Key::Ignore);
         assert_eq!(key_action(Keysym::c, true, false, true), Key::Copy);
-    }
-
-    /// A drag moves the surface, but never off the output.
-    #[test]
-    fn a_drag_stays_on_the_output() {
-        let (output, surface) = (Some(1920u32), 688u32);
-        let centred = dragged_left(output, surface, 0);
-        assert_eq!(centred, (1920 - 688) / 2);
-        assert_eq!(dragged_left(output, surface, 100), centred + 100);
-        // Far past either edge: clamped to the output, not pushed off it.
-        assert_eq!(dragged_left(output, surface, -10_000), 0);
-        assert_eq!(
-            dragged_left(output, surface, 10_000),
-            (1920 - 688),
-            "the right edge stays on screen"
-        );
-        // With no output size yet there is nothing to centre against, and the drag
-        // still cannot go negative.
-        assert_eq!(dragged_left(None, surface, 100), 100);
-        assert_eq!(dragged_left(None, surface, -50), 0);
-        // Vertically: the surface cannot be pushed off the top either.
-        let sh = 200u32;
-        assert_eq!(dragged_bottom(Some(1080), sh, 10_000), 1080 - sh as i32);
-        assert_eq!(dragged_bottom(Some(1080), sh, -10_000), 0);
-        // The offset and the painted margin always agree, clamped or not: the cap is
-        // derived from the gap the user can see.
-        for drag in [-500, -20, 0, 40, 400, 5000] {
-            let bottom = dragged_bottom(Some(1080), sh, drag);
-            let offset = drag_for_bottom(Some(1080), bottom);
-            assert_eq!(
-                bottom_margin(Some(1080), offset),
-                bottom,
-                "drag {drag} disagrees with its margin"
-            );
-        }
-        // A drag up grows the gap, and with it the cap; a drag down shrinks both.
-        let base = bottom_margin(Some(1080), 0);
-        assert_eq!(bottom_margin(Some(1080), -100), base - 100);
-        assert!(
-            reply_cap(Some(1080), edge_gap(Some(1080), 100))
-                > reply_cap(Some(1080), edge_gap(Some(1080), -100))
-        );
     }
 
     /// The wheel scrolls over the replies and nowhere else.
@@ -2937,11 +2716,12 @@ mod tests {
         assert_eq!(bar, font::row_h_for(size), "the bar is one row of the text");
         let (_, h) = size_for(Phase::Answering, Some(1080));
         assert_eq!(h, bar + render::SEPARATION + room_for_replies(Some(1080)));
-        // The room is the gap clamped by the rows a frame may draw, so a very tall
-        // output stops at the row cap rather than at the gap.
+        // The room is a share of the output clamped by the rows a frame may draw, so
+        // a tall enough output stops at the row cap rather than at the share.
+        assert_eq!(room_for_replies(Some(3000)), 1140, "38 % of 3000");
         assert_eq!(
-            room_for_replies(Some(3000)),
-            (layout::MAX_ROWS as u32 * bar).min(reply_cap(Some(3000), edge_gap(Some(3000), 0))),
+            room_for_replies(Some(6000)),
+            layout::MAX_ROWS as u32 * bar,
             "the row cap is expressed in rows of this size"
         );
         assert!(font::row_h_for(30.0) > bar, "a larger size is a taller row");
