@@ -45,8 +45,11 @@ change.
    question you sent is kept for the request and drawn nowhere.
 5. **Frame cost is per visible row**, never per transcript row. Wrapping happens
    once per delta and once per resize; re-wrapping on every frame is a bug.
-6. **Zero dependencies beyond the six in `Cargo.toml`.** Ask before adding one;
-   prefer deleting code to adding a crate.
+6. **Zero dependencies beyond the seven in `Cargo.toml`.** Ask before adding one;
+   prefer deleting code to adding a crate. `pulldown-cmark` is the only one that
+   parses rather than draws, it is pinned exactly, and the pin is the control: this
+   crate has no security advisory path, and 0.13.5 was released to fix a panic
+   reachable from thirteen bytes of model output.
 7. **Every failure is visible and exits.** No protocol error may become a busy
    loop, and no error path may leave a process with no way to be seen.
 
@@ -86,7 +89,9 @@ change.
 
 - No complex-script shaping: Arabic, Devanagari and Thai render unshaped.
 - No `wp_fractional_scale_v1`; scale is whatever integer `wl_output.scale` says.
-- No Markdown, code blocks or tables: answers are plain wrapped text.
+- A markdown subset only: tables, task lists, raw HTML, footnotes, strikethrough
+  and images' URLs are drawn as the characters the model sent, a code block is not
+  syntax highlighted, and emphasis has no slanted face of its own.
 - The sandbox does not filter the network: the provider sees the question.
 - `wl-copy` keeps a process alive holding whatever was copied to it.
 - `wl-paste` is read once, when `Ctrl+V` is pressed; what it returns lives in the

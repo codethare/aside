@@ -31,6 +31,14 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    rather than appearing on the line before it.
 2b. Ask something the provider answers almost at once (a bare `hi`): the reply
    arrives with no light on the rim at any point — not a flash of one.
+2c. Ask something that comes back as markdown: "show me a C loop that retries on
+   EAGAIN, with a list and a heading". The code block is monospace on a tinted
+   band, its lines stay aligned and a long line wraps inside the block; the list
+   has bullets and a wrapped item hangs under its own text; a heading is bold with
+   an empty row above it; `**bold**` is brighter and `` `code` `` is monospace, and
+   neither shows its asterisks or backticks. Ask for a table: the pipes and dashes
+   are drawn as typed, and no text is missing. Copy a line out of the code block:
+   the clipboard holds the code, not the fences.
 3. Ask a follow-up. The panel does not change size at all: the light starts on its
    bar's rim and the box stays where it was. The box then holds the new answer alone
    — the earlier one is not on screen — and the answer still takes the earlier

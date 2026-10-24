@@ -108,6 +108,9 @@ const _: () = assert!(SEPARATION > SHADOW_REACH_UP);
 /// The bar while the prefix mode waits: the field's tone pushed towards the accent,
 /// so a mode that swallows the next key is visible before it is read.
 pub const BG_MODE: Bgra = bgra(0x2e, 0x4a, 0x5c, 0xdc);
+/// Behind a fenced block's rows: the card's own tone, one step darker, so code reads
+/// as a panel inside the panel without an edge of its own.
+pub const BG_CODE: Bgra = bgra(0x1e, 0x1e, 0x22, 0xff);
 /// Prompt label accent: a 4px rail on the input bar's left edge (option F); a
 /// deep slate blue that carries the emphasis while staying harmonious with the
 /// gray bar and apart from the selection blue.

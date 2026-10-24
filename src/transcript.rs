@@ -2,7 +2,8 @@
 //! entry, and what may be sent back to the provider.
 
 use crate::font::PanelFont;
-use crate::layout::{Blocks, Lines};
+use crate::layout::Blocks;
+use crate::markdown::Layout;
 use crate::provider::{Role, Turn};
 
 /// Most of one answer the panel keeps. A provider can stream far more than a
@@ -29,8 +30,9 @@ pub struct Entry {
     /// The turn's text as it arrived. Kept so the rows can be laid out again for
     /// a new panel width without guessing the wrapping back from the rows.
     pub text: String,
-    /// That text, wrapped for the current width.
-    pub lines: Lines,
+    /// That text, laid out for the current width: an answer as markdown, a note or
+    /// a failure as plain rows.
+    pub lines: Layout,
     /// False while an answer is streaming, and after it was cancelled or cut off
     /// by a dropped connection.
     pub complete: bool,
@@ -57,6 +59,14 @@ pub struct Transcript {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Row<'a> {
     pub text: &'a str,
+    /// The styles over `text`, as byte ranges: the markup is never in the row.
+    pub spans: &'a [crate::layout::Span],
+    /// Left offset of this row, in buffer px.
+    pub indent: u32,
+    /// A fenced block's row, which is tinted behind its text.
+    pub code: bool,
+    /// A block quote's row, which carries a rail.
+    pub quote: bool,
     pub kind: Kind,
     /// Buffer-pixel top of this row.
     pub y: u32,
@@ -88,7 +98,7 @@ impl Transcript {
         self.entries.push(Entry {
             kind,
             text: String::new(),
-            lines: Lines::default(),
+            lines: Layout::default(),
             complete,
             truncated: false,
             y,
@@ -123,7 +133,7 @@ impl Transcript {
     /// the provider still gets it, the box does not.
     fn retire(entries: &mut [Entry], start: usize) {
         for entry in &mut entries[..start] {
-            entry.lines = Lines::default();
+            entry.lines = Layout::default();
             entry.h = 0;
             entry.y = 0;
         }
@@ -148,12 +158,13 @@ impl Transcript {
         for entry in &mut self.entries[start..] {
             if entry.kind == Kind::Question {
                 // Not drawn, so never laid out: no rows, no height, no gap.
-                entry.lines = Lines::default();
+                entry.lines.clear();
                 entry.h = 0;
                 entry.y = y;
                 continue;
             }
-            entry.lines = Lines::wrap(&entry.text, font, max_w);
+            entry.lines.clear();
+            entry.lines.update(&entry.text, font, max_w);
             entry.h = entry.block_h(blocks);
             if entry.h == 0 {
                 entry.y = y;
@@ -198,13 +209,12 @@ impl Transcript {
         let (take, cut) = split_at_char_boundary(text, room);
         if !take.is_empty() {
             entry.text.push_str(take);
-            entry.lines.push(take, font, max_w);
         }
+        entry.lines.update(&entry.text, font, max_w);
         if cut {
             entry.truncated = true;
             // One visible mark that the rest was dropped, rather than a silent cut.
-            entry.lines.push(" \u{2026}", font, max_w);
-            entry.lines.finish();
+            entry.lines.mark("\u{2026}", font, max_w);
         }
         self.settle(blocks);
     }
@@ -212,7 +222,6 @@ impl Transcript {
     /// The answer ended normally.
     pub fn finish_answer(&mut self, font: &PanelFont) {
         if let Some(i) = self.open.take() {
-            self.entries[i].lines.finish();
             self.entries[i].complete = true;
             self.settle(Blocks::new(font));
         }
@@ -222,8 +231,7 @@ impl Transcript {
     /// it is not sent back to the provider as if it were an answer.
     pub fn cancel(&mut self, note: &str, font: &PanelFont, max_w: f32) {
         let blocks = Blocks::new(font);
-        if let Some(i) = self.open.take() {
-            self.entries[i].lines.finish();
+        if self.open.take().is_some() {
             self.settle(blocks);
             self.add_note(note, font, max_w);
         }
@@ -235,8 +243,7 @@ impl Transcript {
         self.close_open(blocks);
         let i = self.push(Kind::Error, true, blocks);
         self.entries[i].text.push_str(message);
-        self.entries[i].lines.push(message, font, max_w);
-        self.entries[i].lines.finish();
+        self.entries[i].lines.update(message, font, max_w);
         self.settle(blocks);
     }
 
@@ -245,14 +252,12 @@ impl Transcript {
         let blocks = Blocks::new(font);
         let i = self.push(Kind::Note, true, blocks);
         self.entries[i].text.push_str(text);
-        self.entries[i].lines.push(text, font, max_w);
-        self.entries[i].lines.finish();
+        self.entries[i].lines.update(text, font, max_w);
         self.settle(blocks);
     }
 
     fn close_open(&mut self, blocks: Blocks) {
-        if let Some(i) = self.open.take() {
-            self.entries[i].lines.finish();
+        if self.open.take().is_some() {
             self.settle(blocks);
         }
     }
@@ -262,9 +267,13 @@ impl Transcript {
     pub fn rows(&self, blocks: Blocks) -> Vec<Row<'_>> {
         let mut out = Vec::new();
         for entry in &self.entries[self.current_start()..] {
-            for (i, row) in entry.lines.visible_rows().enumerate() {
+            for (i, line) in entry.lines.rows().enumerate() {
                 out.push(Row {
-                    text: row,
+                    text: &line.text,
+                    spans: &line.spans,
+                    indent: line.indent,
+                    code: line.code,
+                    quote: line.quote,
                     kind: entry.kind,
                     y: entry.y + i as u32 * blocks.row_h,
                     block: (entry.y, entry.h),
@@ -279,7 +288,7 @@ impl Transcript {
     pub fn row_y(&self, index: usize, blocks: Blocks) -> Option<u32> {
         let mut left = index;
         for entry in &self.entries[self.current_start()..] {
-            let rows = entry.lines.total_rows();
+            let rows = entry.lines.len();
             if left < rows {
                 return Some(entry.y + left as u32 * blocks.row_h);
             }
@@ -295,7 +304,7 @@ impl Transcript {
     pub fn row_at(&self, y: u32, blocks: Blocks) -> Option<usize> {
         let mut index = 0;
         for entry in &self.entries[self.current_start()..] {
-            let rows = entry.lines.total_rows();
+            let rows = entry.lines.len();
             if rows == 0 {
                 continue;
             }
@@ -313,18 +322,21 @@ impl Transcript {
     /// The next word's start after `(row, ch)`, crossing lines: a word starts after
     /// whitespace, and a CJK character starts one of its own, which is where the
     /// wrapper breaks too. Clamps to the end of the transcript when there is none.
+    ///
+    /// The column is counted in characters, like the selection and the copy cursor:
+    /// a byte offset would move a CJK cursor three columns per word.
     pub fn word_forward(&self, (row, ch): (usize, usize), blocks: Blocks) -> (usize, usize) {
         let rows = self.rows(blocks);
         let from = (row.min(rows.len().saturating_sub(1)), ch);
         for (index, row) in rows.iter().enumerate() {
-            for (at, c) in row.text.char_indices() {
-                if (index, at) > from && starts_word(c, prev_of(row.text, at)) {
-                    return (index, at);
+            for (column, (at, c)) in row.text.char_indices().enumerate() {
+                if (index, column) > from && starts_word(c, prev_of(row.text, at)) {
+                    return (index, column);
                 }
             }
         }
         let last = rows.len().saturating_sub(1);
-        (last, rows.get(last).map_or(0, |r| r.text.len()))
+        (last, rows.get(last).map_or(0, |r| r.text.chars().count()))
     }
 
     /// The start of the word before `(row, ch)`, crossing lines. Stops at the first
@@ -334,9 +346,9 @@ impl Transcript {
         let from = (row.min(rows.len().saturating_sub(1)), ch);
         let mut found = (0, 0);
         for (index, row) in rows.iter().enumerate() {
-            for (at, c) in row.text.char_indices() {
-                if (index, at) < from && starts_word(c, prev_of(row.text, at)) {
-                    found = (index, at);
+            for (column, (at, c)) in row.text.char_indices().enumerate() {
+                if (index, column) < from && starts_word(c, prev_of(row.text, at)) {
+                    found = (index, column);
                 }
             }
         }
@@ -351,7 +363,7 @@ impl Transcript {
     pub fn total_rows(&self) -> usize {
         self.entries[self.current_start()..]
             .iter()
-            .map(|e| e.lines.total_rows())
+            .map(|e| e.lines.len())
             .sum()
     }
 
@@ -414,7 +426,7 @@ impl Entry {
     /// no text takes no room at all, so an answer that has not started yet cannot
     /// leave a gap under its question.
     fn block_h(&self, blocks: Blocks) -> u32 {
-        self.lines.total_rows() as u32 * blocks.row_h
+        self.lines.len() as u32 * blocks.row_h
     }
 
     /// Text length of this entry's rows, which is what the cap counts. The rows
@@ -685,27 +697,30 @@ mod tests {
         let blocks = Blocks::new(&f);
         let mut t = Transcript::default();
         t.ask("q", &f);
-        // Two rows: the second is a different line of the same block.
-        t.delta("alpha beta\ngamma delta", &f, 400.0);
+        // Two rows of one list: markdown's soft break would join them into one
+        // paragraph, and a list is what keeps them tight and separate.
+        t.delta("- alpha beta\n- gamma delta", &f, 400.0);
         t.finish_answer(&f);
         let rows: Vec<String> = t.rows(blocks).iter().map(|r| r.text.to_string()).collect();
-        assert_eq!(rows, ["alpha beta", "gamma delta"], "two lines as written");
+        assert_eq!(rows, ["\u{2022} alpha beta", "\u{2022} gamma delta"]);
 
-        // Forwards: the start of each word, and across the line boundary.
-        let mut at = (0, 0);
-        for want in [(0, 6), (1, 0), (1, 6)] {
+        // Forwards: the start of each word, and across the line boundary. Every row
+        // carries its bullet, so the text starts two characters in.
+        let mut at = (0, 2);
+        // Every row carries its bullet, and the bullet is text: it is a word too.
+        for want in [(0, 8), (1, 0), (1, 2), (1, 8)] {
             at = t.word_forward(at, blocks);
             assert_eq!(at, want, "word start");
         }
         assert_eq!(
             t.word_forward(at, blocks),
-            (1, 11),
-            "the end when there is more"
+            (1, 13),
+            "one past the last character when there is no more"
         );
 
         // Backwards: the same starts, in reverse, and from the middle of a word.
-        let mut at = (1, 11);
-        for want in [(1, 6), (1, 0), (0, 6), (0, 0)] {
+        let mut at = (1, 13);
+        for want in [(1, 8), (1, 2), (1, 0), (0, 8), (0, 2)] {
             at = t.word_back(at, blocks);
             assert_eq!(at, want, "word start backwards");
         }
@@ -716,13 +731,15 @@ mod tests {
         c.ask("q", &f);
         c.delta("\u{4e2d}\u{6587}\u{6d4b}\u{8bd5}", &f, 400.0);
         c.finish_answer(&f);
+        // Columns are characters, not bytes: a three-byte ideograph is one column,
+        // which is what the selection and the copy cursor count in.
         assert_eq!(
             c.word_forward((0, 0), blocks),
-            (0, 3),
+            (0, 1),
             "the second ideograph"
         );
-        assert_eq!(c.word_forward((0, 3), blocks), (0, 6), "the third");
-        assert_eq!(c.word_back((0, 6), blocks), (0, 3));
+        assert_eq!(c.word_forward((0, 1), blocks), (0, 2), "the third");
+        assert_eq!(c.word_back((0, 2), blocks), (0, 1));
     }
 
     /// A row knows where it is, because the viewport scrolls in pixels.

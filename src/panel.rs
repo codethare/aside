@@ -10,7 +10,7 @@
 //! squares.
 
 use crate::font::PanelFont;
-use crate::layout::{self, Blocks, Input, MAX_ROWS, Viewport};
+use crate::layout::{self, Blocks, Input, MAX_ROWS, Style, Viewport};
 use crate::render::{self, Bgra, Subpixel};
 use crate::transcript::{Kind, Row, Transcript};
 
@@ -754,13 +754,46 @@ fn draw_row(
     // The keyboard's line moves in by 2 px and takes the primary ink, so that mark
     // is the text itself and nothing changes size. A pointer's selection is a band
     // under exactly the characters it covers, with the text in the primary ink on
-    // top of it.
-    let inset = crate::PAD * s + if mark == RowMark::Ink { 2 * s } else { 0 };
+    // top of it. A row's own indentation comes first: a list hangs, a quote steps in.
+    let pad = crate::PAD * s;
+    let inset = pad + row.indent + if mark == RowMark::Ink { 2 * s } else { 0 };
+    let left = card.x + inset;
+    let right = (card.x + card.w).saturating_sub(pad);
+    let body = (y + font.row_h).min(bottom) - y.min(bottom);
+    if row.code && body > 0 {
+        // A fenced block is tinted behind its own rows, inside the card's padding the
+        // way the selection band is: no edge, no second card.
+        render::rect(
+            buf,
+            w,
+            bottom,
+            card.x + pad,
+            y,
+            right.saturating_sub(card.x + pad),
+            body,
+            render::dim(render::BG_CODE, fade),
+        );
+    }
+    if row.quote && body > 0 {
+        // A quote is marked by a rail at its own left edge, in the ink the panel uses
+        // for labels.
+        render::rect(
+            buf,
+            w,
+            bottom,
+            left.saturating_sub(pad / 2 * 3),
+            y,
+            s.max(1),
+            body,
+            render::dim(render::LABEL_ACCENT, fade),
+        );
+    }
+    let mono_ref = font.mono();
+    let mono = mono_ref.as_deref();
     if let RowMark::Band((from, to)) = mark {
         let text = row.text;
-        let prefix = |byte: usize| render::advance(font, &text[..byte]);
-        let start = card.x + inset + prefix(byte_at(text, from)) as u32;
-        let end = card.x + inset + prefix(byte_at(text, to)) as u32;
+        let start = left + row_advance(font, row, byte_at(text, from), mono) as u32;
+        let end = left + row_advance(font, row, byte_at(text, to), mono) as u32;
         if end > start {
             render::rect(
                 buf,
@@ -769,7 +802,7 @@ fn draw_row(
                 start,
                 y,
                 end - start,
-                (y + font.row_h).min(bottom) - y,
+                body,
                 render::dim(render::BG_SEL, fade),
             );
         }
@@ -777,7 +810,7 @@ fn draw_row(
     if let Some(ch) = cursor {
         // One pixel wide and as tall as the line: a caret in the text, not a box
         // around it.
-        let x = card.x + inset + render::advance(font, &row.text[..byte_at(row.text, ch)]) as u32;
+        let x = left + row_advance(font, row, byte_at(row.text, ch), mono) as u32;
         render::rect(
             buf,
             w,
@@ -785,32 +818,122 @@ fn draw_row(
             x,
             y,
             s.max(1),
-            (y + font.row_h).min(bottom) - y,
+            body,
             render::dim(render::FG_SEL, fade),
         );
     }
-    let fg = render::dim(
-        if mark == RowMark::None {
-            colours(row.kind)
-        } else {
-            render::FG_SEL
-        },
-        fade,
-    );
-    // Clipped at the card's bottom edge, so ink never runs past its own card.
-    render::draw_text(
-        buf,
-        w,
-        bottom,
-        font,
-        (card.x + inset) as f32,
-        render::row_baseline(font, y),
-        row.text,
-        fg,
-        (card.w.saturating_sub(2 * inset)) as f32,
-        y..(y + font.row_h).min(bottom),
-        aa,
-    );
+    // A marked row is one ink, so a selection reads as one piece; otherwise each span
+    // has its own, and a code span is measured and drawn in the code face. The bytes
+    // between spans are drawn too, in the row's plain ink: a span is an overlay, not
+    // the row.
+    let marked = mark != RowMark::None;
+    let base = render::row_baseline(font, y);
+    let rows = y..(y + font.row_h).min(bottom);
+    let mut x = left as f32;
+    let limit = right as f32;
+    let mut at = 0;
+    for span in row.spans {
+        let start = span.range.start.clamp(at, row.text.len());
+        let end = span.range.end.clamp(start, row.text.len());
+        if start > at {
+            x = render::draw_text(
+                buf,
+                w,
+                bottom,
+                font,
+                x,
+                base,
+                &row.text[at..start],
+                render::dim(ink_of(Style::Plain, row.kind, marked), fade),
+                (limit - x).max(0.0),
+                rows.clone(),
+                aa,
+            );
+        }
+        if end > start {
+            let face = face_of(font, mono, span.style);
+            x = render::draw_text(
+                buf,
+                w,
+                bottom,
+                face,
+                x,
+                base,
+                &row.text[start..end],
+                render::dim(ink_of(span.style, row.kind, marked), fade),
+                (limit - x).max(0.0),
+                rows.clone(),
+                aa,
+            );
+        }
+        at = end;
+    }
+    if at < row.text.len() {
+        render::draw_text(
+            buf,
+            w,
+            bottom,
+            font,
+            x,
+            base,
+            &row.text[at..],
+            render::dim(ink_of(Style::Plain, row.kind, marked), fade),
+            (limit - x).max(0.0),
+            rows,
+            aa,
+        );
+    }
+}
+
+/// The face a span is drawn in: a code span takes the monospace chain, and falls back
+/// to the text face when the system has none rather than drawing nothing. The code
+/// face is resolved once per row, not once per span.
+fn face_of<'a>(font: &'a PanelFont, mono: Option<&'a PanelFont>, style: Style) -> &'a PanelFont {
+    match style {
+        Style::Code => mono.unwrap_or(font),
+        _ => font,
+    }
+}
+
+/// A span's ink. `marked` is the keyboard's line or a pointer's selection, which take
+/// one ink so the mark reads as one piece.
+fn ink_of(style: Style, kind: Kind, marked: bool) -> Bgra {
+    if marked {
+        return render::FG_SEL;
+    }
+    match style {
+        Style::Plain | Style::Em | Style::Link => colours(kind),
+        // Strong and code are the brighter ink; emphasis keeps its own weight because
+        // the chain has no slanted face to give it.
+        Style::Strong | Style::Code => render::FG_PROMPT,
+    }
+}
+
+/// Advance of the first `byte` bytes of a row, each span measured in its own face, so
+/// a selection's band ends exactly where its text does even when that text is code.
+fn row_advance(font: &PanelFont, row: &Row<'_>, byte: usize, mono: Option<&PanelFont>) -> f32 {
+    let byte = byte.min(row.text.len());
+    let mut at = 0;
+    let mut width = 0.0;
+    for span in row.spans {
+        if at < byte && at < span.range.start {
+            let end = span.range.start.min(byte);
+            width += render::advance(font, &row.text[at..end]);
+            at = end;
+        }
+        if at < byte {
+            let end = span.range.end.min(byte);
+            width += render::advance(face_of(font, mono, span.style), &row.text[at..end]);
+            at = end;
+        }
+        if at >= byte {
+            break;
+        }
+    }
+    if at < byte {
+        width += render::advance(font, &row.text[at..byte]);
+    }
+    width
 }
 
 /// The byte offset of character `index` in `text`: the selection counts characters,

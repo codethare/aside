@@ -8,6 +8,7 @@ mod feed;
 mod font;
 mod ime;
 mod layout;
+mod markdown;
 mod panel;
 mod provider;
 mod render;
@@ -257,17 +258,27 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         "what does EAGAIN mean when a socket read returns it?",
         &font,
     );
+    // The previous turn is off screen: only the current one is drawn.
+    transcript.delta("Answered, and no longer on screen.", &font, max_w);
+    transcript.finish_answer(&font);
+    transcript.ask("and if it never clears?", &font);
     transcript.delta(
-        "It means the call would block: the resource is momentarily unavailable rather than \
-         broken. Retry it, and read a repeated EAGAIN under load as backpressure. \
-         同一句话换成中文时走的是 CJK 字体回退。",
+        "`EAGAIN` means the call would block: the resource is **momentarily \
+         unavailable**, not broken.\n\n\
+         ```c\n\
+         while (read(fd, buf, len) == -1) {\n\
+         \x20   if (errno != EAGAIN) return -1;\n\
+         \x20   poll(fd, POLLIN, -1);\n\
+         }\n\
+         ```\n\n\
+         What *not* to do with `EAGAIN`, and why **not**:\n\n\
+         - spin on the call without waiting,\n\
+         - or treat it as a fatal error.\n\n\
+         > Retry a bounded number of times. 中文同样走 CJK 回退。",
         &font,
         max_w,
     );
     transcript.finish_answer(&font);
-    transcript.ask("and if it never clears?", &font);
-    transcript.delta("Then the peer is gone", &font, max_w);
-    transcript.cancel("cancelled", &font, max_w);
     transcript.fail("the provider refused the request (401)", &font, max_w);
     // The answering panel is a fixed size: the bar, the gap and the box.
     let (pw, ph) = (
@@ -2708,7 +2719,7 @@ mod tests {
         let blocks = layout::Blocks::new(&f);
         let mut t = crate::transcript::Transcript::default();
         t.ask("q", &f);
-        t.delta("one\ntwo\nthree", &f, 400.0);
+        t.delta("- one\n- two\n- three", &f, 400.0);
         t.finish_answer(&f);
         let rows = t.rows(blocks);
         let one = panel::Selection {

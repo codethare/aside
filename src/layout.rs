@@ -25,12 +25,18 @@ pub struct Blocks {
 
 impl Blocks {
     pub fn new(font: &PanelFont) -> Blocks {
-        let s = (font.size / crate::font::size()).round().max(1.0) as u32;
+        let s = scale_of(font);
         Blocks {
             row_h: font.row_h,
             gap: render::PROMPT_GAP as u32 * s,
         }
     }
+}
+
+/// The buffer-pixel scale the font was derived at: `PAD` and the other logical
+/// distances multiply by this to reach the grid the rows are laid out on.
+pub fn scale_of(font: &PanelFont) -> u32 {
+    (font.size / crate::font::size()).round().max(1.0) as u32
 }
 
 /// A break is allowed between these and their neighbours: CJK ideographs, kana
@@ -61,85 +67,79 @@ fn is_space(c: char) -> bool {
     c == ' ' || c == '\t'
 }
 
-/// One wrapped display row of a growing block of text.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Lines {
-    /// Rows that will not change as more text arrives.
-    rows: Vec<String>,
-    /// The row being filled: it can still grow, so it is not a row yet.
-    tail: String,
+/// How one part of a row is drawn. The markup behind it is never in the text: a row
+/// holds only the characters a reader sees, so a copy takes exactly those.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Style {
+    #[default]
+    Plain,
+    /// `**strong**`: the brighter ink.
+    Strong,
+    /// `*emphasis*`: the slanted face, when the chain has one.
+    Em,
+    /// Inline code and fenced blocks: the monospace face, on a tint.
+    Code,
+    /// A link's text; the URL is not drawn.
+    Link,
 }
 
-impl Lines {
-    #[cfg(test)]
-    pub fn rows(&self) -> &[String] {
-        &self.rows
-    }
+/// A run of one row in one style. Ranges are byte offsets into the row's own text
+/// and never overlap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Span {
+    pub range: std::ops::Range<usize>,
+    pub style: Style,
+}
 
-    /// Rows plus the partial tail, which is what the panel draws.
-    pub fn visible_rows(&self) -> impl Iterator<Item = &str> {
-        let tail = (!self.tail.is_empty()).then_some(self.tail.as_str());
-        self.rows.iter().map(String::as_str).chain(tail)
-    }
+/// One wrapped display row: the characters, the styles over them, and where the row
+/// starts. The grid stays `row_h` for every row, so a style never moves a row.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Line {
+    pub text: String,
+    pub spans: Vec<Span>,
+    /// Left offset in buffer px: a list's or a quote's indentation.
+    pub indent: u32,
+    /// Belongs to a fenced block, whose rows are tinted together.
+    pub code: bool,
+    /// Belongs to a block quote, whose rows carry a rail.
+    pub quote: bool,
+}
 
-    pub fn total_rows(&self) -> usize {
-        self.rows.len() + usize::from(!self.tail.is_empty())
+impl Line {
+    /// An empty row: how a blank line in the answer and a heading's separation are
+    /// drawn, without a second row height.
+    pub fn blank() -> Line {
+        Line::default()
     }
+}
 
-    /// Append a delta and close every row it makes completable, so the cost is
-    /// proportional to the delta and not to the answer so far.
-    pub fn push(&mut self, delta: &str, font: &PanelFont, max_w: f32) {
-        self.tail.push_str(delta);
-        loop {
-            if let Some(at) = break_tail(&self.tail, font, max_w) {
-                let rest = self.tail.split_off(at);
-                let row = std::mem::replace(&mut self.tail, rest);
-                self.rows.push(row.trim_end().to_string());
-            } else if let Some(at) = hard_break(&self.tail) {
-                let rest = self.tail.split_off(at + 1);
-                let row = std::mem::replace(&mut self.tail, rest);
-                self.rows.push(row.trim_end().to_string());
-            } else {
-                break;
-            }
-        }
-    }
-
-    /// Close the row still being filled: the answer has ended, or a newline did.
-    pub fn finish(&mut self) {
-        if !self.tail.is_empty() {
-            let row = std::mem::take(&mut self.tail);
-            self.rows.push(row.trim_end().to_string());
-        }
-    }
-
-    /// Everything as rows, for a caller that has the whole text at once.
-    pub fn wrap(text: &str, font: &PanelFont, max_w: f32) -> Lines {
-        let mut lines = Lines::default();
-        lines.push(text, font, max_w);
-        lines.finish();
-        lines
-    }
+/// The style a byte of the row is in; `Plain` outside every span.
+pub fn style_at(spans: &[Span], byte: usize) -> Style {
+    spans
+        .iter()
+        .find(|s| s.range.contains(&byte))
+        .map_or(Style::Plain, |s| s.style)
 }
 
 /// Byte index of the first newline, if the tail holds one.
-fn hard_break(s: &str) -> Option<usize> {
+pub(crate) fn hard_break(s: &str) -> Option<usize> {
     s.find('\n')
 }
 
 /// Byte index to split `s` at so the first part fits `max_w` and ends at a break
 /// opportunity, or `None` when the whole tail still fits (so it can still grow).
-fn break_tail(s: &str, font: &PanelFont, max_w: f32) -> Option<usize> {
-    if s.is_empty() || render::measure(font, s, f32::MAX) <= max_w {
-        return None;
-    }
+/// `adv` answers per character, because one row can hold two faces.
+pub(crate) fn break_tail(s: &str, adv: &dyn Fn(usize, char) -> f32, max_w: f32) -> Option<usize> {
+    // The walk stops at the first character that overflows, so the cost is one row
+    // and not the rest of the block: measuring `s` here made a long answer quadratic
+    // in its own length, once per row.
     // Walk characters, remembering the last break opportunity that still fits.
     let mut width = 0.0;
     let mut last: Option<usize> = None;
     let mut chars = s.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
-        let adv = char_advance(font, c);
-        if width + adv > max_w {
+        let step = adv(i, c);
+        if width + step > max_w {
             // This character would overflow. Break at the last opportunity; with
             // none, cut before this character — and when it is the first one and
             // does not fit at all, take it whole, so a panel narrower than one
@@ -152,7 +152,7 @@ fn break_tail(s: &str, font: &PanelFont, max_w: f32) -> Option<usize> {
             };
             return Some(at.min(s.len()));
         }
-        width += adv;
+        width += step;
         let next = chars.peek().map(|(_, c)| *c);
         let breakable = match next {
             None => false,
@@ -347,113 +347,6 @@ pub fn text_aa(scale: u32) -> Subpixel {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn font() -> PanelFont {
-        PanelFont::load(crate::font::SIZE).expect("system font available")
-    }
-
-    #[test]
-    fn latin_wraps_at_spaces_and_never_overflows() {
-        let f = font();
-        let max_w = 120.0;
-        let text = "the quick brown fox jumps over the lazy dog and keeps running";
-        let lines = Lines::wrap(text, &f, max_w);
-        assert!(lines.rows().len() > 1, "this must wrap");
-        for row in lines.rows() {
-            assert!(
-                render::measure(&f, row, f32::MAX) <= max_w,
-                "row overflows the panel: {row:?}"
-            );
-        }
-        // No word is lost or split mid-word.
-        let joined = lines.rows().join(" ");
-        for word in text.split(' ') {
-            assert!(joined.contains(word), "lost {word:?}");
-        }
-    }
-
-    #[test]
-    fn a_long_word_is_broken_rather_than_clipped() {
-        let f = font();
-        let lines = Lines::wrap(&"W".repeat(80), &f, 100.0);
-        assert!(lines.rows().len() > 1);
-        for row in lines.rows() {
-            assert!(render::measure(&f, row, f32::MAX) <= 100.0);
-        }
-        assert_eq!(lines.rows().concat(), "W".repeat(80));
-    }
-
-    #[test]
-    fn cjk_wraps_per_character() {
-        let f = font();
-        let text = "这是一个很长的问题，需要折行显示，因为面板没有这么宽";
-        let lines = Lines::wrap(text, &f, 130.0);
-        assert!(lines.rows().len() > 1, "CJK must wrap without spaces");
-        for row in lines.rows() {
-            assert!(render::measure(&f, row, f32::MAX) <= 130.0);
-        }
-        assert_eq!(lines.rows().concat(), text, "no character may be lost");
-    }
-
-    #[test]
-    fn mixed_latin_and_cjk_wraps_at_both_kinds_of_boundary() {
-        let f = font();
-        let text = "error EAGAIN 表示资源暂时不可用，稍后重试即可";
-        let lines = Lines::wrap(text, &f, 150.0);
-        assert!(lines.rows().len() > 1);
-        assert_eq!(lines.rows().concat(), text);
-        for row in lines.rows() {
-            assert!(render::measure(&f, row, f32::MAX) <= 150.0, "row {row:?}");
-        }
-    }
-
-    #[test]
-    fn wrapping_is_incremental_over_deltas() {
-        let f = font();
-        // The same text wrapped as one block and as 200 deltas must agree: this
-        // is what makes a streaming answer cheap to lay out.
-        let text: String = "streaming answers arrive in pieces ".repeat(20);
-        let once = Lines::wrap(&text, &f, 200.0);
-        let mut incremental = Lines::default();
-        for piece in text.as_bytes().chunks(7) {
-            incremental.push(&String::from_utf8_lossy(piece), &f, 200.0);
-        }
-        incremental.finish();
-        assert_eq!(incremental.rows(), once.rows());
-    }
-
-    #[test]
-    fn a_character_wider_than_the_panel_breaks_on_a_boundary() {
-        let f = font();
-        // A CJK character is about 20 px wide, so a 12 px panel cannot hold one.
-        // A 60 px panel once put the text width at 12 px, narrower than one CJK
-        // character, and the fallback break split it mid-byte:
-        // the fallback break then split the character at byte 1 and panicked.
-        for text in ["\u{4e2d}", "\u{4e2d}\u{6587}\u{5b57}", "a\u{4e2d}"] {
-            let lines = Lines::wrap(text, &f, 12.0);
-            assert_eq!(lines.rows().concat(), text, "no character may be lost");
-        }
-    }
-
-    #[test]
-    fn a_newline_forces_a_row_end() {
-        let f = font();
-        let lines = Lines::wrap("first\nsecond", &f, 500.0);
-        assert_eq!(lines.rows(), ["first", "second"]);
-    }
-
-    #[test]
-    fn the_tail_grows_until_it_must_break() {
-        let f = font();
-        let mut lines = Lines::default();
-        lines.push("hello ", &f, 500.0);
-        assert_eq!(lines.rows().len(), 0, "a row that still fits is not closed");
-        assert_eq!(lines.total_rows(), 1);
-        lines.push("there", &f, 500.0);
-        assert_eq!(lines.rows().len(), 0);
-        lines.finish();
-        assert_eq!(lines.rows(), ["hello there"]);
-    }
 
     #[test]
     fn the_viewport_window_is_pixels_capped_by_its_caller() {

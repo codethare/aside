@@ -101,6 +101,18 @@ pub struct PanelFont {
     /// Neither can change while the font lives, so the memo cannot go stale;
     /// past `LOOKUP_CACHE_CAP` it is dropped wholesale instead of growing.
     lookups: RefCell<HashMap<char, Option<GlyphLookup>>>,
+    /// The code face: a monospace chain at the same size, so a fence's columns line
+    /// up. Built on the first code glyph and never before: reading it eagerly would
+    /// put a font file read in front of every start, and a database scan in front of
+    /// every font a test builds.
+    mono: RefCell<CodeFace>,
+}
+
+/// The code face's state, so a failed build is not retried on every code row.
+enum CodeFace {
+    Unbuilt,
+    Built(Box<PanelFont>),
+    Failed,
 }
 
 enum FaceState {
@@ -268,6 +280,40 @@ impl PanelFont {
         Ok(Self::build(face, rest, size))
     }
 
+    /// The monospace chain, built the same way and failing softly: a system with no
+    /// monospace face draws code in the text face.
+    fn load_mono(size: f32) -> Option<PanelFont> {
+        let chain = mono_chain();
+        let (path, index) = chain.first().cloned()?;
+        let bytes = std::fs::read(&path).ok()?;
+        let face = Face::new(bytes, index).ok()?;
+        let rest: Vec<(PathBuf, u32)> = chain.into_iter().skip(1).collect();
+        Some(Self::build(face, rest, size))
+    }
+
+    /// Whether the code face has been read (test-only): a plain answer must not.
+    #[cfg(test)]
+    pub fn code_face_unbuilt(&self) -> bool {
+        matches!(*self.mono.borrow(), CodeFace::Unbuilt)
+    }
+
+    /// The code face, built on first use. `None` when the system has no monospace
+    /// face: the code is then drawn in the text face rather than not at all.
+    pub fn mono(&self) -> Option<Ref<'_, PanelFont>> {
+        if matches!(*self.mono.borrow(), CodeFace::Unbuilt) {
+            let built = Self::load_mono(self.size);
+            *self.mono.borrow_mut() = match built {
+                Some(font) => CodeFace::Built(Box::new(font)),
+                None => CodeFace::Failed,
+            };
+        }
+        Ref::filter_map(self.mono.borrow(), |face| match face {
+            CodeFace::Built(font) => Some(&**font),
+            _ => None,
+        })
+        .ok()
+    }
+
     fn build(face: Face, chain: Vec<(PathBuf, u32)>, size: f32) -> PanelFont {
         let px_per_unit = face.ascender - face.descender;
         let ascent_px = face.ascender * size / px_per_unit;
@@ -287,6 +333,7 @@ impl PanelFont {
             row_h,
             glyphs: RefCell::new(HashMap::new()),
             lookups: RefCell::new(HashMap::new()),
+            mono: RefCell::new(CodeFace::Unbuilt),
         }
     }
 
@@ -405,6 +452,48 @@ fn chain(family: Option<&str>) -> Vec<(PathBuf, u32)> {
         out.push(cjk);
     }
     out
+}
+
+/// Monospace candidates, in preference order. Stat'ed instead of queried for the
+/// same reason as [`CANDIDATES`]: a font database scan reads every installed font's
+/// header, and this runs when the first code block is drawn.
+const MONO_CANDIDATES: &[&str] = &[
+    "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
+    "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf",
+    "/usr/share/fonts/noto-cjk/NotoSansMonoCJK-Regular.ttc",
+];
+
+/// The code chain: a monospace face in front of the same fallbacks the text chain
+/// uses, so a comment in Chinese inside a fence still draws.
+fn mono_chain() -> Vec<(PathBuf, u32)> {
+    let mut out = chain(None);
+    let head = MONO_CANDIDATES
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())
+        .map(|path| {
+            let index = index_for_family(&path, "").unwrap_or(0);
+            (path, index)
+        })
+        .or_else(mono_path);
+    if let Some(head) = head {
+        out.insert(0, head);
+    }
+    out
+}
+
+/// The font database's idea of monospace, or `None` when it has none.
+fn mono_path() -> Option<(PathBuf, u32)> {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    let id = db.query(&fontdb::Query {
+        families: &[fontdb::Family::Monospace],
+        ..Default::default()
+    })?;
+    face_path(&db, id)
 }
 
 /// Whether a chain entry came from a CJK candidate. Kept by path rather than by

@@ -17,8 +17,11 @@ process's memory and dies with it.
 .PP
 Typed input goes through
 .BR zwp_text_input_v3 ,
-so an input method (fcitx, ibus) can compose text.  Answers are plain wrapped
-text: there is no Markdown, code-block or table rendering.
+so an input method (fcitx, ibus) can compose text.  Answers are rendered as a
+markdown subset: fenced code blocks in a monospace face, inline code, bold,
+italic, headings, lists, block quotes and the text of links.  Tables, task lists,
+raw HTML and anything else outside that subset are drawn as the characters the
+model sent, and no fenced block is syntax highlighted.
 .PP
 The panel is a
 .B wlr\-layer\-shell
