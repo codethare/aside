@@ -266,8 +266,10 @@ pub fn draw(
     // Which shape this frame is, and how far it has morphed into it.
     look: Look,
     // Where the working light is on the bar's rim, 0..1 round the perimeter; the
-    // light is only painted while a request is open.
+    // light is only painted while a request is open and slow enough for one.
     head: Option<f32>,
+    // How strongly the scroll indicator is drawn: 0 leaves it off entirely.
+    thumb: f32,
     scale: u32,
 ) {
     let s = scale.max(1);
@@ -387,16 +389,19 @@ pub fn draw(
     }
     render::body(buf, w, &bar, bar_tone);
 
-    // Scroll position indicator: only while the transcript overflows the card.
+    // Scroll position indicator: only while the view has recently moved, and only
+    // while the transcript overflows the card.
     let track_y = replies.map_or(bar.y, |r| r.y);
     let track_h = bar.y.saturating_sub(sep).saturating_sub(track_y);
     let total = transcript.total_height();
-    if let Some((ty, th)) =
-        render::scroll_thumb(track_y, track_h, viewport.height, total, viewport.top)
+    if thumb > 0.0
+        && let Some((ty, th)) =
+            render::scroll_thumb(track_y, track_h, viewport.height, total, viewport.top)
     {
         let tw = 3 * s;
         let tx = panel.x + panel.w - (crate::PAD * s + tw) / 2;
-        render::rect(buf, w, h, tx, ty, tw, th, render::LABEL_ACCENT);
+        let ink = render::dim(render::LABEL_ACCENT, thumb);
+        render::rect(buf, w, h, tx, ty, tw, th, ink);
     }
 
     draw_bar(
@@ -437,6 +442,12 @@ fn panel_of(w: u32, h: u32, radius: u32, scale: u32) -> Option<render::Panel> {
         h: h - 2 * mo,
         r: radius * scale.max(1),
     })
+}
+
+/// How much of a row at `y` survives the card's bottom edge, over a ramp of `ramp`
+/// pixels: whole at or above the ramp, nothing at the edge itself.
+fn edge_fade(y: u32, bottom: u32, ramp: u32) -> f32 {
+    (bottom.saturating_sub(y) as f32 / ramp.max(1) as f32).clamp(0.0, 1.0)
 }
 
 /// The reply lines inside a card: the blocks the viewport shows, clipped to the
@@ -489,8 +500,22 @@ fn draw_replies(
         // The copy cursor is its own mark: a bar at the character it is on, so it can
         // sit inside a selection without changing what is selected.
         let on_row = cursor.filter(|(row, _)| *row == index).map(|(_, ch)| ch);
+        // The card's last row fades out rather than ending: a line half under the
+        // edge leaves, and a line that fits sits whole above the ramp.
+        let edge = edge_fade(y, clip.end, blocks.row_h);
         draw_row(
-            buf, w, font, card, row, y, mark, on_row, clip.end, fade, aa, s,
+            buf,
+            w,
+            font,
+            card,
+            row,
+            y,
+            mark,
+            on_row,
+            clip.end,
+            fade * edge,
+            aa,
+            s,
         );
     }
 }
@@ -745,7 +770,7 @@ fn draw_row(
                 y,
                 end - start,
                 (y + font.row_h).min(bottom) - y,
-                render::BG_SEL,
+                render::dim(render::BG_SEL, fade),
             );
         }
     }
@@ -910,12 +935,19 @@ mod tests {
             "",
             Look::settled(State::Replies),
             None,
+            0.0,
             1,
         );
         buf
     }
 
     fn paint_highlighted(scene: &Scene, w: u32, h: u32, marked: Option<usize>) -> Vec<u8> {
+        paint_with(scene, w, h, marked, 0.0)
+    }
+
+    /// One frame with the scroll indicator at `thumb` strength: 0 is the indicator
+    /// this panel draws at rest, and what every other frame here holds.
+    fn paint_with(scene: &Scene, w: u32, h: u32, marked: Option<usize>, thumb: f32) -> Vec<u8> {
         let f = font();
         let (bw, bh) = frame(w, h);
         let mut buf = vec![0u8; (bw * bh * 4) as usize];
@@ -936,6 +968,7 @@ mod tests {
             "",
             Look::settled(State::Replies),
             None,
+            thumb,
             1,
         );
         buf
@@ -998,6 +1031,7 @@ mod tests {
                 "",
                 Look::moving(State::Bar, State::Bar, 1.0, rise, spread),
                 None,
+                0.0,
                 1,
             );
             buf
@@ -1068,6 +1102,7 @@ mod tests {
                 "",
                 look,
                 None,
+                0.0,
                 1,
             );
             buf
@@ -1115,6 +1150,7 @@ mod tests {
                 "",
                 Look::moving(State::Bar, State::Bar, 1.0, rise, 1.0),
                 None,
+                0.0,
                 1,
             );
             buf
@@ -1160,6 +1196,7 @@ mod tests {
                 "",
                 Look::moving(State::Bar, State::Bar, 1.0, rise, 1.0),
                 None,
+                0.0,
                 1,
             );
             buf
@@ -1311,6 +1348,7 @@ mod tests {
                 "",
                 Look::settled(State::Replies),
                 None,
+                0.0,
                 1,
             );
             buf
@@ -1360,6 +1398,7 @@ mod tests {
                 "",
                 Look::settled(State::Replies),
                 None,
+                0.0,
                 1,
             );
             buf
@@ -1418,6 +1457,7 @@ mod tests {
                 "",
                 Look::settled(State::Replies),
                 None,
+                0.0,
                 1,
             );
             buf
@@ -1484,6 +1524,7 @@ mod tests {
                     "",
                     Look::settled(State::Bar),
                     None,
+                    0.0,
                     1,
                 );
                 b
@@ -1505,6 +1546,7 @@ mod tests {
                 "",
                 Look::settled(State::Bar),
                 None,
+                0.0,
                 1,
             );
             let bar_top = crate::PAD;
@@ -1563,6 +1605,7 @@ mod tests {
                 "",
                 Look::settled(State::Bar),
                 None,
+                0.0,
                 1,
             );
             buf
@@ -1636,6 +1679,7 @@ mod tests {
                 label,
                 Look::settled(State::Replies),
                 None,
+                0.0,
                 1,
             );
             buf
@@ -1775,6 +1819,7 @@ mod tests {
                 "",
                 look,
                 None,
+                0.0,
                 1,
             );
             buf
@@ -1998,13 +2043,20 @@ mod tests {
         scene.viewport = Viewport::new(2 * f.row_h);
         let (w, h) = (500u32, height_for(2 * f.row_h, &f, 1));
         let (bw, _) = frame(w, h);
-        let buf = paint(&scene, w, h);
+        let buf = paint_with(&scene, w, h, None, 1.0);
         let tw = 3;
         let tx = w - (crate::PAD + tw) / 2;
         assert_eq!(
             &buf[at(bw, tx, 2)..][..4][..3],
             &render::LABEL_ACCENT[..3],
             "the overflow indicator is at the card's right edge"
+        );
+        // The same overflowing transcript nobody has scrolled: nothing on the chrome.
+        let still = paint(&scene, w, h);
+        assert_ne!(
+            &still[at(bw, tx, 2)..][..4][..3],
+            &render::LABEL_ACCENT[..3],
+            "at rest the indicator is not drawn"
         );
         // Everything fits once the viewport is tall enough: no indicator.
         scene.viewport = Viewport::new(MAX_ROWS as u32 * 30);
@@ -2019,6 +2071,85 @@ mod tests {
 
     /// The working light runs the bar's rim: the lit stretch of the edge is the one
     /// the head has just passed, and the bar's own text is still drawn under it.
+    /// The replies dissolve into the card's bottom edge: a row that fits is whole,
+    /// a row partly under the edge keeps only the part above the ramp, and the ramp
+    /// never dips on its way up.
+    #[test]
+    fn the_replies_dissolve_into_the_cards_bottom_edge() {
+        let (bottom, ramp) = (200u32, 30u32);
+        assert_eq!(edge_fade(bottom, bottom, ramp), 0.0, "nothing at the edge");
+        assert_eq!(edge_fade(bottom + 10, bottom, ramp), 0.0, "nor below it");
+        assert_eq!(
+            edge_fade(bottom - ramp, bottom, ramp),
+            1.0,
+            "whole at the top of the ramp"
+        );
+        assert_eq!(edge_fade(0, bottom, ramp), 1.0, "and everywhere above it");
+        let half = edge_fade(bottom - ramp / 2, bottom, ramp);
+        assert!((half - 0.5).abs() < 1e-6, "half way into the ramp: {half}");
+        let mut last = 0.0;
+        for y in (bottom - 2 * ramp..=bottom + 5).rev() {
+            let at = edge_fade(y, bottom, ramp);
+            assert!(at >= last, "the ramp dips at y {y}");
+            last = at;
+        }
+    }
+
+    /// The dissolve is wired, not only computed: the same row, one card taller, keeps
+    /// half its ink, and its pixels are where they were.
+    #[test]
+    fn a_row_at_the_cards_edge_is_drawn_dimmed() {
+        let f = font();
+        let mut scene = scene(&f, 300.0);
+        scene.input = Input::default();
+        // A new turn, so the long answer is the one on screen.
+        scene.transcript.ask("and at dusk?", &f);
+        scene.transcript.delta(
+            " The same scattering leaves only the long wavelengths at dusk, which is\
+             why the sky reads red, and why the sea reads grey, and why a fire reads\
+             orange from a mile away, and why the sun reads white at noon and\
+             red as it sets.",
+            &f,
+            300.0,
+        );
+        let blocks = Blocks::new(&f);
+        let rows = scene.transcript.rows(blocks);
+        assert!(
+            rows.len() >= 3,
+            "the answer wrapped into {} rows",
+            rows.len()
+        );
+        // The third row, and a card that ends half a row under its top in one frame
+        // and a whole row under it in the other: the ramp is the only difference.
+        let y = rows[2].y;
+        scene.viewport = Viewport::new(3 * f.row_h);
+        let (w, _) = sized(&scene, &f);
+        let ramped = paint(&scene, w, height_for(y + f.row_h / 2, &f, 1));
+        let whole = paint(&scene, w, height_for(y + f.row_h, &f, 1));
+        let (bw, _) = frame(w, y + f.row_h);
+        // The part of that row both frames hold: its first ten pixels.
+        let glass = render::premul(render::BG_PROMPT);
+        let ink = |buf: &Vec<u8>| -> u64 {
+            (crate::PAD..w - crate::PAD)
+                .flat_map(|x| (y..y + 10).map(move |y| (x, y)))
+                .map(|(x, y)| {
+                    let px = &buf[at(bw, x, y)..][..4];
+                    (0..3)
+                        .map(|c| (px[c] as i32 - glass[c] as i32).unsigned_abs() as u64)
+                        .sum::<u64>()
+                })
+                .sum()
+        };
+        let (dimmed, full) = (ink(&ramped), ink(&whole));
+        assert!(full > 0, "the row painted nothing at all");
+        assert!(dimmed > 0, "the row at the edge is gone, not dimmed");
+        let ratio = dimmed as f32 / full as f32;
+        assert!(
+            (ratio - 0.5).abs() < 0.1,
+            "the row at the edge keeps {ratio} of its ink"
+        );
+    }
+
     #[test]
     fn the_working_light_runs_round_the_bar() {
         let f = font();
@@ -2046,6 +2177,7 @@ mod tests {
                 "",
                 Look::settled(State::Bar),
                 head,
+                0.0,
                 1,
             );
             buf
@@ -2118,6 +2250,7 @@ mod tests {
                 "",
                 Look::settled(State::Replies),
                 None,
+                0.0,
                 scale,
             );
             assert!(

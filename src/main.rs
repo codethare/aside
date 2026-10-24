@@ -75,8 +75,9 @@ const MORPH_OUT_MS: u128 = 460;
 /// card unfolding upward out of that line, one after the other.
 const ENTER_MS: u128 = 520;
 /// How long the panel takes to close, which is the opening run backwards: the card
-/// rolls up into a line, then the line pulls in from both ends to a point.
-const CLOSE_MS: u128 = 460;
+/// rolls up into a line, then the line pulls in from both ends to a point. Shorter
+/// than the opening, because an exit that takes as long as an arrival is in the way.
+const CLOSE_MS: u128 = 200;
 /// How much of an opening or closing the first track takes: the line gets its
 /// width first, and the closing run gives up its height first.
 const TRACK_SHARE: u128 = 55;
@@ -295,6 +296,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         "",
         panel::Look::settled(panel::State::Replies),
         None,
+        0.0,
         1,
     );
     std::fs::write(path, panel::to_ppm(&buf, w, h)).map_err(|e| format!("{}: {e}", path.display()))
@@ -379,6 +381,7 @@ fn run(
         selection: None,
         copy_cursor: (0, 0),
         copied: None,
+        thumb_at: None,
         pointer: None,
         morph: None,
         enter_start: None,
@@ -443,10 +446,18 @@ fn run(
         } else if state.copy_note_up() {
             // The note is only up for a moment; a frame every step of that.
             Duration::from_millis(100)
+        } else if let Some(until_light) = state.light_in() {
+            // The request is still too young for a light: sleep to the moment it
+            // is due, rather than paint a frame that cannot differ from this one.
+            until_light
         } else if state.phase == Phase::Thinking {
             // The working light advances by the clock; a frame every step of its
             // lap keeps it smooth.
             Duration::from_millis(16)
+        } else if let Some(until_gone) = state.thumb_in() {
+            // The indicator is holding or fading: sleep to the next moment it can
+            // look different.
+            until_gone
         } else if state.request.is_some() {
             Duration::from_millis(16)
         } else {
@@ -717,7 +728,8 @@ fn room_for_replies(output_h: Option<u32>) -> u32 {
     reply_cap(output_h, gap).min(rows)
 }
 
-/// An ease-out over one track of an opening or closing.
+/// An ease-out over `over`: one track of an opening or closing, and every change of
+/// shape. Monotone, 0 at the start, exactly 1 at the deadline and never past it.
 fn track_at(elapsed_ms: u128, over: u128) -> f32 {
     let t = (elapsed_ms as f32 / over.max(1) as f32).clamp(0.0, 1.0);
     1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
@@ -745,20 +757,6 @@ pub fn close_tracks(elapsed_ms: u128) -> (f32, f32) {
     let rise = 1.0 - track_at(elapsed_ms, split);
     let spread = 1.0 - track_at(elapsed_ms.saturating_sub(split), CLOSE_MS - split);
     (spread, rise)
-}
-
-/// How far a shape change has got after `elapsed_ms` of `over`: a damped spring,
-/// normalised so it lands on exactly 1 at the deadline. That way a late frame is at
-/// the right shape and the frame after the last one is the settled one.
-pub fn morph_at(elapsed_ms: u128, over: u128) -> f32 {
-    let t = (elapsed_ms as f32 / over.max(1) as f32).clamp(0.0, 1.0);
-    // Under-damped: one visible overshoot of a few percent, then rest.
-    const DAMPING: f32 = 5.0;
-    const FREQ: f32 = 1.6 * std::f32::consts::PI;
-    let spring = 1.0 - (-DAMPING * t).exp() * (FREQ * t).cos();
-    // Normalise the spring's own landing value to 1, so the deadline is exact.
-    let end = 1.0 - (-DAMPING).exp() * FREQ.cos();
-    (spring / end).clamp(0.0, 1.0)
 }
 
 /// The shape the panel paints itself as, for a phase.
@@ -801,11 +799,34 @@ impl Morph {
 /// How long one lap of the working light takes.
 const LAP_MS: u128 = 1_400;
 
-/// Where the working light is on the bar's rim, as a fraction of its perimeter,
-/// read from elapsed milliseconds rather than from a frame count, so a late frame
-/// lands where the time says.
+/// How long a request runs before the working light appears. A request that is
+/// answered sooner shows no cue at all: one that appears and vanishes is noise.
+const LIGHT_AFTER_MS: u128 = 500;
+
+/// Where the light is one lap round the rim after `elapsed_ms` into the lap, as a
+/// fraction of the perimeter, read from the clock rather than from a frame count, so
+/// a late frame lands where the time says.
 pub fn orbit_at(elapsed_ms: u128) -> f32 {
     (elapsed_ms % LAP_MS) as f32 / LAP_MS as f32
+}
+
+/// Where the working light is on the bar's rim, `elapsed_ms` after the request was
+/// sent: nothing while the request is still young enough to be answered, and then a
+/// lap that starts at the rim's own start rather than a third of the way round.
+pub fn light_at(elapsed_ms: u128) -> Option<f32> {
+    Some(orbit_at(elapsed_ms.checked_sub(LIGHT_AFTER_MS)?))
+}
+
+/// How long the scroll indicator holds at full ink, and how long it then takes to
+/// fade. An indicator that stays is a mark on the chrome: it shows a moving view.
+const THUMB_HOLD_MS: u128 = 700;
+const THUMB_FADE_MS: u128 = 200;
+
+/// The scroll indicator's ink, `elapsed_ms` after the view last moved: full while
+/// the view is in hand, out over the fade, then nothing.
+pub fn thumb_alpha(elapsed_ms: u128) -> f32 {
+    let faded = elapsed_ms.saturating_sub(THUMB_HOLD_MS) as f32 / THUMB_FADE_MS as f32;
+    (1.0 - faded).clamp(0.0, 1.0)
 }
 
 /// Who owns the keyboard. `Prefix` is one key wide, the way a terminal
@@ -972,6 +993,8 @@ struct State {
     copy_cursor: (usize, usize),
     /// When the last copy happened, and how many lines it took.
     copied: Option<(std::time::Instant, usize)>,
+    /// When the user last moved the view: the scroll indicator's clock.
+    thumb_at: Option<std::time::Instant>,
     pointer: Option<wl_pointer::WlPointer>,
     /// The shape change in progress, if any.
     morph: Option<Morph>,
@@ -1019,7 +1042,7 @@ impl State {
     /// How far the shape change has got, if one is running.
     fn morph_progress(&self) -> f32 {
         match self.morph {
-            Some(m) => morph_at(m.start.elapsed().as_millis(), m.duration_ms()),
+            Some(m) => track_at(m.start.elapsed().as_millis(), m.duration_ms()),
             None => 1.0,
         }
     }
@@ -1107,9 +1130,47 @@ impl State {
         }
     }
 
-    /// Where the light is on the rim, while a request is open.
+    /// Where the light is on the rim, while a request has been open long enough to
+    /// warrant one.
     fn head(&self) -> Option<f32> {
-        (self.phase == Phase::Thinking).then(|| orbit_at(self.phase_start.elapsed().as_millis()))
+        if self.phase != Phase::Thinking {
+            return None;
+        }
+        light_at(self.phase_start.elapsed().as_millis())
+    }
+
+    /// How long until the working light comes up, while the request is still too
+    /// young for one: `None` once it is up, or when nothing is running.
+    fn light_in(&self) -> Option<Duration> {
+        if self.head().is_some() || self.phase != Phase::Thinking {
+            return None;
+        }
+        let left = LIGHT_AFTER_MS
+            .saturating_sub(self.phase_start.elapsed().as_millis())
+            .clamp(1, 250);
+        Some(Duration::from_millis(left as u64))
+    }
+
+    /// How strongly the scroll indicator is drawn this frame.
+    fn thumb(&self) -> f32 {
+        self.thumb_at
+            .map_or(0.0, |at| thumb_alpha(at.elapsed().as_millis()))
+    }
+
+    /// How long until the scroll indicator can look different: `None` when it is
+    /// not up at all. While it holds, nothing changes, so the loop sleeps to the
+    /// start of the fade instead of repainting the same frame.
+    fn thumb_in(&self) -> Option<Duration> {
+        let at = self.thumb_at?;
+        let elapsed = at.elapsed().as_millis();
+        if elapsed >= THUMB_HOLD_MS + THUMB_FADE_MS {
+            return None;
+        }
+        match THUMB_HOLD_MS.saturating_sub(elapsed) {
+            // Holding still: sleep to the start of the fade.
+            0 => Some(Duration::from_millis(16)),
+            left => Some(Duration::from_millis(left.clamp(1, 250) as u64)),
+        }
     }
 
     /// Give the surface the size its phase wants, centred on the output, and
@@ -1416,6 +1477,7 @@ impl State {
         }
         let total = self.transcript.total_height();
         self.viewport.scroll_by(delta, total);
+        self.thumb_at = Some(std::time::Instant::now());
         self.dirty = true;
     }
 
@@ -1660,6 +1722,10 @@ impl State {
             // The blink is the only thing moving, so keep asking for frames.
             self.dirty = true;
         }
+        if self.thumb_at.is_some() {
+            // The indicator holds and then fades, so its frames are its own.
+            self.dirty = true;
+        }
         if self.close_finished() {
             // The closing animation has run: the panel goes, and the process with it.
             self.exit = true;
@@ -1743,6 +1809,12 @@ impl State {
         let look = self.look();
         let selection = self.selection;
         let head = self.head();
+        let thumb = self.thumb();
+        if thumb == 0.0 {
+            // The fade has run out: one frame has painted it away, so the clock is
+            // dropped and the indicator stops asking for frames.
+            self.thumb_at = None;
+        }
         let stride = w as i32 * 4;
         let label = self.mode_label();
         let hint = self.mode_hint();
@@ -1789,6 +1861,7 @@ impl State {
             label,
             look,
             head,
+            thumb,
             self.scale,
         );
         self.layer
@@ -1864,8 +1937,14 @@ impl State {
             }
             Key::Up => self.move_highlight(-1),
             Key::Down => self.move_highlight(1),
-            Key::PageUp => self.move_highlight(-self.page_rows()),
-            Key::PageDown => self.move_highlight(self.page_rows()),
+            Key::PageUp => {
+                self.move_highlight(-self.page_rows());
+                self.thumb_at = Some(std::time::Instant::now());
+            }
+            Key::PageDown => {
+                self.move_highlight(self.page_rows());
+                self.thumb_at = Some(std::time::Instant::now());
+            }
             Key::Copy => self.copy_highlight(),
             Key::Paste => self.paste_clipboard(),
             Key::Window => {
@@ -2739,22 +2818,60 @@ mod tests {
     #[test]
     fn a_shape_change_is_read_off_the_clock() {
         for over in [MORPH_IN_MS, MORPH_OUT_MS] {
-            assert_eq!(morph_at(0, over), 0.0);
-            assert_eq!(morph_at(over, over), 1.0, "the deadline is exact");
-            assert_eq!(morph_at(over * 10, over), 1.0, "a late frame is done");
+            assert_eq!(track_at(0, over), 0.0);
+            assert_eq!(track_at(over, over), 1.0, "the deadline is exact");
+            assert_eq!(track_at(over * 10, over), 1.0, "a late frame is done");
             let mut previous = 0.0;
             for ms in 0..=over {
-                let at = morph_at(ms, over);
-                assert!(at >= previous - 1e-6, "the spring never goes backwards");
+                let at = track_at(ms, over);
+                assert!(at >= previous - 1e-6, "the change never goes backwards");
                 assert!((0.0..=1.0).contains(&at), "and stays inside its ends");
                 previous = at;
             }
-            // A spring is not an ease: it overtakes its target on the way.
-            assert!(
-                (0..=over).any(|ms| morph_at(ms, over) > 0.98),
-                "it arrives before the deadline"
-            );
+            // Half-way it is on its way and not yet there, and nothing is ever
+            // painted past the shape it lands on: no overshoot, no dead tail.
+            let half = track_at(over / 2, over);
+            assert!(half > 0.5 && half < 1.0, "half-way: {half}");
         }
+    }
+
+    /// The working light waits for a request slow enough to need it, and then starts
+    /// its lap at the rim's own start rather than a third of the way round.
+    #[test]
+    fn the_light_waits_for_a_slow_request() {
+        assert_eq!(light_at(0), None);
+        assert_eq!(
+            light_at(LIGHT_AFTER_MS - 1),
+            None,
+            "a fast answer shows none"
+        );
+        assert_eq!(
+            light_at(LIGHT_AFTER_MS),
+            Some(0.0),
+            "it comes up at the rim's start"
+        );
+        let quarter = light_at(LIGHT_AFTER_MS + LAP_MS / 4).expect("up after the wait");
+        assert!(
+            (quarter - 0.25).abs() < 1e-6,
+            "a quarter of a lap in: {quarter}"
+        );
+        assert_eq!(
+            light_at(LIGHT_AFTER_MS + LAP_MS),
+            Some(0.0),
+            "one lap is back where it began"
+        );
+    }
+
+    /// The scroll indicator holds at full ink while the view is in hand, then goes:
+    /// an indicator that stays would be a mark on the chrome.
+    #[test]
+    fn the_scroll_indicator_fades_after_the_view_stops() {
+        assert_eq!(thumb_alpha(0), 1.0);
+        assert_eq!(thumb_alpha(THUMB_HOLD_MS), 1.0, "full ink while it holds");
+        let half = thumb_alpha(THUMB_HOLD_MS + THUMB_FADE_MS / 2);
+        assert!((half - 0.5).abs() < 1e-6, "half faded: {half}");
+        assert_eq!(thumb_alpha(THUMB_HOLD_MS + THUMB_FADE_MS), 0.0, "gone");
+        assert_eq!(thumb_alpha(THUMB_HOLD_MS * 10), 0.0, "and stays gone");
     }
 
     /// The opening and the closing are one run and its reverse: a line spreads out

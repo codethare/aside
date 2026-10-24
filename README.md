@@ -84,7 +84,8 @@ side and sits that margin inside the visible gap. The answering panel is a
 **fixed** size: the bar, the 16 px between the cards, and a box as tall as the
 bar's own gap above the screen's bottom edge (38 % of the output, clamped by the
 room left above it). It does not grow as the answer does — a longer answer scrolls
-inside the box and shows a 3 px scroll indicator on the right edge. Holding the
+inside the box, and the 3 px scroll indicator on the right edge shows while the view
+is moving and then fades out of the way. Holding the
 left button on the bar and moving drags the panel, in both axes, from the first
 motion; it stays on the output, keeps its size, and where it was is never written
 down. Dragging across the replies selects whole lines instead — press on a line,
@@ -94,13 +95,15 @@ State changes are animated, and always as one card changing shape, painted insid
 one buffer, so the surface is resized once per state and never per frame. Opening
 takes 520 ms: a line spreads out of a point at the centre, and once it has the
 panel's width the card unfolds up out of it. Sending a question moves nothing: the
-bar stays, and a light runs round its rim — one lap in 1.4 s — until the first text
+bar stays, and — once the request has taken half a second, which a fast answer never
+reaches — a light runs round its rim, one lap in 1.4 s, until the first text
 arrives, which grows the panel out of the bar in 460 ms — that growth is the reply's
 entrance, and nothing plays after it. A follow-up keeps the box it was asked from:
 the panel does not fold shut and open again, the light simply runs on its bar's rim
 until the new answer starts. Closing is the opening
-run backwards, over 460 ms: the card rolls up into a line, the line pulls in from
-both ends, and only then does the process exit.
+run backwards, over 200 ms: the card rolls up into a line, the line pulls in from
+both ends, and only then does the process exit. The replies dissolve into the bottom
+edge of their card rather than being cut off mid-line.
 
 ## Keys
 

@@ -31,7 +31,8 @@ change.
 4. **The chrome is `plush`'s.** Copied exactly: radius 12, `PAD` 16, 8 px gap,
    `SEPARATION` 16 (which must clear `SHADOW_REACH_UP`), the 26 px shadow margin
    with the tight and wide layers, the rim's lit and dark profiles with the band one
-   pixel inside it, the plush inks, and the 3 px scroll indicator in `render.rs`.
+   pixel inside it, the plush inks, and the 3 px scroll indicator in `render.rs`, which
+   shows while the view is moving and fades rather than staying on the chrome.
    Row height stays `size + 2 * round(size * 0.25)`. No accent rail: `plush` and
    `wlmenu` draw one only for a prompt label. The panel is a bottom-
    anchored `wlr-layer-shell` surface in three states — the bar, the bar with its
