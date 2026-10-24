@@ -24,18 +24,20 @@ change.
 3. **Keyboard first.** One meaning per key; every action reachable without a
    pointer. The key table in `specs/chat-panel` is the contract, and it is
    per-mode: typing, the `Ctrl+T` prefix (one key wide), and tmux's copy mode. A
-   key consumed by the prefix or by copy mode never reaches the input line. No key
-   moves the window: the compositor does.
+   key consumed by the prefix or by copy mode never reaches the input line, and
+   `Alt+hjkl` moves the panel in every mode. The panel asks for exclusive keyboard
+   interactivity, so it is typable the moment it appears; `Esc` is how it is left.
 4. **The chrome is `plush`'s.** Copied exactly: radius 12, `PAD` 16, 8 px gap,
    `SEPARATION` 16 (which must clear `SHADOW_REACH_UP`), the 26 px shadow margin
    with the tight and wide layers, the rim's lit and dark profiles with the band one
    pixel inside it, the plush inks, and the 3 px scroll indicator in `render.rs`.
    Row height stays `size + 2 * round(size * 0.25)`. No accent rail: `plush` and
-   `wlmenu` draw one only for a prompt label. The panel is a window the compositor
-   places and focuses, in three states — the bar, the bar with its
+   `wlmenu` draw one only for a prompt label. The panel is a bottom-
+   anchored `wlr-layer-shell` surface in three states — the bar, the bar with its
    working light running round the rim, and the replies — with
-   the bar on the bottom card and the replies in the card above it, which is
-   38 % of the output height, capped at 64 rows. Both cards are one tone; the
+   the bar on the bottom card and the replies in the card above it, its bottom
+   edge 38 % of the output height up the screen, because the bottom anchor is
+   what keeps the bar still while they grow. Both cards are one tone; the
    transcript is a stack of blocks separated by an 8 px gap, with no fill of its
    own, and the highlight is brighter ink 2 px in, never a mark in the margin. A
    question you sent is kept for the request and drawn nowhere.

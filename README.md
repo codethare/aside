@@ -17,32 +17,16 @@ aside
 ```
 
 It needs a Wayland session, and the programs on `PATH`: `bwrap`, `curl`,
-`wl-copy` and `wl-paste` (both from `wl-clipboard`). Bind it in your compositor,
+`wl-copy` and `wl-paste` (both from `wl-clipboard`), and a compositor that speaks
+`wlr-layer-shell`. Bind it in your compositor,
 for example in Hyprland:
 
 ```
 bind = SUPER, A, exec, aside
 ```
 
-Press the key again while it is open and the running panel is activated rather than
+Press the key again while it is open and the running panel is raised rather than
 duplicated.
-
-The panel is an ordinary window: its `app_id` is `aside`, and where it sits, whether
-it floats and when it has the keyboard are the compositor's business. A tiling
-compositor needs a float rule, and the panel is happiest near the bottom of the
-screen:
-
-```
-# sway
-for_window [app_id="aside"] floating enable, resize set 640 500, move position 640 560, focus
-# niri (config.kdl)
-window-rule {
-    match app-id="aside"
-    open-floating true
-}
-# river
-riverctl float-filter-add app-id aside
-```
 
 Configuration is optional: `~/.config/aside/config.toml` with flat `key = "value"`
 lines, and five keys — `model`, `base_url`, `proxy`, `font_size` and `font_family`:
@@ -66,10 +50,15 @@ is checked on a machine with no compositor.
 
 ## What it looks like
 
-A window with no decorations, focused by the compositor the way any window is, so
-neither appearing nor being summoned again costs a click; click another window and
-it keeps the keyboard, click the panel and it takes it back. The chrome is
-`plush`'s: a 26 px drop shadow measured from each
+A `wlr-layer-shell` surface on the overlay layer with **exclusive** keyboard focus:
+the compositor hands it the keyboard when it appears, so typing reaches it without
+a click, and no window rule is needed to get it back. The other side of that: while
+the panel is open the keyboard stays with it — `Esc` closes it and gives the
+keyboard up. Anchored to the bottom of the output and centred, its bottom edge
+38 % of the output height above the screen's bottom edge: the field lands just below the vertical centre, where the eye already
+is, and the replies grow upwards out of it. The bottom anchor is what keeps the
+bar in one place on screen; a top anchor would carry it downwards by a row per
+wrapped line. The chrome is `plush`'s: a 26 px drop shadow measured from each
 card's outline, a premultiplied translucent body, a rim made of a lit top edge
 fading out by four fifths of the card, a dark underside at the bottom and a dark
 band one pixel inside it, and antialiased corners. It has three states:
@@ -90,16 +79,17 @@ panel's own growth and are not animated a second time; a follow-up's answer simp
 appears. The wheel scrolls the replies while the pointer is over them — three lines a notch, a touchpad's own
 delta otherwise — and does nothing over the bar.
 
-The sizes are the panel's own, and the window is exactly that size: the shadow
-margin is inside it. The answering panel is a **fixed** size: the bar, the 16 px
-between the cards, and a box 38 % of the output height, capped by the 64 rows one
-frame may draw. It does not grow as the answer does — a longer answer scrolls
-inside the box and shows a 3 px scroll indicator on the right edge. Nothing the
-panel does moves the window: the compositor's own move binding and its window rules
-are where a position comes from, and no position is ever written down. Dragging
-across the replies selects text instead — press on a line, drag, release — and
-`Alt+C` or `Ctrl+C` copies what is selected, one line per line of it. `Esc` clears a
-selection before it closes the panel.
+The sizes are the panel's own; the layer surface adds the shadow margin on every
+side and sits that margin inside the visible gap. The answering panel is a
+**fixed** size: the bar, the 16 px between the cards, and a box as tall as the
+bar's own gap above the screen's bottom edge (38 % of the output, clamped by the
+room left above it). It does not grow as the answer does — a longer answer scrolls
+inside the box and shows a 3 px scroll indicator on the right edge. Holding the
+left button on the bar and moving drags the panel, in both axes, from the first
+motion; it stays on the output, keeps its size, and where it was is never written
+down. Dragging across the replies selects whole lines instead — press on a line,
+drag, release — and `Alt+C` or `Ctrl+C` copies every selected line, one per line.
+`Esc` clears a selection before it closes the panel.
 State changes are animated, and always as one card changing shape, painted inside
 one buffer, so the surface is resized once per state and never per frame. Opening
 takes 520 ms: a line spreads out of a point at the centre, and once it has the
@@ -122,6 +112,8 @@ both ends, and only then does the process exit.
 | `Esc` | copy | clear the selection; leave copy mode when there is none |
 | `Ctrl+T` | typing | enter the prefix mode; the next key is a settings command |
 | `[` | prefix | enter copy mode |
+| `Alt+hjkl` | any | move the **panel** 16 px left / down / up / right |
+| `Alt+Ctrl+hjkl` | any | the same, 160 px |
 | `Up` / `Down` | typing | move the highlighted transcript line |
 | `PageUp` / `PageDown` | typing | move it a page |
 | `Alt+C` / `Ctrl+C` | typing, copy | copy the selection, or the highlighted line |
