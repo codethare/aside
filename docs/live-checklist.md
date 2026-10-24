@@ -48,8 +48,10 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    it stops at the screen edges.
 5c. Press the left button on the bar and move at once: the panel follows from the
    first motion, in both directions, stays on screen, and does not change size
-   while it moves. A click without moving does nothing, and a new run starts where
-   the anchor puts it.
+   while it moves. Keep dragging after it has started moving — a slow sweep, then a
+   fast one, then drag past the screen edge and back — and it follows every time: the
+   panel moving out from under the pointer is not the pointer letting go. A click
+   without moving does nothing, and a new run starts where the anchor puts it.
 5c1. Type `hello world`, press `Left` five times: the caret walks back through the
    text and `Backspace` deletes the character it just passed. `Home`/`End` jump to
    the ends, `Ctrl+Left`/`Ctrl+Right` by word, and the pre-edit of a Chinese input

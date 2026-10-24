@@ -637,11 +637,14 @@ enum Motion {
     Drag,
 }
 
-fn motion_with(press: Option<(f64, f64)>, selecting: bool) -> Motion {
-    match (press, selecting) {
-        (None, _) => Motion::Hover,
-        (Some(_), true) => Motion::Extend,
-        (Some(_), false) => Motion::Drag,
+fn motion_with(press: Option<(f64, f64)>, dragging: Option<(f64, f64)>, selecting: bool) -> Motion {
+    match (press, dragging, selecting) {
+        // A drag runs until the button is released, whatever the pointer reports in
+        // between: the panel moving out from under the pointer is not a button let
+        // go of, and a drag that cancels itself never moves anything.
+        (_, Some(_), _) => Motion::Drag,
+        (Some(_), None, true) => Motion::Extend,
+        _ => Motion::Hover,
     }
 }
 
@@ -1351,7 +1354,7 @@ impl State {
     /// button is down. A pointer merely passing over the replies selects nothing:
     /// that was the reported bug, a hover painting text as if it had been dragged.
     fn motion_to(&mut self, position: (f64, f64)) {
-        match motion_with(self.press, self.selecting) {
+        match motion_with(self.press, self.dragging, self.selecting) {
             Motion::Hover => {}
             Motion::Drag => self.drag_to(position),
             Motion::Extend => {
@@ -2341,11 +2344,11 @@ impl PointerHandler for State {
                     // it is over, so a later hover cannot extend it.
                     self.selecting = false;
                 }
-                // A pointer that leaves with the button down leaves the gesture
-                // behind too, or the next hover would carry it on.
+                // The pointer can leave because the panel moved out from under it,
+                // which is what a drag does. The drag outlives it: the release that
+                // ends it still arrives, because the press took an implicit grab.
                 PointerEventKind::Leave { .. } => {
                     self.press = None;
-                    self.dragging = None;
                     self.selecting = false;
                 }
                 PointerEventKind::Motion { .. } => self.motion_to(event.position),
@@ -2586,10 +2589,35 @@ mod tests {
     #[test]
     fn a_hover_selects_nothing() {
         let down = Some((10.0, 10.0));
-        assert_eq!(motion_with(None, true), Motion::Hover, "a stale flag");
-        assert_eq!(motion_with(None, false), Motion::Hover);
-        assert_eq!(motion_with(down, true), Motion::Extend);
-        assert_eq!(motion_with(down, false), Motion::Drag);
+        assert_eq!(motion_with(None, None, true), Motion::Hover, "a stale flag");
+        assert_eq!(motion_with(None, None, false), Motion::Hover);
+        assert_eq!(motion_with(down, None, true), Motion::Extend);
+        assert_eq!(
+            motion_with(down, None, false),
+            Motion::Hover,
+            "nothing to move"
+        );
+    }
+
+    /// The reported regression: the panel could not be dragged. A drag starts on the
+    /// press and ends on the release, so the motions in between have to move the
+    /// window even if the panel has already moved out from under the pointer and the
+    /// leave event has taken the press with it.
+    #[test]
+    fn a_drag_outlives_the_pointer_leaving() {
+        let at = Some((10.0, 10.0));
+        assert_eq!(
+            motion_with(at, at, false),
+            Motion::Drag,
+            "the button is down"
+        );
+        assert_eq!(
+            motion_with(None, at, false),
+            Motion::Drag,
+            "the panel moved out from under the pointer"
+        );
+        // Released, and it is over: the pointer is a pointer again.
+        assert_eq!(motion_with(None, None, false), Motion::Hover);
     }
 
     /// The copy note counts the lines that went out, and a single line says so.
