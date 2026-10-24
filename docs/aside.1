@@ -23,9 +23,9 @@ text: there is no Markdown, code-block or table rendering.
 The panel is a
 .B wlr\-layer\-shell
 surface on the overlay layer, anchored to the bottom of the output and centred,
-with exclusive keyboard focus: the compositor gives it the keyboard when it
-appears, so it is typed into without a click, and while it is open the keyboard
-stays with it until \fBEsc\fP closes it.  Its bottom edge is 38 per cent of the
+with on\-demand keyboard interactivity: the compositor focuses it when the pointer
+is over it or when it is clicked, and hands the keyboard back to whatever is
+focused next, so it never blocks typing in another window.  Its bottom edge is 38 per cent of the
 output height above the screen's bottom edge:
 the field lands just below the vertical centre and the replies grow upwards out
 of it.  The chrome is the one

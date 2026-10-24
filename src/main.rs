@@ -85,12 +85,14 @@ const BTN_LEFT: u32 = 0x110;
 /// Output height assumed for the height cap until the real one is known.
 const FALLBACK_OUTPUT_H: u32 = 1080;
 const APP_ID: &str = "aside";
-/// What the panel asks the compositor for. `Exclusive` is the only mode in which a
-/// layer surface is given the keyboard on its own: `OnDemand` means "when clicked",
-/// and no window rule can focus a layer surface, so the panel would only be typable
-/// after a click. The other side of it: while the panel is up the keyboard stays with
-/// it, and `Esc` is how you leave.
-const INTERACTIVITY: KeyboardInteractivity = KeyboardInteractivity::Exclusive;
+/// What the panel asks the compositor for: on-demand, so the keyboard stays
+/// shareable. `Exclusive` cannot be used here - a compositor keeps an exclusive layer
+/// surface focused and undoes every attempt to focus a view while it is mapped (sway
+/// sets `seat->has_exclusive_layer` and re-focuses the layer after each change), so
+/// with the panel on screen nothing else could be typed into. On-demand costs the
+/// panel the keyboard when the pointer leaves it: the compositor focuses it on hover
+/// under focus-follows-mouse, or on a click.
+const INTERACTIVITY: KeyboardInteractivity = KeyboardInteractivity::OnDemand;
 
 const USAGE: &str = "\
 usage: aside [--model MODEL] [--base-url URL] [--proxy URL] [--preview FILE] [--help] [--version]
@@ -2642,14 +2644,15 @@ mod tests {
         assert_eq!(copied_lines(&three, &rows), 3, "three lines");
     }
 
-    /// The panel is typable the moment it appears, which is the whole point of a
-    /// summoned panel: `OnDemand` put it behind a click.
+    /// The compositor has to be able to take the keyboard back. An exclusive layer
+    /// surface makes every view unfocusable while it is mapped, which is the reported
+    /// bug: aside is up, and no other window can be typed into.
     #[test]
-    fn the_panel_takes_the_keyboard_without_a_click() {
+    fn the_panel_leaves_the_keyboard_shareable() {
         assert_eq!(
             INTERACTIVITY,
-            KeyboardInteractivity::Exclusive,
-            "on-demand needs a click, and no window rule can focus a layer surface"
+            KeyboardInteractivity::OnDemand,
+            "exclusive layer surfaces defeat every view focus: the keyboard would never leave the panel"
         );
     }
 

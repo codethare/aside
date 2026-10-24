@@ -25,8 +25,9 @@ change.
    pointer. The key table in `specs/chat-panel` is the contract, and it is
    per-mode: typing, the `Ctrl+T` prefix (one key wide), and tmux's copy mode. A
    key consumed by the prefix or by copy mode never reaches the input line, and
-   `Alt+hjkl` moves the panel in every mode. The panel asks for exclusive keyboard
-   interactivity, so it is typable the moment it appears; `Esc` is how it is left.
+   `Alt+hjkl` moves the panel in every mode. The panel asks for on-demand keyboard
+   interactivity: exclusive would make every view unfocusable while it is mapped, so
+   the keyboard is the compositor's to move and `Esc` is how the panel is left.
 4. **The chrome is `plush`'s.** Copied exactly: radius 12, `PAD` 16, 8 px gap,
    `SEPARATION` 16 (which must clear `SHADOW_REACH_UP`), the 26 px shadow margin
    with the tight and wide layers, the rim's lit and dark profiles with the band one

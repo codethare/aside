@@ -50,11 +50,11 @@ is checked on a machine with no compositor.
 
 ## What it looks like
 
-A `wlr-layer-shell` surface on the overlay layer with **exclusive** keyboard focus:
-the compositor hands it the keyboard when it appears, so typing reaches it without
-a click, and no window rule is needed to get it back. The other side of that: while
-the panel is open the keyboard stays with it — `Esc` closes it and gives the
-keyboard up. Anchored to the bottom of the output and centred, its bottom edge
+A `wlr-layer-shell` surface on the overlay layer with **on-demand** keyboard
+interactivity: the compositor focuses it when the pointer is over it or when it is
+clicked, and the keyboard goes back to whatever window is focused next, so the
+panel never blocks typing elsewhere. Anchoring is what keeps it out of the way;
+`Esc` closes it. Anchored to the bottom of the output and centred, its bottom edge
 38 % of the output height above the screen's bottom edge: the field lands just below the vertical centre, where the eye already
 is, and the replies grow upwards out of it. The bottom anchor is what keeps the
 bar in one place on screen; a top anchor would carry it downwards by a row per

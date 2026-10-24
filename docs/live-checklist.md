@@ -15,10 +15,13 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 ## The panel
 
 1. Press the keybinding. The panel appears in the lower half of the output,
-   centred, its field just below the vertical centre, and takes the keyboard:
-   type without touching the pointer and the characters land in the input line.
-   Click a terminal behind it — the terminal gets the pointer, the panel keeps the
-   keyboard — and `Esc` closes the panel and hands the keyboard back.
+   centred, its field just below the vertical centre. Move the pointer onto it (or
+   click it) and type: the characters land in the input line.
+1b. While the panel is up, switch to another window with your compositor's binding
+   and type there: the characters land in that window, not in the panel. Go back to
+   the panel, type again: they land in the panel. This is the check that the panel
+   does not hold the keyboard; if a keybinding alone does not move focus, one click
+   on the window is the compositor's requirement, not the panel's.
 2. Type `what does EAGAIN mean` and press `Enter`. The bar does not move or change
    size: a light starts running round its rim and laps it about every 1.4 s. When
    the first text arrives the bar grows into the panel and only then does the reply
