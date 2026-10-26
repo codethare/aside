@@ -25,8 +25,11 @@ for example in Hyprland:
 bind = SUPER, A, exec, aside
 ```
 
-Press the key again while it is open and the panel puts itself away — the same
-closing `Esc` starts — rather than opening a second one.
+Press the key again while it is open and the panel does what the keyboard says: with
+the keyboard it puts itself away — the same closing `Esc` starts — and without it, it
+takes the keyboard back with the transcript untouched. `river` hands a layer surface
+the keyboard only when the surface maps, so that second press is an unmap and a map of
+the same panel, and the panel blinks for one frame.
 
 The panel draws its own card and its own animation, so Hyprland should not animate
 the surface a second time:

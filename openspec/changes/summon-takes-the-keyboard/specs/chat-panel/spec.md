@@ -68,22 +68,38 @@ compositor.
 - **WHEN** another window is focused and `Esc` is pressed
 - **THEN** that window receives it and the panel stays up
 
-### Requirement: A second summon puts the running panel away
+### Requirement: A second summon does what the keyboard says
 
-Summoning `aside` while an instance is already running SHALL close that instance — the
-same closing the `Esc` key starts — and the new launch SHALL exit zero. It MUST NOT
-start a second panel and MUST NOT raise the running one: a layer surface on the
-overlay layer is never behind anything, so the second press means "not now". A second
-summon that arrives while the panel is already closing SHALL change nothing.
+Summoning `aside` while an instance is already running SHALL act on whether that
+instance holds the keyboard, and the new launch SHALL exit zero in every case. It MUST
+NOT start a second panel.
 
-#### Scenario: Second summon closes instead of duplicating
+- With the keyboard, the summon SHALL close the panel — the same closing the `Esc` key
+  starts — and an open request goes with the process that owns it.
+- Without the keyboard, the summon SHALL take the keyboard back, keeping the panel, its
+  input line and its transcript exactly as they were.
+- A summon that arrives while the panel is already closing SHALL change nothing.
 
-- **WHEN** `aside` is running and the user presses the summoning key again
-- **THEN** the running panel rolls up and exits, and no second panel appears
+Taking the keyboard back SHALL be done by unmapping the surface and mapping it again,
+because that is the only moment a compositor hands a layer surface its keyboard: river
+sends `focus_non_exclusive` when the surface maps (and when its pointer interacts with
+the surface), and `river_seat_v1` has no request that lets a keybinding — or the window
+manager — focus another client's layer surface. The panel is gone for the frame the
+remap takes.
+
+#### Scenario: Second summon while typing closes
+
+- **WHEN** the panel has the keyboard and the user presses the summoning key
+- **THEN** the panel rolls up and exits, and no second panel appears
+
+#### Scenario: Second summon after the keyboard went elsewhere brings it back
+
+- **WHEN** another window was focused and the user presses the summoning key
+- **THEN** the panel stays on screen with its transcript, and the next keystroke reaches its input line
 
 #### Scenario: Second summon while the request is out
 
-- **WHEN** the user summons the panel again before the answer has finished
+- **WHEN** the panel has the keyboard, a request is out, and the user summons it again
 - **THEN** the panel closes, and the request dies with the process that owned it
 
 #### Scenario: Second summon while the panel is already closing
@@ -94,4 +110,4 @@ summon that arrives while the panel is already closing SHALL change nothing.
 ## RENAMED Requirements
 
 - FROM: `### Requirement: A second launch raises the running panel`
-- TO: `### Requirement: A second summon puts the running panel away`
+- TO: `### Requirement: A second summon does what the keyboard says`

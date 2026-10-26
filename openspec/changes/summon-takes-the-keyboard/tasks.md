@@ -8,9 +8,11 @@
 - [x] 1.4 The loop's sleep is the soonest deadline among the cues (`soonest`/`next_wake`), so one cue cannot delay another
 - [x] 1.5 An `exclusive`-then-`on-demand` prime was tried and removed: it left the panel on screen and untypable on Hyprland, and the spec says so
 
-## 2. The second summon puts it away
+## 2. The second summon does what the keyboard says
 
-- [x] 2.1 The control socket means toggle, through a pure `summon_again`, and the byte it writes says so
+- [x] 2.1 The control socket means toggle, through a pure `summon_again` that returns `Close`, `Take` or `Nothing`, and the byte it writes says so
+- [x] 2.1a `has_keyboard` is tracked from `wl_keyboard.enter`/`leave`, separately from the text input's own state
+- [x] 2.1b Taking the keyboard back is an unmap/map of the surface, because river gives a layer surface the keyboard at its map and its WM protocol cannot focus another client's surface
 - [x] 2.2 `raise`, `ActivationState`, its handler and its import are deleted
 - [x] 2.3 A test covers `summon_again`: it starts a closing, and it does nothing while one is already running
 

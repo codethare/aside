@@ -19,9 +19,14 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    pointer: the characters land in the input line. The keyboard arrives because the
    compositor focuses an interactive layer surface when it maps — if typing needs a
    click first, that is the thing to report, with the compositor and its version.
-1a. Summon it again while it is up: it closes, the same way `Esc` closes it, and
-   the second launch exits zero. Summon it a third time while that closing is still
-   running: the closing is not restarted or stretched.
+1a. Summon it again while it has the keyboard: it closes, the same way `Esc` closes
+   it, and the second launch exits zero. Summon it a third time while that closing is
+   still running: the closing is not restarted or stretched.
+1a2. Type a question, focus another window (a binding, or a click on the window), then
+   summon the panel again: it stays on screen with the question still in the input
+   line, it blinks for one frame as the surface remaps, and typing lands in it. On
+   `river` a pointer that only hovers over the panel does not focus it — a click does —
+   and no keybinding of the compositor's can.
 1b. While the panel is up, switch to another window with your compositor's binding
    and type there: the characters land in that window, not in the panel. Go back to
    the panel, type again: they land in the panel. This is the check that the panel

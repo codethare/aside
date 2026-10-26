@@ -57,6 +57,18 @@ failure or note that belongs to it, 8 pixels apart.  Earlier turns are kept for
 the request and drawn nowhere, and so is the question you typed.  The highlighted line is marked by brighter ink, two pixels in from its
 neighbours.  The replies arrive with the panel's own growth and are not animated a
 second time.
+Summoning it again while it is open does what the keyboard says: with the keyboard
+the panel closes the way
+.B Esc
+closes it, and without it the panel takes the keyboard back and keeps its transcript.
+.B river
+gives a layer surface the keyboard only when the surface maps, so taking it back is an
+unmap and a map of the same panel, one frame long.  A keybinding cannot ask for that
+focus directly: neither
+.B river_seat_v1
+nor the window-management protocol has a request that focuses another client's layer
+surface.
+.PP
 While a request is out the bar stays exactly where it is and, once the request has
 taken half a second -- which a fast answer never reaches -- a light runs round its
 rim, one lap every 1.4 seconds, until the answer begins.  The states are animated

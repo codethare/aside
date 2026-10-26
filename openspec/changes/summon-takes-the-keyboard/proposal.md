@@ -10,9 +10,10 @@ on screen. The only thing left for the second press to mean is "not now".
 
 ## What changes
 
-- A second summon **closes the panel** — the closing `Esc` starts — and the new
-  launch exits zero. An open request goes with the process that owns it. A summon
-  that arrives while the closing is already running changes nothing.
+- A second summon **closes the panel** — the closing `Esc` starts — when the panel
+  holds the keyboard, and **takes the keyboard back** when it does not. The new launch
+  exits zero either way. A summon that arrives while the closing is already running
+  changes nothing.
 - The `xdg-activation` path goes with the raise: there is nothing left to raise, so
   `ActivationState`, its handler, its import and the `raise` method are deleted, and
   the control socket's byte means toggle.
@@ -37,6 +38,27 @@ So the interactivity is asked for once, at creation, and never changed: `OnDeman
 with the reasoning written beside the constant. Omarchy's prime exists for panels it
 keeps mapped between summons; aside remaps on every summon, and the prime is not a
 pattern that survives the difference.
+
+## The other half: getting back
+
+Closing on the second press alone is wrong for a layer surface, and river shows why.
+Its `river_seat_v1` can focus a window or a shell surface the *window manager* created;
+it has no request that focuses another client's layer surface, and a layer surface is
+given the keyboard only at its map (or, on river, when the pointer interacts with it).
+So once focus goes to a window, a keybinding has no way to bring the panel back — and
+the panel used to answer that press by closing, which threw the conversation away.
+
+The second summon therefore reads the keyboard: with it, the panel goes away; without
+it, the panel takes it back. Taking it back is an unmap/map of the surface, which is the
+only lever a layer-shell client has. That is why this change keeps the toggle rather
+than the raise: `raise` would need `xdg-activation`, which is a no-op for a layer
+surface, and a fresh map is a different thing — it is the only thing that works.
+
+What remains out of reach: a pointer that merely hovers over the panel (a cursor mover
+like `windhover`) does not focus it, because river focuses a layer surface on pointer
+*interaction*; and no window switcher will ever list the panel, because layer surfaces
+are not windows. Both would need the panel to be an `xdg_toplevel`, which is a different
+product decision than the one this panel is built on.
 
 ## Cost
 

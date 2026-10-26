@@ -441,6 +441,7 @@ fn run(options: Options) -> Result<(), String> {
         close_start: None,
         phase_start: std::time::Instant::now(),
         focused: false,
+        has_keyboard: false,
         output_w: None,
         output_h: None,
         first_frame: true,
@@ -824,10 +825,25 @@ fn soonest(idle: Duration, deadlines: impl IntoIterator<Item = Option<Duration>>
     deadlines.into_iter().flatten().fold(idle, Duration::min)
 }
 
-/// What a second summon means: a closing starts, unless one is already running, which
-/// changes nothing.
-fn summon_again(closing: bool, now: std::time::Instant) -> Option<std::time::Instant> {
-    (!closing).then_some(now)
+/// What a second summon means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Summon {
+    /// The panel has the keyboard: put it away.
+    Close,
+    /// The keyboard went somewhere else: take it back.
+    Take,
+    /// The panel is already leaving: nothing.
+    Nothing,
+}
+
+/// What the second press does, which turns on whether the panel still has the keyboard:
+/// with it the press means "not now", without it the press means "back here".
+fn summon_again(closing: bool, keyboard: bool) -> Summon {
+    match (closing, keyboard) {
+        (true, _) => Summon::Nothing,
+        (false, true) => Summon::Close,
+        (false, false) => Summon::Take,
+    }
 }
 
 /// Which output the surface belongs on, given the session's outputs and the name that
@@ -1119,6 +1135,10 @@ struct State {
     /// keyboard": with no input method in the session it stays false while typing works
     /// from the keysyms alone.
     focused: bool,
+    /// Whether the compositor has given this surface the keyboard, input method or not.
+    /// The second summon turns on this: with the keyboard it puts the panel away, without
+    /// it, it takes the keyboard back.
+    has_keyboard: bool,
     /// Logical size of the output the panel is on, once it has reported one.
     output_w: Option<u32>,
     output_h: Option<u32>,
@@ -1454,13 +1474,35 @@ impl State {
         Ok(())
     }
 
-    /// A second summon: the panel is already up, so it goes the way `Esc` leaves it.
-    /// An open request goes with the process that owns it.
+    /// A second summon. With the keyboard, the panel goes the way `Esc` leaves it, and an
+    /// open request goes with the process that owns it. Without it, the panel takes the
+    /// keyboard back, so the key that opened it brings it to the front again.
     fn toggle(&mut self) {
-        if let Some(at) = summon_again(self.close_start.is_some(), std::time::Instant::now()) {
-            self.close_start = Some(at);
-            self.dirty = true;
+        match summon_again(self.close_start.is_some(), self.has_keyboard) {
+            Summon::Nothing => {}
+            Summon::Close => {
+                self.close_start = Some(std::time::Instant::now());
+                self.dirty = true;
+            }
+            Summon::Take => self.take_keyboard(),
         }
+    }
+
+    /// Take the keyboard back on a panel that is already on screen.
+    ///
+    /// The compositor hands a layer surface its keyboard when the surface **maps**: river
+    /// sends `focus_non_exclusive` on map and, for a click, when its pointer interacts
+    /// with the surface — and its window-management protocol has no request that focuses
+    /// another client's layer surface, so a keybinding cannot ask for it either. Unmapping
+    /// and mapping again is therefore the only way back, and it costs one frame of the
+    /// panel being gone.
+    fn take_keyboard(&mut self) {
+        self.layer.wl_surface().attach(None, 0, 0);
+        self.layer.commit();
+        // The null commit cleared the buffer that was attached to the old surface state.
+        self.buffer = None;
+        self.dirty = true;
+        self.draw();
     }
 
     /// How long the loop may sleep: the soonest of everything that can change on its own,
@@ -2525,13 +2567,14 @@ impl KeyboardHandler for State {
         _raw: &[u32],
         _keysyms: &[Keysym],
     ) {
-        if self.layer.wl_surface() == surface
-            && let Some(text_input) = self.text_input.as_ref()
-        {
-            self.focused = true;
-            text_input.enable();
-            text_input.set_content_type(ContentHint::empty(), ContentPurpose::Normal);
-            text_input.commit();
+        if self.layer.wl_surface() == surface {
+            self.has_keyboard = true;
+            if let Some(text_input) = self.text_input.as_ref() {
+                self.focused = true;
+                text_input.enable();
+                text_input.set_content_type(ContentHint::empty(), ContentPurpose::Normal);
+                text_input.commit();
+            }
         }
     }
 
@@ -2544,6 +2587,7 @@ impl KeyboardHandler for State {
         _serial: u32,
     ) {
         if self.layer.wl_surface() == surface {
+            self.has_keyboard = false;
             self.focused = false;
             // Stop composing, or an input method keeps a pre-edit open while the
             // panel is not focused.
@@ -2987,13 +3031,18 @@ mod tests {
         );
     }
 
-    /// A second summon puts the panel away; a second one while it is already leaving
-    /// changes nothing.
+    /// The second summon reads the keyboard: with it the panel goes away, without it the
+    /// panel takes it back, and once it is leaving the press changes nothing.
     #[test]
-    fn the_second_summon_starts_a_closing_and_a_third_changes_nothing() {
-        let now = std::time::Instant::now();
-        assert_eq!(summon_again(false, now), Some(now), "it starts closing");
-        assert_eq!(summon_again(true, now), None, "already leaving");
+    fn the_second_summon_closes_with_the_keyboard_and_takes_it_back_without_it() {
+        assert_eq!(summon_again(false, true), Summon::Close);
+        assert_eq!(summon_again(false, false), Summon::Take);
+        assert_eq!(summon_again(true, true), Summon::Nothing, "already leaving");
+        assert_eq!(
+            summon_again(true, false),
+            Summon::Nothing,
+            "already leaving"
+        );
     }
 
     /// The loop's sleep is the soonest deadline in the set, whatever order it is listed
