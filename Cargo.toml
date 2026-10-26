@@ -16,3 +16,10 @@ skrifa = "0.48.0"
 smithay-client-toolkit = "0.21.1"
 wayland-client = "0.31.14"
 wayland-protocols = { version = "0.32.13", features = ["unstable"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
