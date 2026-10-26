@@ -1,12 +1,12 @@
 # Tasks
 
-## 1. A bounded prime instead of an endless grab
+## 1. The keyboard, taken once at the map
 
-- [x] 1.1 `PRIME` (`Exclusive`) and `PRIME_MS` (75) sit beside `INTERACTIVITY` (`OnDemand`), each with the reason it is what it is
-- [x] 1.2 The surface is created asking for `Exclusive`; the release to `OnDemand` happens in `tick`, no later than `PRIME_MS` after the first configure, and immediately once the panel starts closing
-- [x] 1.3 The event loop sleeps to the prime's deadline instead of overshooting it
-- [x] 1.4 A test pins the shape of the contract: the settled mode is `OnDemand`, the prime is `Exclusive`, and it is bounded
-- [x] 1.5 The loop's sleep is the soonest deadline among the cues (`soonest`/`next_wake`), so the prime cannot be delayed behind a copy note or any other sleep
+- [x] 1.1 The surface is created asking for `OnDemand`, and that is the only keyboard-interactivity request the run ever makes
+- [x] 1.2 The comment beside it says why: a compositor focuses an interactive layer surface when it maps, and changing the value while mapped makes Hyprland re-run its mouse-move focus and give the keyboard back to the window under the pointer
+- [x] 1.3 A test pins the mode
+- [x] 1.4 The loop's sleep is the soonest deadline among the cues (`soonest`/`next_wake`), so one cue cannot delay another
+- [x] 1.5 An `exclusive`-then-`on-demand` prime was tried and removed: it left the panel on screen and untypable on Hyprland, and the spec says so
 
 ## 2. The second summon puts it away
 

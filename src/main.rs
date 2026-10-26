@@ -86,22 +86,22 @@ const BTN_LEFT: u32 = 0x110;
 /// Output height assumed for the height cap until the real one is known.
 const FALLBACK_OUTPUT_H: u32 = 1080;
 const APP_ID: &str = "aside";
-/// What the panel asks the compositor for once it has settled: on-demand, so the
-/// keyboard stays shareable. `Exclusive` kept for the life of the surface is a grab - a
-/// compositor keeps an exclusive layer surface focused and undoes every attempt to
-/// focus a view while it is mapped (sway sets `seat->has_exclusive_layer` and re-focuses
-/// the layer after each change), so nothing else could be typed into. On-demand costs
-/// the panel the keyboard when the pointer leaves it: the compositor focuses it on hover
-/// under focus-follows-mouse, or on a click.
+/// What the panel asks the compositor for, once, when the surface is created: on-demand.
+///
+/// On-demand is typable by itself. Hyprland focuses a layer surface on its map when its
+/// interactivity is anything but `none` (`LayerSurface.cpp`, `takeKeyboardFocus`), and
+/// the panel exits when it closes, so every summon is a fresh map. `Exclusive` is what
+/// must not be asked for: a compositor keeps an exclusive layer surface focused and
+/// undoes every attempt to focus a view while it is mapped (sway sets
+/// `seat->has_exclusive_layer` and re-focuses the layer after each change), so nothing
+/// else could be typed into.
+///
+/// The value is set once and never changed while the surface is mapped. Downgrading
+/// `Exclusive` to `OnDemand` looks like the way to have both, and it is not: Hyprland
+/// answers that commit by re-running its mouse-move focus (`simulateMouseMovement`), and
+/// with the pointer over some other window that hands the keyboard straight back to it,
+/// which leaves the panel on screen and untypable.
 const INTERACTIVITY: KeyboardInteractivity = KeyboardInteractivity::OnDemand;
-
-/// How long the panel asks for `Exclusive` after it is configured. On-demand alone is
-/// only arrived at with the pointer, which for a hotkey-summoned panel means a click
-/// before the first letter; `Exclusive` is the one mode a compositor hands a layer
-/// surface the keyboard on its own. The prime is what makes it typable, and the timer
-/// is what keeps it from being a grab.
-const PRIME: KeyboardInteractivity = KeyboardInteractivity::Exclusive;
-const PRIME_MS: u64 = 75;
 
 /// A frame per step of whatever is moving: a shape change, the rise into place, the
 /// working light, or a request whose bytes can arrive at any moment.
@@ -446,7 +446,6 @@ fn run(options: Options) -> Result<(), String> {
         first_frame: true,
         configured: false,
         configure_wait: Some(std::time::Instant::now()),
-        prime_at: None,
         panel_output: None,
         painted: false,
         dirty: true,
@@ -1067,9 +1066,6 @@ struct State {
     /// When the wait for that first configure started, so a compositor that never
     /// sends one is reported instead of leaving the panel invisible forever.
     configure_wait: Option<std::time::Instant>,
-    /// When the exclusive prime of the keyboard started, while one is running. The
-    /// panel gives the keyboard back when it is due, or when it starts closing.
-    prime_at: Option<std::time::Instant>,
     /// The output the panel is on: the one `--output` named, the only one the session has,
     /// or the one the surface entered. Its size is what centres the panel and caps its
     /// height; every other output's size is none of the panel's business.
@@ -1448,9 +1444,9 @@ impl State {
         // edge, and the panel is moved on both axes. With no right anchor the surface
         // keeps its own width, and `left_margin` centres it.
         self.layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT);
-        // The prime is the keyboard's: the clock starts on the configure, so the release
-        // always lands on a surface the compositor has taken.
-        self.layer.set_keyboard_interactivity(PRIME);
+        // On-demand from the first commit on, and never changed afterwards: the map is
+        // where a compositor hands an interactive layer surface the keyboard.
+        self.layer.set_keyboard_interactivity(INTERACTIVITY);
         // Collapsed to the bar. The first commit is buffer-less: it asks for the
         // configure, and nothing may be attached before that one arrives.
         self.apply_size();
@@ -1467,35 +1463,6 @@ impl State {
         }
     }
 
-    /// How long until the prime is due: `None` once it has been given back, or while the
-    /// compositor has not configured the surface yet.
-    fn prime_in(&self) -> Option<Duration> {
-        let left = Duration::from_millis(PRIME_MS).saturating_sub(self.prime_at?.elapsed());
-        Some(left.max(Duration::from_millis(1)))
-    }
-
-    /// Give the keyboard back if the prime is over, or if the panel is leaving. Called
-    /// every round, so the release cannot be missed by a frame that never comes.
-    fn end_prime(&mut self) {
-        let Some(at) = self.prime_at else {
-            return;
-        };
-        // Only on a surface the compositor has taken: a second commit before the first
-        // configure is a layer-shell error, and a panel that leaves that early destroys
-        // its surface anyway, which releases the grab.
-        if !self.configured {
-            return;
-        }
-        if self.close_start.is_none() && at.elapsed() < Duration::from_millis(PRIME_MS) {
-            return;
-        }
-        self.prime_at = None;
-        self.layer.set_keyboard_interactivity(INTERACTIVITY);
-        // A state-only commit: no buffer, so this applies the interactivity without
-        // repainting anything.
-        self.layer.commit();
-    }
-
     /// How long the loop may sleep: the soonest of everything that can change on its own,
     /// never later than the idle tick. Read as a set of deadlines rather than as a list of
     /// cases, so the order they are checked in cannot delay one behind another.
@@ -1507,7 +1474,6 @@ impl State {
                 moving.then_some(FRAME_WAKE),
                 self.request.is_some().then_some(FRAME_WAKE),
                 self.copy_note_up().then_some(COPY_NOTE_WAKE),
-                self.prime_in(),
                 self.light_in(),
                 self.thumb_in(),
             ],
@@ -1947,9 +1913,6 @@ impl State {
                 "the compositor did not configure the window within {CONFIGURE_TIMEOUT_S}s"
             ));
         }
-        // The keyboard is the session's: the prime is given back as soon as it is due,
-        // or the moment the panel starts leaving.
-        self.end_prime();
         if self.phase == Phase::Thinking {
             // The blink is the only thing moving, so keep asking for frames.
             self.dirty = true;
@@ -2443,9 +2406,6 @@ impl LayerShellHandler for State {
         self.apply_size();
         if self.first_frame {
             self.first_frame = false;
-            // The prime's clock starts here: the surface is the compositor's now, so the
-            // commit that gives the keyboard back is one it is ready for.
-            self.prime_at = Some(std::time::Instant::now());
             // The panel rises out of the bottom edge on its first frame.
             self.enter_start = Some(std::time::Instant::now());
             self.draw();
@@ -3013,30 +2973,18 @@ mod tests {
         assert_eq!(copied_lines(&three, &rows), 3, "three lines");
     }
 
-    /// The prime takes the keyboard, so a hotkey-summoned panel can be typed into
-    /// without a click; and it is bounded, because an exclusive layer surface kept for as
-    /// long as it is mapped makes every view unfocusable - the bug `share-the-keyboard`
-    /// fixed, and the reason the prime is a timer rather than a mode.
+    /// The keyboard is the compositor's to move. An exclusive layer surface makes every
+    /// view unfocusable while it is mapped - the bug `share-the-keyboard` fixed - and the
+    /// value is asked for once, when the surface is created, because changing it on a
+    /// mapped surface makes Hyprland re-run its mouse-move focus and hand the keyboard to
+    /// whatever is under the pointer.
     #[test]
-    fn the_panel_asks_for_the_keyboard_briefly_and_then_shares_it() {
+    fn the_panel_leaves_the_keyboard_shareable() {
         assert_eq!(
             INTERACTIVITY,
             KeyboardInteractivity::OnDemand,
-            "a settled exclusive surface defeats every view focus: the keyboard would never leave the panel"
+            "exclusive layer surfaces defeat every view focus: the keyboard would never leave the panel"
         );
-        assert_eq!(
-            PRIME,
-            KeyboardInteractivity::Exclusive,
-            "the prime is the one mode a compositor hands the keyboard over in"
-        );
-        // A prime that is not bounded is the grab this project already reverted once, so
-        // the bound is checked when this is compiled rather than when it runs.
-        const {
-            assert!(
-                PRIME_MS > 0 && PRIME_MS <= 100,
-                "the grab is bounded by the clock"
-            )
-        };
     }
 
     /// A second summon puts the panel away; a second one while it is already leaving
@@ -3067,8 +3015,7 @@ mod tests {
             Duration::from_millis(10),
             "the earliest one wins, wherever it sits in the list"
         );
-        // A request's frames beat a longer cue, so the working light never stutters, and
-        // the prime keeps its own deadline instead of waiting behind a copy note.
+        // A request's frames beat a longer cue, so the working light never stutters.
         assert_eq!(
             soonest(idle, [Some(FRAME_WAKE), Some(COPY_NOTE_WAKE)]),
             FRAME_WAKE

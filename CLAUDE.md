@@ -25,12 +25,14 @@ change.
    pointer. The key table in `specs/chat-panel` is the contract, and it is
    per-mode: typing, the `Ctrl+T` prefix (one key wide), and tmux's copy mode. A
    key consumed by the prefix or by copy mode never reaches the input line, and
-   `Alt+hjkl` moves the panel in every mode. The panel takes the keyboard with a
-   bounded prime — `exclusive` for 75 ms after it maps, then `on-demand` — because
-   on-demand alone is only reached with the pointer, and an exclusive surface kept
-   for as long as it is mapped makes every view unfocusable. After the prime the
-   keyboard is the compositor's to move, and the second summon is how the panel is
-   put away.
+   `Alt+hjkl` moves the panel in every mode. The panel asks for `on-demand`
+   interactivity once, at creation, and never changes it: a compositor focuses an
+   interactive layer surface when it maps (which is every summon, since the process
+   exits with the panel), `exclusive` would make every view unfocusable while it is
+   mapped, and changing the value on a mapped surface makes Hyprland re-run its mouse
+   focus and hand the keyboard to the window under the pointer. The keyboard is
+   therefore the compositor's to move, and the second summon is how the panel is put
+   away.
 4. **The chrome is `plush`'s.** Copied exactly: radius 12, `PAD` 16, 8 px gap,
    `SEPARATION` 16 (which must clear `SHADOW_REACH_UP`), the 26 px shadow margin
    with the tight and wide layers, the rim's lit and dark profiles with the band one

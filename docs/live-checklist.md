@@ -16,10 +16,9 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 
 1. Press the keybinding. The panel appears in the lower half of the output,
    centred, its field just below the vertical centre. Type without touching the
-   pointer: the characters land in the input line. The panel asks for the keyboard
-   exclusively for 75 ms when it maps and then lets it go — if typing needs a click
-   first, the prime is not arriving or the compositor is ignoring it, and that is
-   the thing to report.
+   pointer: the characters land in the input line. The keyboard arrives because the
+   compositor focuses an interactive layer surface when it maps — if typing needs a
+   click first, that is the thing to report, with the compositor and its version.
 1a. Summon it again while it is up: it closes, the same way `Esc` closes it, and
    the second launch exits zero. Summon it a third time while that closing is still
    running: the closing is not restarted or stretched.

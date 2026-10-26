@@ -8,14 +8,22 @@ The panel SHALL be summoned by a compositor keybinding that runs `aside`. It is 
 layer surface, anchored to the bottom and left edges so that both margins are real
 positions.
 
-It SHALL take the keyboard by itself when it appears: it maps asking for **exclusive**
-interactivity, and SHALL drop to **on-demand** once the compositor has configured the
-surface, no later than 100 ms after that, and immediately when the panel starts
-closing. While it asks for on-demand — which is every moment after that prime — the
-compositor focuses it when the pointer is over it or when it is clicked, and SHALL be
-able to focus another surface instead while the panel is still mapped. The exclusive
-prime MUST be bounded: an exclusive mode kept for as long as the surface exists makes
-every view unfocusable, and that is not what this panel asks for.
+It SHALL take the keyboard by itself when it appears, by asking for **on-demand**
+interactivity: a compositor focuses a layer surface whose interactivity is anything
+but `none` when that surface maps, which is all a panel that exits when it closes
+needs — every summon is a fresh map. Hyprland does exactly that
+(`LayerSurface.cpp`, `takeKeyboardFocus`), and the keyboard is then the compositor's
+to move: it CAN focus another surface while the panel is mapped, and the panel SHALL be
+typable again when the pointer reaches it or when it is clicked.
+
+The interactivity SHALL be asked for once, when the surface is created, and MUST NOT
+be changed while the surface is mapped. A bounded `exclusive` prime that decays to
+`on-demand` is the tempting shape and it does not work: Hyprland answers that commit by
+re-running its mouse-move focus, and with the pointer over any other window it hands
+the keyboard straight back to that window, leaving the panel visible and untypable. An
+`exclusive` mode that is never given back is the grab `share-the-keyboard` removed: a
+compositor keeps an exclusive layer surface focused and undoes every attempt to focus
+a view while it is mapped.
 
 While the panel is focused it SHALL be fully typable, with the text input enabled;
 when it loses focus the text input SHALL be disabled and any pre-edit dropped, and
@@ -33,10 +41,16 @@ compositor.
 
 #### Scenario: The panel is typable as soon as it appears
 
-- **WHEN** the user presses the summoning key on a compositor that does not follow the
-  pointer
+- **WHEN** the user presses the summoning key on a compositor that focuses an
+  interactive layer surface when it maps
 - **THEN** the panel maps with the keyboard, and the next keystroke reaches the input
   line without the pointer being moved onto it or a click
+
+#### Scenario: The interactivity is never changed on a mapped surface
+
+- **WHEN** the panel is on screen and has been typed into
+- **THEN** no further keyboard-interactivity request is sent for its surface, and the
+  keyboard stays with the panel until the compositor moves it somewhere else
 
 #### Scenario: Another window keeps the keyboard while the panel is up
 

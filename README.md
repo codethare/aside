@@ -62,11 +62,13 @@ is checked on a machine with no compositor.
 
 ## What it looks like
 
-A `wlr-layer-shell` surface on the overlay layer. It asks for **exclusive** keyboard
-interactivity when it maps and settles into **on-demand** 75 ms later: the prime is
-what makes a hotkey-summoned panel typable without reaching for the pointer, and
-on-demand is what hands the keyboard back to whatever window is focused next, so
-the panel never blocks typing elsewhere. Anchoring is what keeps it out of the way;
+A `wlr-layer-shell` surface on the overlay layer, asking for **on-demand** keyboard
+interactivity, once: a compositor gives the keyboard to an interactive layer surface
+when it maps, so the panel is typable the moment it appears, and it stays the
+compositor's to move afterwards, so the panel never blocks typing elsewhere. The
+request is never changed on a mapped surface — Hyprland answers such a change by
+re-running its mouse focus and handing the keyboard back to the window under the
+pointer. Anchoring is what keeps it out of the way;
 `Esc` closes it. Anchored to the bottom of the output and centred, its bottom edge
 38 % of the output height above the screen's bottom edge: the field lands just below the vertical centre, where the eye already
 is, and the replies grow upwards out of it. The bottom anchor is what keeps the
