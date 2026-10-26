@@ -1527,7 +1527,7 @@ mod tests {
             buf
         };
         let typing = paint_with("", true);
-        let prefix = paint_with("press [ to enter copy mode", false);
+        let prefix = paint_with("press [ for copy mode, + / - for text size", false);
         let px = |buf: &Vec<u8>, x: u32, y: u32| buf[at(bw, x, y)..][..4].to_vec();
         // The bar's body is the mode tone, not the glass.
         let mid = h - f.row_h / 2;

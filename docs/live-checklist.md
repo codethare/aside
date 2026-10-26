@@ -15,8 +15,14 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 ## The panel
 
 1. Press the keybinding. The panel appears in the lower half of the output,
-   centred, its field just below the vertical centre. Move the pointer onto it (or
-   click it) and type: the characters land in the input line.
+   centred, its field just below the vertical centre. Type without touching the
+   pointer: the characters land in the input line. The panel asks for the keyboard
+   exclusively for 75 ms when it maps and then lets it go — if typing needs a click
+   first, the prime is not arriving or the compositor is ignoring it, and that is
+   the thing to report.
+1a. Summon it again while it is up: it closes, the same way `Esc` closes it, and
+   the second launch exits zero. Summon it a third time while that closing is still
+   running: the closing is not restarted or stretched.
 1b. While the panel is up, switch to another window with your compositor's binding
    and type there: the characters land in that window, not in the panel. Go back to
    the panel, type again: they land in the panel. This is the check that the panel
@@ -50,9 +56,12 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    clipboard into the input line, at the caret, and a missing `wl-paste` shows one
    line in the transcript instead of doing nothing. Paste it somewhere and check
    there is no extra whitespace or transcript around it.
-5b. `Ctrl+T`: the bar changes tone, takes no input and reads `press [ to enter copy
-   mode`, with no caret; any other key leaves it and types nothing, and the bar
-   returns exactly as it was. Then `Ctrl+T` then `[`: the bar reads `-- COPY --`,
+5b. `Ctrl+T`: the bar changes tone, takes no input and reads `press [ for copy
+   mode, + / - for text size`, with no caret; any other key leaves it and types
+   nothing, and the bar returns exactly as it was. `Ctrl+T` then `+` grows the text
+   two pixels, `Ctrl+T` then `-` shrinks it, the bar and the rows follow, and the
+   answer on screen re-wraps in the new size; ten presses up stop at 72 and ten down
+   stop at 8 without an error. Then `Ctrl+T` then `[`: the bar reads `-- COPY --`,
    the caret is gone, and a cursor sits in the replies.
 5b2. In copy mode `h`/`l` move a character, `j`/`k` a line, `w`/`b` a word,
    `Ctrl+d`/`Ctrl+u` half a page, `g`/`G` to the ends. `Space` selects and `Enter`
@@ -93,12 +102,21 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    the panel stays open, and `pgrep -a bwrap` now finds nothing.
 7. Press `Esc` again: the panel closes, and faster than it opened — the collapse to a
    line takes about a fifth of a second. Repeat the keybinding while it is open:
-   the *same* window comes forward, and no second window appears.
+   the same panel closes and no second window appears.
 7b. With the panel open, click a terminal behind it and type: the text goes to the
    terminal, not to the panel. Click the panel and type: it goes to the panel.
 7c. Put `font_size = "28"` and `font_family = "DejaVu Sans Mono"` in the config and
    start again: the text is that size and that face, the bar is taller, and Chinese
    still renders. A `font_size = "2"` refuses to start, naming the file and line.
+7d. Put `animations = "false"` in the config: summon, ask, close — each is one
+   frame, with no spreading line, no unfolding card and no collapse; a slow request
+   still lights the rim. `animations = "sometimes"` refuses to start, naming the
+   line and both accepted values.
+7e. With two outputs, run `aside --output <name of the second>`: it opens on that
+   output at that output's gap, and moving the pointer to the first leaves it there.
+   With no flag it opens where the compositor puts it, and a click on the other
+   output does not close it. `--output nonsense` writes one line naming the outputs
+   that exist and opens nothing.
 
 ## Typing, including an input method
 
@@ -115,8 +133,9 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 
 12. On a 1× output, then a 1.5× and a 2× output: text is the same logical size on
     each; above 1× there are no colour fringes on glyph edges.
-13. Resize the window while an answer is on screen: the text re-wraps to the new
-    width, and dragging it narrow or wide does not leave stray clipped glyphs.
+13. Start once with `font_size = "72"` and ask something long: the rows, the cards and
+    the scrolling follow the size, lines never overlap, the last line still fades into
+    the card's bottom edge, and the 64-row cap holds on a small output.
 14. Time the first frame on a cold start (`time aside` with no transcript): it
     should be well under 50 ms after the compositor has the surface.
 15. Put a `wlmenu` frame next to an `aside --preview out.ppm` frame and check the

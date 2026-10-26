@@ -45,24 +45,31 @@ pub const SIZE: f32 = 20.0;
 /// panel is unreadable; above `72` a row is taller than most panels have room for.
 pub const SIZE_RANGE: std::ops::RangeInclusive<u32> = 8..=72;
 
-/// What the configuration said about the font, resolved once at startup. The
-/// panel is a single font at a single size for the whole run, so this is a
-/// process-wide setting rather than a parameter threaded through every sizing
-/// function.
-static CONFIGURED_SIZE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+/// What the configuration said about the font, resolved once at startup and then
+/// changeable from the panel's prefix. The panel is a single font at a single size for
+/// the whole run — a size change reads the face again and swaps it in — so this is a
+/// process-wide setting rather than a parameter threaded through every sizing function.
+static CONFIGURED_SIZE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(f32::to_bits(SIZE));
 static CONFIGURED_FAMILY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Take the configured font. Called once, before the first frame.
 pub fn configure(size: f32, family: Option<String>) {
-    let _ = CONFIGURED_SIZE.set(size);
+    resize(size);
     if let Some(family) = family {
         let _ = CONFIGURED_FAMILY.set(family);
     }
 }
 
+/// Change the text size for the rest of the run: the panel's sizes are derived from it,
+/// so the caller re-reads the face and re-lays the transcript out.
+pub fn resize(size: f32) {
+    CONFIGURED_SIZE.store(size.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The panel's text size: the configured one, or [`SIZE`].
 pub fn size() -> f32 {
-    CONFIGURED_SIZE.get().copied().unwrap_or(SIZE)
+    f32::from_bits(CONFIGURED_SIZE.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// The configured family, if any. A name nothing provides is not an error: it is

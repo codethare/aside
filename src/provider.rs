@@ -149,7 +149,8 @@ fn read_config(path: &std::path::Path) -> Result<Vec<(String, String)>, ConfigEr
 }
 
 /// Flat `key = "value"` lines with `#` comments. `model`, `base_url`, `proxy`,
-/// `font_size` and `font_family` are the only known keys; anything else is an error
+/// `font_size`, `font_family` and `animations` are the only known keys; anything else
+/// is an error
 /// rather than a silent shrug, so a typo cannot quietly change nothing. A size is
 /// validated here, where its line number is known.
 pub fn parse_config(text: &str) -> Result<Vec<(String, String)>, (usize, String)> {
@@ -187,6 +188,15 @@ pub fn parse_config(text: &str) -> Result<Vec<(String, String)>, (usize, String)
                             range.start(),
                             range.end()
                         ),
+                    ));
+                }
+                out.push((key.to_string(), value));
+            }
+            "animations" => {
+                if value != "true" && value != "false" {
+                    return Err((
+                        line,
+                        format!("`animations` must be \"true\" or \"false\": {value:?}"),
                     ));
                 }
                 out.push((key.to_string(), value));
@@ -382,6 +392,23 @@ mod tests {
             assert_eq!(err.0, 1, "the line is named");
             assert!(err.1.contains("font_size"), "the key is named: {}", err.1);
         }
+    }
+
+    #[test]
+    fn the_animation_key_takes_two_values_and_nothing_else() {
+        for good in ["true", "false"] {
+            assert!(
+                parse_config(&format!("animations = \"{good}\"")).is_ok(),
+                "{good} is a setting"
+            );
+        }
+        let (line, message) = parse_config("animations = \"sometimes\"").expect_err("must fail");
+        assert_eq!(line, 1, "the line is named");
+        assert!(message.contains("animations"), "{message}");
+        assert!(
+            message.contains("false"),
+            "both values are named: {message}"
+        );
     }
 
     #[test]

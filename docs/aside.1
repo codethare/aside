@@ -5,6 +5,7 @@ aside \- a keyboard-summoned AI chat panel for Wayland
 .B aside
 .RB [ \-\-model " model" ]
 .RB [ \-\-base\-url " url" ]
+.RB [ \-\-output " output" ]
 .br
 .B aside \-\-preview
 .I file
@@ -25,10 +26,11 @@ model sent, and no fenced block is syntax highlighted.
 .PP
 The panel is a
 .B wlr\-layer\-shell
-surface on the overlay layer, anchored to the bottom of the output and centred,
-with on\-demand keyboard interactivity: the compositor focuses it when the pointer
-is over it or when it is clicked, and hands the keyboard back to whatever is
-focused next, so it never blocks typing in another window.  Its bottom edge is 38 per cent of the
+surface on the overlay layer, anchored to the bottom of the output and centred.
+It asks for exclusive keyboard interactivity when it maps and settles into
+on\-demand 75 milliseconds later: the prime is what makes a hotkey\-summoned panel
+typable without touching the pointer, and on\-demand hands the keyboard back to
+whatever is focused next, so it never blocks typing in another window.  Its bottom edge is 38 per cent of the
 output height above the screen's bottom edge:
 the field lands just below the vertical centre and the replies grow upwards out
 of it.  The chrome is the one
@@ -95,6 +97,12 @@ so
 and friends have no effect.  A proxy that terminates TLS sees the question and
 the credential.
 .TP
+.BI \-\-output " output"
+Create the panel on this output, by name as the compositor reports it.  Without
+it the compositor places the panel, which on Hyprland is the focused monitor; with
+several outputs and no name, a click on another output does not close the panel.
+A name no output has is one line naming the outputs that exist, and no panel.
+.TP
 .BI \-\-preview " file"
 Render a scripted conversation to
 .I file
@@ -130,11 +138,18 @@ Paste the clipboard into the input line with
 .TP
 .B Ctrl+T
 Enter the prefix mode, the way a terminal multiplexer does: it takes exactly one
-key.  In this release that key is
+key.
 .B [
-which enters copy mode; any other key leaves the prefix and does nothing.  While
-the prefix waits the bar takes no input, changes tone and reads
-\fBpress [ to enter copy mode\fP.
+enters copy mode,
+.B +
+(or
+.BR = ,
+where it lives unshifted) makes the text two pixels larger and
+.B \-
+two pixels smaller, inside the 8 to 72 the configuration allows; any other key
+leaves the prefix and does nothing.  While the prefix waits the bar takes no
+input, changes tone and reads
+\fBpress [ for copy mode, + / \- for text size\fP.
 .TP
 .B Alt+h ", " Alt+j ", " Alt+k ", " Alt+l
 Move the panel 16 pixels left, down, up or right, in every mode; ten times that
@@ -178,7 +193,7 @@ Overridden by the matching flag, overriding the configuration file.
 Where the configuration file is looked for.
 .TP
 .B XDG_RUNTIME_DIR
-Where the single-instance socket lives, so that a second launch raises the
+Where the single-instance socket lives, so that a second launch closes the
 running panel instead of opening a second window.
 .SH FILES
 .TP
@@ -192,12 +207,23 @@ lines, with
 .I font_size
 and
 .I font_family
+and
+.I animations
 recognised.  A
 .I font_size
 outside 8 to 72 logical pixels is an error naming the file and the line, and the
 panel does not open; a
 .I font_family
-nothing provides falls back to the built-in chain.  No credential may be stored
+nothing provides falls back to the built-in chain;
+.I animations
+takes
+.B true
+or
+.BR false ,
+and
+.B false
+skips the opening, the growth and the closing while keeping the light on the rim
+and the scroll indicator.  No credential may be stored
 here.
 .SH EXIT STATUS
 .TP

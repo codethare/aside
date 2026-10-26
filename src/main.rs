@@ -19,7 +19,6 @@ mod transcript;
 use std::process::exit;
 use std::time::Duration;
 
-use smithay_client_toolkit::activation::{ActivationHandler, ActivationState, RequestData};
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::reexports::calloop::PostAction;
@@ -87,22 +86,40 @@ const BTN_LEFT: u32 = 0x110;
 /// Output height assumed for the height cap until the real one is known.
 const FALLBACK_OUTPUT_H: u32 = 1080;
 const APP_ID: &str = "aside";
-/// What the panel asks the compositor for: on-demand, so the keyboard stays
-/// shareable. `Exclusive` cannot be used here - a compositor keeps an exclusive layer
-/// surface focused and undoes every attempt to focus a view while it is mapped (sway
-/// sets `seat->has_exclusive_layer` and re-focuses the layer after each change), so
-/// with the panel on screen nothing else could be typed into. On-demand costs the
-/// panel the keyboard when the pointer leaves it: the compositor focuses it on hover
+/// What the panel asks the compositor for once it has settled: on-demand, so the
+/// keyboard stays shareable. `Exclusive` kept for the life of the surface is a grab - a
+/// compositor keeps an exclusive layer surface focused and undoes every attempt to
+/// focus a view while it is mapped (sway sets `seat->has_exclusive_layer` and re-focuses
+/// the layer after each change), so nothing else could be typed into. On-demand costs
+/// the panel the keyboard when the pointer leaves it: the compositor focuses it on hover
 /// under focus-follows-mouse, or on a click.
 const INTERACTIVITY: KeyboardInteractivity = KeyboardInteractivity::OnDemand;
 
+/// How long the panel asks for `Exclusive` after it is configured. On-demand alone is
+/// only arrived at with the pointer, which for a hotkey-summoned panel means a click
+/// before the first letter; `Exclusive` is the one mode a compositor hands a layer
+/// surface the keyboard on its own. The prime is what makes it typable, and the timer
+/// is what keeps it from being a grab.
+const PRIME: KeyboardInteractivity = KeyboardInteractivity::Exclusive;
+const PRIME_MS: u64 = 75;
+
+/// A frame per step of whatever is moving: a shape change, the rise into place, the
+/// working light, or a request whose bytes can arrive at any moment.
+const FRAME_WAKE: Duration = Duration::from_millis(16);
+/// How often `copied N lines` needs a frame while it is up: it only has to clear itself.
+const COPY_NOTE_WAKE: Duration = Duration::from_millis(100);
+/// The idle tick: nothing on screen can change on its own, so the loop only comes back to
+/// pick up whatever the compositor sends.
+const IDLE_WAKE: Duration = Duration::from_millis(250);
+
 const USAGE: &str = "\
-usage: aside [--model MODEL] [--base-url URL] [--proxy URL] [--preview FILE] [--help] [--version]
+usage: aside [--model MODEL] [--base-url URL] [--proxy URL] [--output OUTPUT] [--preview FILE] [--help] [--version]
 
   --model MODEL     model to ask (default deepseek/deepseek-v4.1-flash)
   --base-url URL    provider base URL (default https://api.commandcode.ai/provider/v1)
   --proxy URL       proxy for the request, any scheme curl accepts
                     (e.g. socks5h://127.0.0.1:1080); default is a direct connection
+  --output OUTPUT   pin the panel to this output; without it the compositor places it
   --preview FILE    render a scripted conversation to a PPM file and exit
 ";
 
@@ -200,6 +217,12 @@ fn main() {
         .map(|(_, v)| v.clone())
         .filter(|v| !v.trim().is_empty());
     font::configure(font_size, font_family);
+    // Animation is a setting, not a constant: the transitions are one frame each when
+    // it is off, and the light and the scroll indicator stay either way.
+    let animate = file
+        .iter()
+        .find(|(k, _)| k == "animations")
+        .is_none_or(|(_, v)| v == "true");
 
     if let Some(path) = flag("--preview") {
         if let Err(e) = preview(std::path::Path::new(&path)) {
@@ -234,15 +257,21 @@ fn main() {
         }
     };
 
-    // A second launch asks this one to come forward, and exits without even
+    // A second launch asks this one to put itself away, and exits without even
     // connecting to the compositor.
     let listener = match control::claim() {
         control::Claim::Owner(listener) => Some(listener),
-        control::Claim::Raised => return,
+        control::Claim::Sent => return,
         control::Claim::Disabled => None,
     };
 
-    if let Err(e) = run(config, key, listener) {
+    if let Err(e) = run(Options {
+        config,
+        key,
+        listener,
+        output: flag("--output"),
+        animate,
+    }) {
         eprintln!("aside: {e}");
         exit(1);
     }
@@ -318,24 +347,48 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
 /// one that never does leaves a client with nothing to draw and no way to be seen.
 pub const CONFIGURE_TIMEOUT_S: u64 = 5;
 
-fn run(
+/// What one run was asked for, so the pieces that build the panel take one argument
+/// rather than five positional ones.
+struct Options {
     config: provider::Config,
     key: String,
     listener: Option<std::os::unix::net::UnixListener>,
-) -> Result<(), String> {
+    /// `--output`: the output to pin the panel to, by name.
+    output: Option<String>,
+    /// Whether the opening, the growth and the closing are drawn.
+    animate: bool,
+}
+
+/// The panel's layer surface: overlay layer, our own namespace, no space reserved from
+/// the output. `output` is `None` when the compositor is to place it.
+fn make_layer(
+    shell: &LayerShell,
+    compositor: &CompositorState,
+    qh: &QueueHandle<State>,
+    output: Option<&wl_output::WlOutput>,
+) -> LayerSurface {
+    // A layer surface, not an ordinary window: the compositor places the panel by anchor
+    // and margin, and workspaces or tiling never move it.
+    let surface = compositor.create_surface(qh);
+    surface.set_buffer_scale(1);
+    shell.create_layer_surface(qh, surface, Layer::Overlay, Some(APP_ID), output)
+}
+
+fn run(options: Options) -> Result<(), String> {
+    let Options {
+        config,
+        key,
+        listener,
+        output,
+        animate,
+    } = options;
     let conn = Connection::connect_to_env().map_err(|e| format!("no Wayland session: {e}"))?;
-    let (globals, event_queue) =
+    let (globals, mut event_queue) =
         registry_queue_init(&conn).map_err(|e| format!("cannot list globals: {e}"))?;
     let qh = event_queue.handle();
     let mut event_loop: EventLoop<State> =
         EventLoop::try_new().map_err(|e| format!("cannot create the event loop: {e}"))?;
     let loop_handle = event_loop.handle();
-    smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource::new(
-        conn.clone(),
-        event_queue,
-    )
-    .insert(loop_handle.clone())
-    .map_err(|e| format!("cannot watch the Wayland socket: {e}"))?;
 
     // Fonts load on a thread while the handshake happens: the first frame must
     // not wait for a font file.
@@ -348,23 +401,12 @@ fn run(
     let shell =
         LayerShell::bind(&globals, &qh).map_err(|e| format!("wlr-layer-shell is missing: {e}"))?;
     let shm = Shm::bind(&globals, &qh).map_err(|e| format!("wl_shm is missing: {e}"))?;
-    let activation = ActivationState::bind(&globals, &qh).ok();
     let ime_manager = ime::bind(&globals, &qh);
 
-    let surface = compositor.create_surface(&qh);
-    surface.set_buffer_scale(1);
-    let layer = shell.create_layer_surface(&qh, surface, Layer::Overlay, Some(APP_ID), None);
-    // Anchored bottom and left: a layer-shell margin only applies to an anchored
-    // edge, and the panel is moved on both axes. With no right anchor the surface
-    // keeps its own width, and `left_margin` centres it.
-    layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT);
-    layer.set_margin(0, 0, bottom_margin(None, 0), 0);
-    layer.set_keyboard_interactivity(INTERACTIVITY);
-    // Collapsed to the bar. The first commit is buffer-less: it asks for the
-    // configure, and nothing may be attached before that one arrives.
-    let (sw, sh) = surface_size((WIDTH, panel::bar_height()));
-    layer.set_size(sw, sh);
-    layer.commit();
+    // The surface the panel will use, unless `--output` names another one: a layer
+    // surface's output is a create-time argument, and the output list is only known
+    // after an event round, which `boot` does before anything is committed.
+    let layer = make_layer(&shell, &compositor, &qh, None);
     let pool_size = surface_size((WIDTH, FALLBACK_OUTPUT_H));
     let pool = SlotPool::new((pool_size.0 * pool_size.1 * 4) as usize, &shm)
         .map_err(|e| format!("cannot create the shm pool: {e}"))?;
@@ -374,7 +416,6 @@ fn run(
         seat_state: SeatState::new(&globals, &qh),
         output_state: OutputState::new(&globals, &qh),
         shm,
-        activation,
         qh,
         pool,
         buffer: None,
@@ -383,6 +424,7 @@ fn run(
         scale: 1,
         phase: Phase::Idle,
         shape: panel::State::Bar,
+        animate,
         mode: Mode::Typing,
         drag: Drag::default(),
         press: None,
@@ -404,6 +446,8 @@ fn run(
         first_frame: true,
         configured: false,
         configure_wait: Some(std::time::Instant::now()),
+        prime_at: None,
+        panel_output: None,
         painted: false,
         dirty: true,
         exit: false,
@@ -424,9 +468,25 @@ fn run(
         config,
         key,
     };
+    // Before anything is committed: the output list. It says which output the surface
+    // belongs on and how tall the screen is, and both are decided by the surface's own
+    // creation, so the roundtrip has to come first.
+    event_queue
+        .roundtrip(&mut state)
+        .map_err(|e| format!("cannot list the outputs: {e}"))?;
+    state.boot(&shell, &compositor, output.as_deref())?;
+    smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource::new(
+        conn.clone(),
+        event_queue,
+    )
+    .insert(loop_handle.clone())
+    .map_err(|e| format!("cannot watch the Wayland socket: {e}"))?;
+    // The font has been loading on its own thread through the handshake and the first
+    // commit: joining here waits for what is left of it rather than for all of it, and a
+    // font that never arrives is still reported instead of drawn as an empty panel.
     state.adopt_font()?;
 
-    // The raise channel: level-triggered, and accept() never blocks the loop.
+    // The toggle channel: level-triggered, and accept() never blocks the loop.
     if let Some(listener) = listener {
         loop_handle
             .insert_source(
@@ -441,7 +501,7 @@ fn run(
                         let mut byte = [0u8; 1];
                         let _ = stream.read(&mut byte);
                     }
-                    state.raise();
+                    state.toggle();
                     Ok(PostAction::Continue)
                 },
             )
@@ -449,31 +509,9 @@ fn run(
     }
 
     while !state.exit {
-        // While a request is open, a byte can arrive at any moment; when idle
-        // there is nothing to poll for, so the loop sleeps.
-        let timeout = if state.morphing() || state.rising() {
-            // The card is growing: a frame every step of the ease.
-            Duration::from_millis(16)
-        } else if state.copy_note_up() {
-            // The note is only up for a moment; a frame every step of that.
-            Duration::from_millis(100)
-        } else if let Some(until_light) = state.light_in() {
-            // The request is still too young for a light: sleep to the moment it
-            // is due, rather than paint a frame that cannot differ from this one.
-            until_light
-        } else if state.phase == Phase::Thinking {
-            // The working light advances by the clock; a frame every step of its
-            // lap keeps it smooth.
-            Duration::from_millis(16)
-        } else if let Some(until_gone) = state.thumb_in() {
-            // The indicator is holding or fading: sleep to the next moment it can
-            // look different.
-            until_gone
-        } else if state.request.is_some() {
-            Duration::from_millis(16)
-        } else {
-            Duration::from_millis(250)
-        };
+        // Everything that can change on its own names a deadline; the loop wakes at the
+        // earliest of them, so a cue can never be delayed by another cue's sleep.
+        let timeout = state.next_wake();
         if let Err(e) = event_loop.dispatch(timeout, &mut state) {
             let protocol = conn.protocol_error().map(|e| (e.code, e.message));
             match fate(protocol, state.painted, compositor_gone(&e)) {
@@ -739,6 +777,17 @@ fn room_for_replies(output_h: Option<u32>) -> u32 {
     reply_cap(output_h, gap).min(rows)
 }
 
+/// A clock reading for the panel's own transitions, in milliseconds. With the
+/// transitions switched off it is past every deadline, so the opening, the closing and a
+/// shape change are each over in the frame they start.
+fn clock_ms(animate: bool, since: std::time::Instant) -> u128 {
+    if animate {
+        since.elapsed().as_millis()
+    } else {
+        u128::MAX
+    }
+}
+
 /// An ease-out over `over`: one track of an opening or closing, and every change of
 /// shape. Monotone, 0 at the start, exactly 1 at the deadline and never past it.
 fn track_at(elapsed_ms: u128, over: u128) -> f32 {
@@ -768,6 +817,45 @@ pub fn close_tracks(elapsed_ms: u128) -> (f32, f32) {
     let rise = 1.0 - track_at(elapsed_ms, split);
     let spread = 1.0 - track_at(elapsed_ms.saturating_sub(split), CLOSE_MS - split);
     (spread, rise)
+}
+
+/// The soonest deadline in a set, and never later than the idle tick: nothing on screen
+/// can change before the nearest of them, and nothing at all after the idle one.
+fn soonest(idle: Duration, deadlines: impl IntoIterator<Item = Option<Duration>>) -> Duration {
+    deadlines.into_iter().flatten().fold(idle, Duration::min)
+}
+
+/// What a second summon means: a closing starts, unless one is already running, which
+/// changes nothing.
+fn summon_again(closing: bool, now: std::time::Instant) -> Option<std::time::Instant> {
+    (!closing).then_some(now)
+}
+
+/// Which output the surface belongs on, given the session's outputs and the name that
+/// was asked for: the named one, or the only one there is. Several outputs and no name
+/// is the compositor's choice, which is what `None` means to layer-shell.
+fn choose_output(names: &[String], requested: Option<&str>) -> Result<Option<String>, String> {
+    match requested {
+        Some(name) if names.iter().any(|n| n == name) => Ok(Some(name.to_string())),
+        Some(name) => Err(format!(
+            "no output named {name}: {}",
+            if names.is_empty() {
+                "the session has none".to_string()
+            } else {
+                names.join(", ")
+            }
+        )),
+        None if names.len() == 1 => Ok(names.first().cloned()),
+        None => Ok(None),
+    }
+}
+
+/// One press of the prefix's text-size keys: two logical pixels, inside the range the
+/// configuration accepts.
+fn font_step(current: f32, up: bool) -> f32 {
+    let range = font::SIZE_RANGE;
+    let next = if up { current + 2.0 } else { current - 2.0 };
+    next.clamp(*range.start() as f32, *range.end() as f32)
 }
 
 /// The shape the panel paints itself as, for a phase.
@@ -858,6 +946,10 @@ enum Mode {
 enum Prefix {
     /// `[`: enter copy mode.
     Copy,
+    /// `+` or `=`: two pixels larger, up to the range the configuration accepts.
+    Bigger,
+    /// `-`: two pixels smaller.
+    Smaller,
     /// Anything else: leave the prefix and do nothing.
     None,
 }
@@ -865,6 +957,9 @@ enum Prefix {
 fn prefix_action(keysym: Keysym) -> Prefix {
     match keysym {
         Keysym::bracketleft => Prefix::Copy,
+        // `+` is Shift+`=` on most layouts, and both keysyms mean the same thing here.
+        Keysym::plus | Keysym::equal => Prefix::Bigger,
+        Keysym::minus => Prefix::Smaller,
         _ => Prefix::None,
     }
 }
@@ -956,7 +1051,6 @@ struct State {
     seat_state: SeatState,
     output_state: OutputState,
     shm: Shm,
-    activation: Option<ActivationState>,
     qh: QueueHandle<State>,
     pool: SlotPool,
     buffer: Option<Buffer>,
@@ -973,6 +1067,13 @@ struct State {
     /// When the wait for that first configure started, so a compositor that never
     /// sends one is reported instead of leaving the panel invisible forever.
     configure_wait: Option<std::time::Instant>,
+    /// When the exclusive prime of the keyboard started, while one is running. The
+    /// panel gives the keyboard back when it is due, or when it starts closing.
+    prime_at: Option<std::time::Instant>,
+    /// The output the panel is on: the one `--output` named, the only one the session has,
+    /// or the one the surface entered. Its size is what centres the panel and caps its
+    /// height; every other output's size is none of the panel's business.
+    panel_output: Option<wl_output::WlOutput>,
     /// Whether any frame has reached the compositor, which is what tells a
     /// refused startup from a session that ended after the panel was on screen.
     painted: bool,
@@ -981,6 +1082,8 @@ struct State {
     layer: LayerSurface,
     /// Which of the three states the panel is in.
     phase: Phase,
+    /// Whether the transitions are drawn, or each one is over in the frame it starts.
+    animate: bool,
     /// The shape it is drawn as, which is not always the phase's own: a request
     /// keeps the box a follow-up was asked from.
     shape: panel::State,
@@ -1015,7 +1118,10 @@ struct State {
     close_start: Option<std::time::Instant>,
     /// When the current phase began: the working light is read off this clock.
     phase_start: std::time::Instant,
-    /// Whether the compositor has handed this surface the keyboard.
+    /// Whether the text input is live: this surface holds the keyboard **and** an input
+    /// method has advertised `zwp_text_input_v3`. It is not a test for "the panel has the
+    /// keyboard": with no input method in the session it stays false while typing works
+    /// from the keysyms alone.
     focused: bool,
     /// Logical size of the output the panel is on, once it has reported one.
     output_w: Option<u32>,
@@ -1053,7 +1159,7 @@ impl State {
     /// How far the shape change has got, if one is running.
     fn morph_progress(&self) -> f32 {
         match self.morph {
-            Some(m) => track_at(m.start.elapsed().as_millis(), m.duration_ms()),
+            Some(m) => track_at(clock_ms(self.animate, m.start), m.duration_ms()),
             None => 1.0,
         }
     }
@@ -1061,7 +1167,7 @@ impl State {
     /// Whether a frame is needed for a shape change or the rise into place.
     fn morphing(&self) -> bool {
         match self.morph {
-            Some(m) => m.start.elapsed().as_millis() < m.duration_ms(),
+            Some(m) => clock_ms(self.animate, m.start) < m.duration_ms(),
             None => false,
         }
     }
@@ -1070,10 +1176,10 @@ impl State {
     /// it is settled, and part-way through an opening or a closing.
     fn tracks(&self) -> (f32, f32) {
         if let Some(start) = self.close_start {
-            return close_tracks(start.elapsed().as_millis());
+            return close_tracks(clock_ms(self.animate, start));
         }
         match self.enter_start {
-            Some(start) => enter_tracks(start.elapsed().as_millis()),
+            Some(start) => enter_tracks(clock_ms(self.animate, start)),
             None => (1.0, 1.0),
         }
     }
@@ -1087,7 +1193,7 @@ impl State {
     /// Whether a closing has run its course, which is when the panel goes.
     fn close_finished(&self) -> bool {
         match self.close_start {
-            Some(start) => start.elapsed().as_millis() >= CLOSE_MS,
+            Some(start) => clock_ms(self.animate, start) >= CLOSE_MS,
             None => false,
         }
     }
@@ -1253,6 +1359,33 @@ impl State {
         Ok(())
     }
 
+    /// One press of the prefix's text-size keys, applied to the panel on screen: the
+    /// face is read again at the new size, the transcript is laid out again in it, and
+    /// the surface takes the height the new bar asks for.
+    fn rescale(&mut self, up: bool) {
+        let old = font::size();
+        let next = font_step(old, up);
+        if next == old {
+            return;
+        }
+        // The face first: a machine that lost the font between the two reads keeps the
+        // size it is already drawing at instead of going blank.
+        let Ok(font) = PanelFont::load(next) else {
+            return;
+        };
+        // shortcut: the face is read on the event loop, a few ms on a keypress; doing it
+        // on a thread would draw the old metrics at the new bar height for a frame.
+        font::resize(next);
+        self.font = Some(font);
+        self.rewrap();
+        self.apply_size();
+        self.viewport.clamp(self.transcript.total_height());
+        // The bar moved and the caret with it: the input method's candidate window is
+        // placed from this, so a stale rectangle lands it over the wrong row.
+        self.report_cursor();
+        self.dirty = true;
+    }
+
     fn buffer_height(&self) -> u32 {
         // The surface carries the shadow margin: the panel is inside it.
         surface_size((self.width, self.height)).1 * self.scale
@@ -1280,20 +1413,105 @@ impl State {
         }
     }
 
-    /// A second launch asked us to come forward.
-    fn raise(&mut self) {
-        if let Some(activation) = self.activation.as_ref() {
-            activation.request_token(
-                &self.qh,
-                RequestData {
-                    seat_and_serial: None,
-                    surface: Some(self.layer.wl_surface().clone()),
-                    app_id: Some(APP_ID.to_string()),
-                    udata: (),
-                },
-            );
+    /// Settle what the surface depends on before its first commit: the output it goes
+    /// on, that output's size, and the keyboard it asks for. A layer surface's output is
+    /// a create-time argument, so a named output means a second surface and the one made
+    /// against the compositor's choice is dropped unused.
+    fn boot(
+        &mut self,
+        shell: &LayerShell,
+        compositor: &CompositorState,
+        requested: Option<&str>,
+    ) -> Result<(), String> {
+        let names: Vec<String> = self
+            .output_state
+            .outputs()
+            .filter_map(|output| self.output_state.info(&output)?.name)
+            .collect();
+        if let Some(name) = choose_output(&names, requested)? {
+            let output = self
+                .output_state
+                .outputs()
+                .find(|o| {
+                    self.output_state
+                        .info(o)
+                        .is_some_and(|info| info.name.as_deref() == Some(name.as_str()))
+                })
+                .ok_or_else(|| format!("output {name} is gone"))?;
+            self.layer = make_layer(shell, compositor, &self.qh, Some(&output));
+            // Before the first commit: the gap the panel opens at is this output's, and
+            // no other output's size may overwrite it later.
+            self.panel_output = Some(output.clone());
+            self.note_output(&output);
         }
-        self.dirty = true;
+        // Anchored bottom and left: a layer-shell margin only applies to an anchored
+        // edge, and the panel is moved on both axes. With no right anchor the surface
+        // keeps its own width, and `left_margin` centres it.
+        self.layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT);
+        // The prime is the keyboard's: the clock starts on the configure, so the release
+        // always lands on a surface the compositor has taken.
+        self.layer.set_keyboard_interactivity(PRIME);
+        // Collapsed to the bar. The first commit is buffer-less: it asks for the
+        // configure, and nothing may be attached before that one arrives.
+        self.apply_size();
+        self.layer.commit();
+        Ok(())
+    }
+
+    /// A second summon: the panel is already up, so it goes the way `Esc` leaves it.
+    /// An open request goes with the process that owns it.
+    fn toggle(&mut self) {
+        if let Some(at) = summon_again(self.close_start.is_some(), std::time::Instant::now()) {
+            self.close_start = Some(at);
+            self.dirty = true;
+        }
+    }
+
+    /// How long until the prime is due: `None` once it has been given back, or while the
+    /// compositor has not configured the surface yet.
+    fn prime_in(&self) -> Option<Duration> {
+        let left = Duration::from_millis(PRIME_MS).saturating_sub(self.prime_at?.elapsed());
+        Some(left.max(Duration::from_millis(1)))
+    }
+
+    /// Give the keyboard back if the prime is over, or if the panel is leaving. Called
+    /// every round, so the release cannot be missed by a frame that never comes.
+    fn end_prime(&mut self) {
+        let Some(at) = self.prime_at else {
+            return;
+        };
+        // Only on a surface the compositor has taken: a second commit before the first
+        // configure is a layer-shell error, and a panel that leaves that early destroys
+        // its surface anyway, which releases the grab.
+        if !self.configured {
+            return;
+        }
+        if self.close_start.is_none() && at.elapsed() < Duration::from_millis(PRIME_MS) {
+            return;
+        }
+        self.prime_at = None;
+        self.layer.set_keyboard_interactivity(INTERACTIVITY);
+        // A state-only commit: no buffer, so this applies the interactivity without
+        // repainting anything.
+        self.layer.commit();
+    }
+
+    /// How long the loop may sleep: the soonest of everything that can change on its own,
+    /// never later than the idle tick. Read as a set of deadlines rather than as a list of
+    /// cases, so the order they are checked in cannot delay one behind another.
+    fn next_wake(&self) -> Duration {
+        let moving = self.morphing() || self.rising() || self.phase == Phase::Thinking;
+        soonest(
+            IDLE_WAKE,
+            [
+                moving.then_some(FRAME_WAKE),
+                self.request.is_some().then_some(FRAME_WAKE),
+                self.copy_note_up().then_some(COPY_NOTE_WAKE),
+                self.prime_in(),
+                self.light_in(),
+                self.thumb_in(),
+            ],
+        )
     }
 
     fn rows(&self) -> usize {
@@ -1623,7 +1841,7 @@ impl State {
     /// What the bar says while the prefix waits for its one key.
     fn mode_hint(&self) -> &'static str {
         match self.mode {
-            Mode::Prefix => "press [ to enter copy mode",
+            Mode::Prefix => "press [ for copy mode, + / - for text size",
             Mode::Typing | Mode::Copy => "",
         }
     }
@@ -1729,6 +1947,9 @@ impl State {
                 "the compositor did not configure the window within {CONFIGURE_TIMEOUT_S}s"
             ));
         }
+        // The keyboard is the session's: the prime is given back as soon as it is due,
+        // or the moment the panel starts leaving.
+        self.end_prime();
         if self.phase == Phase::Thinking {
             // The blink is the only thing moving, so keep asking for frames.
             self.dirty = true;
@@ -1894,12 +2115,16 @@ impl State {
             return;
         }
         let text = event.utf8.clone();
-        // The prefix takes exactly one key, whatever it is: `[` goes to copy mode
-        // and everything else is swallowed, so a settings key never types.
+        // The prefix takes exactly one key, whatever it is: `[` goes to copy mode, the
+        // two size keys change the text, and everything else is swallowed, so a
+        // settings key never types.
         if self.mode == Mode::Prefix {
             self.mode = Mode::Typing;
-            if prefix_action(event.keysym) == Prefix::Copy {
-                self.enter_copy();
+            match prefix_action(event.keysym) {
+                Prefix::Copy => self.enter_copy(),
+                Prefix::Bigger => self.rescale(true),
+                Prefix::Smaller => self.rescale(false),
+                Prefix::None => {}
             }
             self.dirty = true;
             return;
@@ -2167,18 +2392,33 @@ impl CompositorHandler for State {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
+        surface: &wl_surface::WlSurface,
+        output: &wl_output::WlOutput,
     ) {
+        if self.layer.wl_surface() != surface {
+            return;
+        }
+        // The compositor has said which screen the panel is on, and its size is what
+        // centres the panel and caps its height from here on.
+        self.panel_output = Some(output.clone());
+        self.note_output(output);
     }
 
     fn surface_leave(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
+        surface: &wl_surface::WlSurface,
+        output: &wl_output::WlOutput,
     ) {
+        if self.layer.wl_surface() != surface {
+            return;
+        }
+        // The numbers stay until the surface enters another output: a leave is not a
+        // resize, and the enter that follows brings the right size with it.
+        if self.panel_output.as_ref() == Some(output) {
+            self.panel_output = None;
+        }
     }
 }
 
@@ -2203,6 +2443,9 @@ impl LayerShellHandler for State {
         self.apply_size();
         if self.first_frame {
             self.first_frame = false;
+            // The prime's clock starts here: the surface is the compositor's now, so the
+            // commit that gives the keyboard back is one it is ready for.
+            self.prime_at = Some(std::time::Instant::now());
             // The panel rises out of the bottom edge on its first frame.
             self.enter_start = Some(std::time::Instant::now());
             self.draw();
@@ -2218,8 +2461,10 @@ impl OutputHandler for State {
         &mut self.output_state
     }
 
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
-        self.note_output(&output);
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _output: wl_output::WlOutput) {
+        // Nothing to do: which output the panel is on arrives with the surface's own
+        // `enter`. Sizing the panel from whichever output spoke last would centre it by
+        // another screen's width.
     }
 
     fn update_output(
@@ -2228,10 +2473,24 @@ impl OutputHandler for State {
         _: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
-        self.note_output(&output);
+        // A mode change on the panel's own screen moves its gap; another screen's does not.
+        if self.panel_output.as_ref() == Some(&output) {
+            self.note_output(&output);
+        }
     }
 
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn output_destroyed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
+        // Unplugged: the numbers stay until the surface enters another output, but the
+        // dead proxy is not compared against anything again.
+        if self.panel_output.as_ref() == Some(&output) {
+            self.panel_output = None;
+        }
+    }
 }
 
 impl SeatHandler for State {
@@ -2385,16 +2644,6 @@ impl KeyboardHandler for State {
 impl smithay_client_toolkit::shm::ShmHandler for State {
     fn shm_state(&mut self) -> &mut Shm {
         &mut self.shm
-    }
-}
-
-impl ActivationHandler for State {
-    type RequestUdata = ();
-
-    fn new_token(&mut self, token: String, _data: &RequestData<()>) {
-        if let Some(activation) = self.activation.as_ref() {
-            activation.activate::<State>(self.layer.wl_surface(), token);
-        }
     }
 }
 
@@ -2617,7 +2866,8 @@ mod tests {
     }
 
     /// `Ctrl+T` opens the prefix, and the prefix is one key wide: `[` goes to copy
-    /// mode, everything else leaves it and does nothing.
+    /// mode, the two size keys change the text, everything else leaves it and does
+    /// nothing.
     #[test]
     fn the_prefix_takes_one_key_and_opens_copy_mode() {
         assert_eq!(
@@ -2626,6 +2876,16 @@ mod tests {
             "Ctrl+T is the prefix"
         );
         assert_eq!(prefix_action(Keysym::bracketleft), Prefix::Copy);
+        assert_eq!(prefix_action(Keysym::plus), Prefix::Bigger);
+        assert_eq!(
+            prefix_action(Keysym::equal),
+            Prefix::Bigger,
+            "`=` is where `+` lives unshifted"
+        );
+        assert_eq!(prefix_action(Keysym::minus), Prefix::Smaller);
+        // Outside the prefix the size keys are text, not settings.
+        assert_eq!(key_action(Keysym::plus, false, false, true), Key::Text);
+        assert_eq!(key_action(Keysym::minus, false, false, true), Key::Text);
         for keysym in [
             Keysym::z,
             Keysym::Escape,
@@ -2634,6 +2894,25 @@ mod tests {
         ] {
             assert_eq!(prefix_action(keysym), Prefix::None, "{keysym:?}");
         }
+    }
+
+    /// The size keys step two pixels and stop at the range the configuration accepts,
+    /// so the panel cannot be typed out of a usable size.
+    #[test]
+    fn the_text_size_steps_two_pixels_within_the_configured_range() {
+        assert_eq!(font_step(20.0, true), 22.0);
+        assert_eq!(font_step(20.0, false), 18.0);
+        let range = font::SIZE_RANGE;
+        let (low, high) = (*range.start() as f32, *range.end() as f32);
+        assert_eq!(font_step(high, true), high, "the top holds");
+        assert_eq!(font_step(low, false), low, "the bottom holds");
+        assert_eq!(
+            font_step(high - 1.0, true),
+            high,
+            "a step lands on the limit"
+        );
+        // The bar and the rows are derived from it: a bigger size is a bigger bar.
+        assert!(font::row_h_for(font_step(20.0, true)) > font::row_h_for(20.0));
     }
 
     /// The copy-mode table, key by key: what moves, what selects, what leaves.
@@ -2734,16 +3013,135 @@ mod tests {
         assert_eq!(copied_lines(&three, &rows), 3, "three lines");
     }
 
-    /// The compositor has to be able to take the keyboard back. An exclusive layer
-    /// surface makes every view unfocusable while it is mapped, which is the reported
-    /// bug: aside is up, and no other window can be typed into.
+    /// The prime takes the keyboard, so a hotkey-summoned panel can be typed into
+    /// without a click; and it is bounded, because an exclusive layer surface kept for as
+    /// long as it is mapped makes every view unfocusable - the bug `share-the-keyboard`
+    /// fixed, and the reason the prime is a timer rather than a mode.
     #[test]
-    fn the_panel_leaves_the_keyboard_shareable() {
+    fn the_panel_asks_for_the_keyboard_briefly_and_then_shares_it() {
         assert_eq!(
             INTERACTIVITY,
             KeyboardInteractivity::OnDemand,
-            "exclusive layer surfaces defeat every view focus: the keyboard would never leave the panel"
+            "a settled exclusive surface defeats every view focus: the keyboard would never leave the panel"
         );
+        assert_eq!(
+            PRIME,
+            KeyboardInteractivity::Exclusive,
+            "the prime is the one mode a compositor hands the keyboard over in"
+        );
+        // A prime that is not bounded is the grab this project already reverted once, so
+        // the bound is checked when this is compiled rather than when it runs.
+        const {
+            assert!(
+                PRIME_MS > 0 && PRIME_MS <= 100,
+                "the grab is bounded by the clock"
+            )
+        };
+    }
+
+    /// A second summon puts the panel away; a second one while it is already leaving
+    /// changes nothing.
+    #[test]
+    fn the_second_summon_starts_a_closing_and_a_third_changes_nothing() {
+        let now = std::time::Instant::now();
+        assert_eq!(summon_again(false, now), Some(now), "it starts closing");
+        assert_eq!(summon_again(true, now), None, "already leaving");
+    }
+
+    /// The loop's sleep is the soonest deadline in the set, whatever order it is listed
+    /// in: a cue is never pushed behind another cue's sleep, and nothing is ever later
+    /// than the idle tick.
+    #[test]
+    fn the_loop_wakes_at_the_soonest_deadline() {
+        let idle = IDLE_WAKE;
+        assert_eq!(soonest(idle, [None, None, None]), idle, "nothing pending");
+        assert_eq!(
+            soonest(
+                idle,
+                [
+                    None,
+                    Some(Duration::from_millis(40)),
+                    Some(Duration::from_millis(10)),
+                ]
+            ),
+            Duration::from_millis(10),
+            "the earliest one wins, wherever it sits in the list"
+        );
+        // A request's frames beat a longer cue, so the working light never stutters, and
+        // the prime keeps its own deadline instead of waiting behind a copy note.
+        assert_eq!(
+            soonest(idle, [Some(FRAME_WAKE), Some(COPY_NOTE_WAKE)]),
+            FRAME_WAKE
+        );
+        assert_eq!(
+            soonest(idle, [Some(COPY_NOTE_WAKE), Some(Duration::from_millis(7))]),
+            Duration::from_millis(7)
+        );
+        assert_eq!(
+            soonest(idle, [Some(Duration::from_secs(5))]),
+            idle,
+            "never later than the idle tick"
+        );
+    }
+
+    /// The output is chosen before the surface exists, so the first frame is laid out at
+    /// the size of the screen it is actually on.
+    #[test]
+    fn the_output_is_the_named_one_or_the_only_one() {
+        let one = ["eDP-1".to_string()];
+        let two = ["eDP-1".to_string(), "HDMI-A-1".to_string()];
+        assert_eq!(
+            choose_output(&one, Some("eDP-1")),
+            Ok(Some("eDP-1".to_string()))
+        );
+        assert_eq!(
+            choose_output(&two, Some("HDMI-A-1")),
+            Ok(Some("HDMI-A-1".to_string()))
+        );
+        assert_eq!(choose_output(&one, None), Ok(Some("eDP-1".to_string())));
+        assert_eq!(
+            choose_output(&two, None),
+            Ok(None),
+            "several outputs and no name: the compositor picks, which is `None` to layer-shell"
+        );
+        assert_eq!(choose_output(&[], None), Ok(None));
+        let unknown = choose_output(&two, Some("DVI-9")).expect_err("no such output");
+        assert!(
+            unknown.contains("DVI-9"),
+            "the name that was asked for: {unknown}"
+        );
+        assert!(
+            unknown.contains("eDP-1") && unknown.contains("HDMI-A-1"),
+            "the names that exist: {unknown}"
+        );
+        assert!(choose_output(&[], Some("eDP-1")).is_err());
+    }
+
+    /// With the transitions off, the opening and the closing are already over on the
+    /// frame they start; with them on they are not.
+    #[test]
+    fn a_panel_with_its_transitions_off_is_settled_when_it_starts() {
+        let now = std::time::Instant::now();
+        assert_eq!(clock_ms(false, now), u128::MAX, "past every deadline");
+        assert!(clock_ms(true, now) < 1_000, "a real clock reads small");
+        assert_eq!(
+            enter_tracks(clock_ms(false, now)),
+            (1.0, 1.0),
+            "the opening is over"
+        );
+        assert_eq!(
+            close_tracks(clock_ms(false, now)),
+            (0.0, 0.0),
+            "the closing is over"
+        );
+        assert_eq!(
+            track_at(u128::MAX, MORPH_IN_MS),
+            1.0,
+            "a shape change is settled"
+        );
+        // The same readings, animated: still at the beginning.
+        assert!(enter_tracks(clock_ms(true, now)).0 < 1.0);
+        assert!(close_tracks(clock_ms(true, now)).1 > 0.0);
     }
 
     /// The window chords: `Alt+hjkl` a padding step, `Alt+Ctrl+hjkl` ten of them,

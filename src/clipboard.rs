@@ -80,20 +80,35 @@ mod tests {
 
     /// A stub that records what it was handed, so the test can assert the panel
     /// copies one line and only one line.
-    fn stub(dir: &Path, log: &Path, separate: bool) -> PathBuf {
-        let path = dir.join("wl-copy");
-        let path_str = log.to_str().expect("utf-8 path");
-        let script = if separate {
-            // A separator makes concurrent writes from two stubs separable.
-            format!("#!/bin/sh\ncat >> '{path_str}'\nprintf '\\n' >> '{path_str}'\n")
-        } else {
-            format!("#!/bin/sh\ncat >> '{path_str}'\n")
-        };
-        std::fs::write(&path, script).expect("write stub");
-        let mut perms = std::fs::metadata(&path).expect("stat").permissions();
-        use std::os::unix::fs::PermissionsExt;
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod");
+    ///
+    /// The file is written by a **child**, not by this process. `execve` refuses an
+    /// inode that has any open writer, and a sibling test thread's `Command::spawn` can
+    /// fork while this process holds its own `O_WRONLY` fd: the kernel closes
+    /// close-on-exec fds *after* the permission check, so the forked child carries the
+    /// writer until its own exec and the next `execve` of that inode gets `ETXTBSY`.
+    /// With the stub written here, four of these tests in parallel failed about one run
+    /// in three; written by a child, never.
+    fn stub(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(r#"cat > "$1" && chmod 755 "$1""#)
+            .arg("sh")
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("the stub writer starts");
+        child
+            .stdin
+            .as_mut()
+            .expect("the stub writer takes a body")
+            .write_all(body.as_bytes())
+            .expect("the stub body is written");
+        drop(child.stdin.take());
+        assert!(
+            child.wait().expect("the stub writer ends").success(),
+            "the stub was written"
+        );
         path
     }
 
@@ -108,7 +123,14 @@ mod tests {
     fn the_highlighted_line_reaches_the_clipboard_and_nothing_else_does() {
         let dir = scratch("line");
         let log = dir.join("log");
-        let program = stub(&dir, &log, false);
+        let program = stub(
+            &dir,
+            "wl-copy",
+            &format!(
+                "#!/bin/sh\ncat >> '{log}'\n",
+                log = log.to_str().expect("utf-8 path")
+            ),
+        );
         copy_with(&program, "just this line").expect("copies");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let read = || std::fs::read_to_string(&log).unwrap_or_default();
@@ -127,7 +149,15 @@ mod tests {
     fn each_press_is_one_process() {
         let dir = scratch("twice");
         let log = dir.join("log");
-        let program = stub(&dir, &log, true);
+        // A separator makes concurrent writes from two stubs separable.
+        let program = stub(
+            &dir,
+            "wl-copy",
+            &format!(
+                "#!/bin/sh\ncat >> '{log}'\nprintf '\\n' >> '{log}'\n",
+                log = log.to_str().expect("utf-8 path")
+            ),
+        );
         copy_with(&program, "one").expect("copies");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let lines = || {
@@ -159,14 +189,11 @@ mod tests {
     #[test]
     fn the_clipboard_is_read_once_when_asked() {
         let dir = scratch("paste");
-        let path = dir.join("wl-paste");
-        std::fs::write(
-            &path,
+        let path = stub(
+            &dir,
+            "wl-paste",
             "#!/bin/sh\n[ \"$1\" = \"--no-newline\" ] || exit 3\nprintf 'one\\ntwo'\n",
-        )
-        .expect("write stub");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        );
         assert_eq!(
             paste_with(&path).expect("reads"),
             "one two",
@@ -178,10 +205,7 @@ mod tests {
     #[test]
     fn a_failing_paste_is_reported_rather_than_swallowed() {
         let dir = scratch("paste-fail");
-        let path = dir.join("wl-paste");
-        std::fs::write(&path, "#!/bin/sh\nexit 1\n").expect("write stub");
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path = stub(&dir, "wl-paste", "#!/bin/sh\nexit 1\n");
         let err = paste_with(&path).expect_err("a failed read is an error");
         assert!(err.contains("could not be read"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);

@@ -25,16 +25,25 @@ for example in Hyprland:
 bind = SUPER, A, exec, aside
 ```
 
-Press the key again while it is open and the running panel is raised rather than
-duplicated.
+Press the key again while it is open and the panel puts itself away — the same
+closing `Esc` starts — rather than opening a second one.
+
+The panel draws its own card and its own animation, so Hyprland should not animate
+the surface a second time:
+
+```
+layerrule = no_anim, aside
+```
 
 Configuration is optional: `~/.config/aside/config.toml` with flat `key = "value"`
-lines, and five keys — `model`, `base_url`, `proxy`, `font_size` and `font_family`:
+lines, and six keys — `model`, `base_url`, `proxy`, `font_size`, `font_family` and
+`animations`:
 
 ```toml
 model = "deepseek/deepseek-v4.1-flash"
 font_size = "24"                 # 8 to 72 logical px; the bar follows it
 font_family = "Noto Sans Mono"    # a name nothing provides falls back to the chain
+animations = "true"               # "false" skips the opening, the growth and the closing
 ```
 
 A size that is not a size is an error naming the file and the line, and nothing
@@ -44,16 +53,20 @@ opens. The credential is environment-only:
 export COMMAND_CODE_API_KEY=...
 ```
 
-Flags override both: `--model`, `--base-url`, `--proxy`. `aside --preview out.ppm` renders a
+Flags override both: `--model`, `--base-url`, `--proxy`. `--output NAME` pins the
+panel to one output by name; without it the compositor places it, which on
+Hyprland is the focused monitor — with several outputs and no name, a click on
+another output does not close the panel. `aside --preview out.ppm` renders a
 scripted transcript to an image without opening a window, which is how the layout
 is checked on a machine with no compositor.
 
 ## What it looks like
 
-A `wlr-layer-shell` surface on the overlay layer with **on-demand** keyboard
-interactivity: the compositor focuses it when the pointer is over it or when it is
-clicked, and the keyboard goes back to whatever window is focused next, so the
-panel never blocks typing elsewhere. Anchoring is what keeps it out of the way;
+A `wlr-layer-shell` surface on the overlay layer. It asks for **exclusive** keyboard
+interactivity when it maps and settles into **on-demand** 75 ms later: the prime is
+what makes a hotkey-summoned panel typable without reaching for the pointer, and
+on-demand is what hands the keyboard back to whatever window is focused next, so
+the panel never blocks typing elsewhere. Anchoring is what keeps it out of the way;
 `Esc` closes it. Anchored to the bottom of the output and centred, its bottom edge
 38 % of the output height above the screen's bottom edge: the field lands just below the vertical centre, where the eye already
 is, and the replies grow upwards out of it. The bottom anchor is what keeps the
@@ -115,6 +128,8 @@ edge of their card rather than being cut off mid-line.
 | `Esc` | copy | clear the selection; leave copy mode when there is none |
 | `Ctrl+T` | typing | enter the prefix mode; the next key is a settings command |
 | `[` | prefix | enter copy mode |
+| `+` / `=` | prefix | two pixels larger, up to 72 |
+| `-` | prefix | two pixels smaller, down to 8 |
 | `Alt+hjkl` | any | move the **panel** 16 px left / down / up / right |
 | `Alt+Ctrl+hjkl` | any | the same, 160 px |
 | `Up` / `Down` | typing | move the highlighted transcript line |
@@ -130,9 +145,13 @@ copies it — or the line the cursor is on — and leaves; `q` leaves, `Esc` cle
 selection first. After a copy the bar says `copied N lines` for a moment.
 
 `Ctrl+T` is tmux's prefix shape rather than a mode toggle: it takes exactly one
-key, and `[` is the only command it has so far — later settings commands belong
-there. While it waits, the bar takes no input, changes tone and reads `press [ to
-enter copy mode`, so the next key is never swallowed by surprise. Copy mode takes
+key. `[` enters copy mode and `+` (`=` unshifted) and `-` change the text size two
+pixels at a time inside the range the configuration accepts — the face is read
+again, the transcript is laid out again in it and the surface resized once, and the
+size is not written down. Everything else leaves the prefix and does nothing, and
+later settings commands belong there. While it waits, the bar takes no input,
+changes tone and reads `press [ for copy mode, + / - for text size`, so the next key
+is never swallowed by surprise. Copy mode takes
 the keyboard from the input line and from the input method, draws `-- COPY --` in
 the bar, hides the caret and shows a cursor in the replies, so a swallowed
 keystroke is never a mystery.

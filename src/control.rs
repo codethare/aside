@@ -1,5 +1,6 @@
-//! Single-instance control: a second launch asks the running panel to come
-//! forward and exits, instead of opening a second window.
+//! Single-instance control: a second launch asks the running panel to put itself away
+//! and exits, instead of opening a second window. A layer surface on the overlay layer is
+//! never behind anything, so the second press means "not now", not "come forward".
 //!
 //! Wayland has no "only one of me" primitive, so the first instance binds a
 //! socket under `$XDG_RUNTIME_DIR` and the next one connects to it. Everything
@@ -12,10 +13,10 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
 pub(crate) enum Claim {
-    /// This process is the only instance; the listener is the raise channel.
+    /// This process is the only instance; the listener is the toggle channel.
     Owner(UnixListener),
-    /// Another instance was running and has been asked to come forward.
-    Raised,
+    /// Another instance was running and has been asked to close.
+    Sent,
     /// No control channel (no usable `$XDG_RUNTIME_DIR`, or the bind failed):
     /// the panel still runs, and a second launch opens a second panel.
     Disabled,
@@ -60,11 +61,11 @@ fn display_token(display: &str) -> String {
 }
 
 fn claim_at(path: &Path) -> Claim {
-    // A live instance answers: ask it to come forward, then leave the stage.
+    // A live instance answers: ask it to put itself away, then leave the stage.
     // Nothing has been created yet (no font, no Wayland connection), so a repeat
     // launch costs about a millisecond.
-    if raise(path) {
-        return Claim::Raised;
+    if poke(path) {
+        return Claim::Sent;
     }
     // Nobody is listening: either nothing is there, or an instance was killed
     // and left its socket file behind.
@@ -79,8 +80,8 @@ fn claim_at(path: &Path) -> Claim {
         // let it dismiss us. Only two launches in the same microsecond hit this,
         // and the loser degrades to "no single instance" rather than hanging.
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            if raise(path) {
-                Claim::Raised
+            if poke(path) {
+                Claim::Sent
             } else {
                 Claim::Disabled
             }
@@ -89,12 +90,11 @@ fn claim_at(path: &Path) -> Claim {
     }
 }
 
-/// Tell a listening instance to come forward; true when it accepted the
-/// connection.
-fn raise(path: &Path) -> bool {
+/// Tell a listening instance to close; true when it accepted the connection.
+fn poke(path: &Path) -> bool {
     match UnixStream::connect(path) {
         Ok(mut stream) => {
-            let _ = stream.write_all(b"r");
+            let _ = stream.write_all(b"t");
             true
         }
         Err(_) => false,
@@ -115,7 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn first_claim_wins_and_the_second_raises_it() {
+    fn first_claim_wins_and_the_second_toggles_it() {
         let path = temp_sock("first");
         let owner = claim_at(&path);
         assert!(
@@ -123,26 +123,26 @@ mod tests {
             "first claim owns the slot"
         );
         assert!(
-            matches!(claim_at(&path), Claim::Raised),
-            "a second claim must raise the running instance"
+            matches!(claim_at(&path), Claim::Sent),
+            "a second claim must ask the running instance to close"
         );
         drop(owner);
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn raising_reaches_the_owners_listener() {
+    fn the_toggle_request_reaches_the_owners_listener() {
         let path = temp_sock("reach");
         let Claim::Owner(listener) = claim_at(&path) else {
             panic!("first claim must own the slot");
         };
-        assert!(matches!(claim_at(&path), Claim::Raised));
+        assert!(matches!(claim_at(&path), Claim::Sent));
         let (mut stream, _) = listener
             .accept()
-            .expect("the raise must be queued for accept");
+            .expect("the toggle must be queued for accept");
         let mut byte = [0u8; 1];
-        assert_eq!(stream.read(&mut byte).unwrap(), 1, "raise byte arrives");
-        assert_eq!(&byte, b"r");
+        assert_eq!(stream.read(&mut byte).unwrap(), 1, "toggle byte arrives");
+        assert_eq!(&byte, b"t");
         let _ = std::fs::remove_file(&path);
     }
 
