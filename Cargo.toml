@@ -8,10 +8,11 @@ license = "AGPL-3.0-only"
 [dependencies]
 ab_glyph_rasterizer = "0.1.10"
 fontdb = "0.24.0"
-# Parses answers' markdown. Pinned exactly: 0.13.5 is the release that fixed a
-# panic in `into_offset_iter()` reachable from a 13-byte document, and no RustSec
-# advisory exists for this crate to warn us about the next one.
-pulldown-cmark = { version = "= 0.13.5", default-features = false }
+# Parses answers' markdown. Pinned exactly, and the pin is the control: 0.13.6 is
+# the release that closed RUSTSEC-2026-0433 (quadratic parsing of nested image
+# wikilinks, which this crate never enables, but an audit a reader can trust has to
+# be clean), and 0.13.5 before it fixed a panic reachable from a 13-byte document.
+pulldown-cmark = { version = "= 0.13.6", default-features = false }
 skrifa = "0.48.0"
 smithay-client-toolkit = "0.21.1"
 wayland-client = "0.31.14"

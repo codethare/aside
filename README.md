@@ -198,9 +198,11 @@ cannot do.
 The transport is a child process rather than a crate because `curl -N` already
 streams, and a streaming HTTP client with TLS would be most of the dependency
 graph for one request. Answers are rendered as a markdown subset — fenced code
-blocks in a monospace face, inline code, bold, italic, headings, lists, quotes and
-the text of links — and everything outside it (tables, task lists, raw HTML) is
-drawn as the characters the model sent. There is no complex-script shaping.
+blocks in a monospace face, inline code, bold, italic, headings, lists, quotes,
+tables and the text of links — and everything outside it (task lists, raw HTML) is
+drawn as the characters the model sent. A table is drawn in the monospace face with
+its columns padded so they line up, and narrowed until it fits the card. There is no
+complex-script shaping.
 
 ## Security
 

@@ -56,8 +56,9 @@ change.
 6. **Zero dependencies beyond the seven in `Cargo.toml`.** Ask before adding one;
    prefer deleting code to adding a crate. `pulldown-cmark` is the only one that
    parses rather than draws, it is pinned exactly, and the pin is the control: this
-   crate has no security advisory path, and 0.13.5 was released to fix a panic
-   reachable from thirteen bytes of model output.
+   crate has no security advisory path, and 0.13.6 is the release that closed
+   RUSTSEC-2026-0433, 0.13.5 the one that fixed a panic reachable from thirteen bytes
+   of model output.
 7. **Every failure is visible and exits.** No protocol error may become a busy
    loop, and no error path may leave a process with no way to be seen.
 
@@ -97,9 +98,11 @@ change.
 
 - No complex-script shaping: Arabic, Devanagari and Thai render unshaped.
 - No `wp_fractional_scale_v1`; scale is whatever integer `wl_output.scale` says.
-- A markdown subset only: tables, task lists, raw HTML, footnotes, strikethrough
-  and images' URLs are drawn as the characters the model sent, a code block is not
-  syntax highlighted, and emphasis has no slanted face of its own.
+- A markdown subset only: task lists, raw HTML, footnotes, strikethrough and
+  images' URLs are drawn as the characters the model sent, a code block is not
+  syntax highlighted, and emphasis has no slanted face of its own. A table is drawn
+  in the monospace face with padded columns, so it is monospace even when the text
+  around it is not, and a copy of a row keeps that padding.
 - The sandbox does not filter the network: the provider sees the question.
 - With several outputs and no `--output`, the compositor places the panel, and a
   click on another output does not close it.

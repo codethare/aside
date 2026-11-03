@@ -46,9 +46,11 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    band, its lines stay aligned and a long line wraps inside the block; the list
    has bullets and a wrapped item hangs under its own text; a heading is bold with
    an empty row above it; `**bold**` is brighter and `` `code` `` is monospace, and
-   neither shows its asterisks or backticks. Ask for a table: the pipes and dashes
-   are drawn as typed, and no text is missing. Copy a line out of the code block:
-   the clipboard holds the code, not the fences.
+   neither shows its asterisks or backticks. Ask for a table: the header is one row
+   with a hairline of dashes under it, the columns start in the same place on every
+   row, `:---:` and `---:` line their columns up, a long cell wraps and its row grows,
+   and no pipe from the source is drawn. Copy a line out of the code block: the
+   clipboard holds the code, not the fences.
 3. Ask a follow-up. The panel does not change size at all: the light starts on its
    bar's rim and the box stays where it was. The box then holds the new answer alone
    — the earlier one is not on screen — and the answer still takes the earlier

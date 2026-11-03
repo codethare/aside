@@ -180,7 +180,22 @@ fn key_action(keysym: Keysym, alt: bool, ctrl: bool, has_text: bool) -> Key {
     }
 }
 
+/// TEMPORARY debugging aid: `ASIDE_TRACE=1` prints a startup milestone to stderr.
+fn trace(label: &str) {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    if std::env::var_os("ASIDE_TRACE").is_none() {
+        return;
+    }
+    let t0 = START.get_or_init(std::time::Instant::now);
+    eprintln!(
+        "aside-trace {:>6.1}ms {label}",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
 fn main() {
+    trace("main entry");
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print!("{USAGE}");
@@ -190,6 +205,7 @@ fn main() {
         println!("aside {}", env!("CARGO_PKG_VERSION"));
         return;
     }
+    trace("args parsed");
     let flag = |name: &str| -> Option<String> {
         args.iter()
             .position(|a| a == name)
@@ -206,6 +222,7 @@ fn main() {
             exit(2);
         }
     };
+    trace("config read");
     let font_size = file
         .iter()
         .find(|(k, _)| k == "font_size")
@@ -257,6 +274,7 @@ fn main() {
         }
     };
 
+    trace("key+config resolved");
     // A second launch asks this one to put itself away, and exits without even
     // connecting to the compositor.
     let listener = match control::claim() {
@@ -265,6 +283,7 @@ fn main() {
         control::Claim::Disabled => None,
     };
 
+    trace("control claimed");
     if let Err(e) = run(Options {
         config,
         key,
@@ -303,7 +322,11 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
          What *not* to do with `EAGAIN`, and why **not**:\n\n\
          - spin on the call without waiting,\n\
          - or treat it as a fatal error.\n\n\
-         > Retry a bounded number of times. 中文同样走 CJK 回退。",
+         > Retry a bounded number of times. 中文同样走 CJK 回退。\n\n\
+         | errno | when it happens | what to do |\n\
+         | :--- | :---: | ---: |\n\
+         | `EAGAIN` | the socket is not ready yet | poll, then retry |\n\
+         | `EWOULDBLOCK` | the same thing on Linux | the same |",
         &font,
         max_w,
     );
@@ -317,7 +340,10 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
     let (w, h) = surface_size((pw, ph));
     let mut input = Input::default();
     input.insert("next question 下一个问题");
-    let viewport = Viewport::new(panel::transcript_px(ph, &font, 1));
+    // Pinned to the newest row, as the panel is: the last block is what a reader sees
+    // when an answer outgrows the box.
+    let mut viewport = Viewport::new(panel::transcript_px(ph, &font, 1));
+    viewport.follow(transcript.total_height());
     let mut buf = vec![0u8; (w * h * 4) as usize];
     panel::draw(
         &mut buf,
@@ -383,8 +409,10 @@ fn run(options: Options) -> Result<(), String> {
         animate,
     } = options;
     let conn = Connection::connect_to_env().map_err(|e| format!("no Wayland session: {e}"))?;
+    trace("wayland connected");
     let (globals, mut event_queue) =
         registry_queue_init(&conn).map_err(|e| format!("cannot list globals: {e}"))?;
+    trace("registry roundtrip done");
     let qh = event_queue.handle();
     let mut event_loop: EventLoop<State> =
         EventLoop::try_new().map_err(|e| format!("cannot create the event loop: {e}"))?;
@@ -474,7 +502,9 @@ fn run(options: Options) -> Result<(), String> {
     event_queue
         .roundtrip(&mut state)
         .map_err(|e| format!("cannot list the outputs: {e}"))?;
+    trace("output roundtrip done");
     state.boot(&shell, &compositor, output.as_deref())?;
+    trace("first commit (buffer-less)");
     smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource::new(
         conn.clone(),
         event_queue,
@@ -485,6 +515,7 @@ fn run(options: Options) -> Result<(), String> {
     // commit: joining here waits for what is left of it rather than for all of it, and a
     // font that never arrives is still reported instead of drawn as an empty panel.
     state.adopt_font()?;
+    trace("font adopted");
 
     // The toggle channel: level-triggered, and accept() never blocks the loop.
     if let Some(listener) = listener {
@@ -508,6 +539,7 @@ fn run(options: Options) -> Result<(), String> {
             .map_err(|e| format!("cannot watch the control socket: {e}"))?;
     }
 
+    trace("event loop start");
     while !state.exit {
         // Everything that can change on its own names a deadline; the loop wakes at the
         // earliest of them, so a cue can never be delayed by another cue's sleep.
@@ -2110,6 +2142,9 @@ impl State {
             return;
         }
         self.layer.commit();
+        if !self.painted {
+            trace("first frame committed");
+        }
         self.painted = true;
         self.buffer = Some(buffer);
     }
@@ -2441,6 +2476,7 @@ impl LayerShellHandler for State {
         _configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
+        trace("layer configure arrived");
         self.configured = true;
         self.configure_wait = None;
         // The size is ours: the configure is the permission to attach, and the
