@@ -469,7 +469,40 @@ fn draw_replies(
     s: u32,
 ) {
     let blocks = Blocks::new(font);
-    for (index, row) in transcript.rows(blocks).iter().enumerate() {
+    let rows = transcript.rows(blocks);
+    // A fenced block is one tint behind its rows, with the card's own corner shape: a
+    // tint per row would have square corners wherever a block begins and ends.
+    let pad = crate::PAD * s;
+    for (top, bottom) in code_runs(&rows, card, viewport, blocks) {
+        // The card's own rim and its inner band are chrome: a block that starts at the
+        // card's very top edge stops under them rather than painting them over. The
+        // tint keeps the block's own geometry, so its corners stay its own wherever
+        // the card cuts it.
+        let paint_from = top.max(clip.start).max(card.y + 2 * s);
+        let paint_to = bottom
+            .min(clip.end)
+            .min(card.y + card.h.saturating_sub(2 * s));
+        if paint_to <= paint_from {
+            continue;
+        }
+        let tint = render::Panel {
+            x: card.x + pad,
+            y: top,
+            w: (card.x + card.w)
+                .saturating_sub(pad)
+                .saturating_sub(card.x + pad),
+            h: bottom - top,
+            r: render::CORNER_RADIUS * s,
+        };
+        render::fill(
+            buf,
+            w,
+            &tint,
+            render::dim(render::BG_CODE, fade),
+            paint_from..paint_to,
+        );
+    }
+    for (index, row) in rows.iter().enumerate() {
         if !viewport.shows(row.y, blocks.row_h) {
             continue;
         }
@@ -518,6 +551,43 @@ fn draw_replies(
             s,
         );
     }
+}
+
+/// The screen-space span of every run of fenced-block rows: consecutive rows are one
+/// block, and a row that is not code ends it.
+fn code_runs(
+    rows: &[Row<'_>],
+    card: &render::Panel,
+    viewport: &Viewport,
+    blocks: Blocks,
+) -> Vec<(u32, u32)> {
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    let mut open: Option<(u32, u32)> = None;
+    for row in rows {
+        if !row.code {
+            if let Some(run) = open.take() {
+                runs.push(run);
+            }
+            continue;
+        }
+        // Signed, like the row: a run can begin above the card and be clipped.
+        let y = card.y as i64 + row.y as i64 - viewport.top as i64;
+        let top = y.max(0) as u32;
+        let bottom = (y + blocks.row_h as i64).max(0) as u32;
+        match &mut open {
+            Some((_, b)) if *b == top => *b = bottom,
+            _ => {
+                if let Some(run) = open.take() {
+                    runs.push(run);
+                }
+                open = Some((top, bottom));
+            }
+        }
+    }
+    if let Some(run) = open {
+        runs.push(run);
+    }
+    runs
 }
 
 /// Paints the bar alone, on the panel's bottom row: typed text and caret.
@@ -760,20 +830,6 @@ fn draw_row(
     let left = card.x + inset;
     let right = (card.x + card.w).saturating_sub(pad);
     let body = (y + font.row_h).min(bottom) - y.min(bottom);
-    if row.code && body > 0 {
-        // A fenced block is tinted behind its own rows, inside the card's padding the
-        // way the selection band is: no edge, no second card.
-        render::rect(
-            buf,
-            w,
-            bottom,
-            card.x + pad,
-            y,
-            right.saturating_sub(card.x + pad),
-            body,
-            render::dim(render::BG_CODE, fade),
-        );
-    }
     if row.quote && body > 0 {
         // A quote is marked by a rail at its own left edge, in the ink the panel uses
         // for labels.
@@ -1546,6 +1602,58 @@ mod tests {
         // And with the prefix over, the bar is exactly what it was.
         let back = paint_with("", true);
         assert_eq!(back, typing, "the bar comes back byte for byte");
+    }
+
+    /// A fenced block's tint takes the card's own corner shape: its corners show the
+    /// card's tone, not the tint, and the middle of it is tinted.
+    #[test]
+    fn a_code_block_is_tinted_with_rounded_corners() {
+        let f = font();
+        let mut scene = scene(&f, 300.0);
+        scene.transcript = Transcript::default();
+        // A paragraph first, so the block's own top corners are on screen and not
+        // under the card's chrome.
+        scene.transcript.add_note(
+            "before the block\n\n```\nlet x = 1;\nlet y = 2;\nlet z = 3;\n```",
+            &f,
+            300.0,
+        );
+        let (w, h) = (500u32, height_for(6 * f.row_h, &f, 1));
+        let (bw, _) = frame(w, h);
+        let buf = paint(&scene, w, h);
+        let tint = render::premul(render::BG_CODE);
+        let px = |x: u32, y: u32| &buf[at(bw, x, y)..][..4];
+        // The tint's own box: every pixel of it, wherever the block was placed.
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+        for y in 0..h {
+            for x in 0..w {
+                if px(x, y) == &tint[..] {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        assert!(x1 > x0 && y1 > y0, "the block is tinted at all");
+        // Its four corners are the card's, so they are not the tint: that is the
+        // rounding, and a square corner would leave all four filled.
+        for (x, y) in [(x0, y0), (x1 - 1, y0), (x0, y1 - 1), (x1 - 1, y1 - 1)] {
+            assert_ne!(
+                px(x, y),
+                &tint[..],
+                "corner ({x},{y}) is square: the block's tint has no radius"
+            );
+        }
+        // And its middle is tinted, so the corners are rounded rather than absent.
+        assert_eq!(px((x0 + x1) / 2, (y0 + y1) / 2), &tint[..]);
+        // The radius is the card's, not a token rounding.
+        assert!(
+            x1 - x0 > 2 * render::CORNER_RADIUS && y1 - y0 > 2 * render::CORNER_RADIUS,
+            "the block is big enough for the radius to show: {}x{}",
+            x1 - x0,
+            y1 - y0
+        );
     }
 
     /// The copy cursor is a bar at the character it is on, drawn inside a selection

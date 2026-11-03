@@ -533,6 +533,30 @@ const LIGHT_ALPHA: u32 = 235;
 /// One card: rounded body fill, 1 px coverage antialiasing on both sides, and the
 /// hairline rim that makes its edge read as glass against the shadow. Every card
 /// takes the same tone except the bar in the prefix mode.
+/// Fill a rounded rectangle, clipped to `rows`: the body's shape and its antialiased
+/// edge, without the rim, the band or the shadow. This is a tint that takes the card's
+/// own corner shape — a code block is not a second card.
+pub(crate) fn fill(buf: &mut [u8], w: u32, panel: &Panel, tone: Bgra, rows: std::ops::Range<u32>) {
+    let bg = premul(tone);
+    let top = panel.y.max(rows.start);
+    let bottom = (panel.y + panel.h).min(rows.end);
+    for by in top..bottom {
+        let rel = by - panel.y;
+        let (x0, x1) = panel.span(rel);
+        if x1 > x0 {
+            set_span(buf, w, by, x0, x1, bg);
+        }
+        let inset = rounded_inset(panel.w, panel.h, panel.r, rel);
+        let cov = ((inset.ceil() - inset) * 255.0).round() as u32;
+        if cov > 0 && x0 > 0 {
+            over_pm(&mut buf[(by * w + x0 - 1) as usize * 4..][..4], bg, cov);
+        }
+        if cov > 0 && x1 < w {
+            over_pm(&mut buf[(by * w + x1) as usize * 4..][..4], bg, cov);
+        }
+    }
+}
+
 pub(crate) fn body(buf: &mut [u8], w: u32, panel: &Panel, tone: Bgra) {
     let bg = premul(tone);
     for by in panel.y..panel.y + panel.h {
