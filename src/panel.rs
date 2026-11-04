@@ -1025,7 +1025,13 @@ pub fn height_for(content: u32, font: &PanelFont, scale: u32) -> u32 {
 /// pixels (it is derived at `SIZE * scale`), so this is the one number the layer
 /// surface, which is sized logically, needs.
 pub fn bar_height() -> u32 {
-    crate::font::row_h_for(crate::font::size())
+    bar_height_at(crate::font::size())
+}
+
+/// The bar's height at a face size: with a zoom the bar grows with the glyphs, and
+/// the panel's other rows are measured against it.
+pub fn bar_height_at(size: f32) -> u32 {
+    crate::font::row_h_for(size)
 }
 
 /// A PPM of the current frame: what `--preview` writes, so the layout can be

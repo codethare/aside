@@ -25,7 +25,9 @@ change.
    pointer. The key table in `specs/chat-panel` is the contract, and it is
    per-mode: typing, the `Ctrl+T` prefix (one key wide), and tmux's copy mode. A
    key consumed by the prefix or by copy mode never reaches the input line, and
-   `Alt+hjkl` moves the panel in every mode. The panel asks for `on-demand`
+   `Alt+hjkl` moves the panel in every mode, and `Ctrl+Alt` `-`/`+` (or `Ctrl` with
+   the wheel, or a pinch) zooms the whole panel in every mode; `Ctrl+T` then
+   `+`/`-` stays the text's size alone. The panel asks for `on-demand`
    interactivity once, at creation, and never changes it: a compositor focuses an
    interactive layer surface when it maps (which is every summon, since the process
    exits with the panel), `exclusive` would make every view unfocusable while it is

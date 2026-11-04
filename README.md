@@ -137,10 +137,20 @@ edge of their card rather than being cut off mid-line.
 | `-` | prefix | two pixels smaller, down to 8 |
 | `Alt+hjkl` | any | move the **panel** 16 px left / down / up / right |
 | `Alt+Ctrl+hjkl` | any | the same, 160 px |
+| `Ctrl+Alt+-` / `Ctrl+Alt++` | any | zoom the whole panel out / in, 15 % a press |
+| `Ctrl+Alt+BackSpace` | any | back to 100 % |
+| `Ctrl` + wheel | any over the panel | zoom, 5 % a notch |
+| two-finger pinch | any over the panel | zoom, following the fingers |
 | `Up` / `Down` | typing | move the highlighted transcript line |
 | `PageUp` / `PageDown` | typing | move it a page |
 | `Alt+C` / `Ctrl+C` | typing, copy | copy the selection, or the highlighted line |
 | `Ctrl+V` | typing | paste the clipboard into the input line |
+
+Two sizes, deliberately separate: `Ctrl+T` then `+`/`-` changes the **text** by two
+points and leaves the chrome alone, and `Ctrl+Alt` `+`/`-` (or `Ctrl` with the wheel,
+or a pinch) zooms the **whole panel** — glyphs, padding, corner radius, shadow and
+width by the same factor — between 75 % and 200 %, stopping where the output can no
+longer hold it. Neither is written anywhere.
 
 Copy mode is tmux's, cut down to what the panel has to walk. `h`/`l` move a
 character, `0`/`$` to the ends of the line, `j`/`k` a line, `w`/`b` a word,

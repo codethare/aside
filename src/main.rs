@@ -42,7 +42,11 @@ use smithay_client_toolkit::shm::Shm;
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface};
-use wayland_client::{Connection, QueueHandle};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
+use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gesture_pinch_v1::{
+    self as pinch, ZwpPointerGesturePinchV1,
+};
+use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gestures_v1::ZwpPointerGesturesV1;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
     ContentHint, ContentPurpose, Event as TextInputEvent, ZwpTextInputV3,
 };
@@ -335,9 +339,13 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
     // The answering panel is a fixed size: the bar, the gap and the box.
     let (pw, ph) = (
         WIDTH,
-        panel::height_for(room_for_replies(Some(FALLBACK_OUTPUT_H)), &font, 1),
+        panel::height_for(
+            room_for_replies(Some(FALLBACK_OUTPUT_H), ZOOM_RESET),
+            &font,
+            1,
+        ),
     );
-    let (w, h) = surface_size((pw, ph));
+    let (w, h) = surface_size((pw, ph), ZOOM_RESET);
     let mut input = Input::default();
     input.insert("next question 下一个问题");
     // Pinned to the newest row, as the panel is: the last block is what a reader sees
@@ -430,12 +438,17 @@ fn run(options: Options) -> Result<(), String> {
         LayerShell::bind(&globals, &qh).map_err(|e| format!("wlr-layer-shell is missing: {e}"))?;
     let shm = Shm::bind(&globals, &qh).map_err(|e| format!("wl_shm is missing: {e}"))?;
     let ime_manager = ime::bind(&globals, &qh);
+    // Optional: a compositor without pointer gestures simply never sends a pinch, and
+    // the wheel and the chords are the whole feature.
+    let gestures = globals
+        .bind::<ZwpPointerGesturesV1, State, ()>(&qh, 1..=3, ())
+        .ok();
 
     // The surface the panel will use, unless `--output` names another one: a layer
     // surface's output is a create-time argument, and the output list is only known
     // after an event round, which `boot` does before anything is committed.
     let layer = make_layer(&shell, &compositor, &qh, None);
-    let pool_size = surface_size((WIDTH, FALLBACK_OUTPUT_H));
+    let pool_size = surface_size((WIDTH, FALLBACK_OUTPUT_H), ZOOM_RESET);
     let pool = SlotPool::new((pool_size.0 * pool_size.1 * 4) as usize, &shm)
         .map_err(|e| format!("cannot create the shm pool: {e}"))?;
 
@@ -450,6 +463,7 @@ fn run(options: Options) -> Result<(), String> {
         width: WIDTH,
         height: panel::bar_height(),
         scale: 1,
+        zoom: ZOOM_RESET,
         phase: Phase::Idle,
         shape: panel::State::Bar,
         animate,
@@ -493,6 +507,9 @@ fn run(options: Options) -> Result<(), String> {
         seat: None,
         ime_manager,
         text_input: None,
+        gestures,
+        pinch: None,
+        gesture_pointer: None,
         config,
         key,
     };
@@ -647,8 +664,14 @@ fn layout_width(scale: u32) -> f32 {
 }
 
 /// The layer surface carries the panel plus its shadow margin on both sides.
-fn surface_size(panel: (u32, u32)) -> (u32, u32) {
-    (panel.0 + 2 * render::SHADOW, panel.1 + 2 * render::SHADOW)
+fn surface_size(panel: (u32, u32), zoom: f32) -> (u32, u32) {
+    let mo = zoomed(render::SHADOW, zoom);
+    (panel.0 + 2 * mo, panel.1 + 2 * mo)
+}
+
+/// A logical distance at a zoom: what the panel draws with when it is bigger.
+fn zoomed(px: u32, zoom: f32) -> u32 {
+    (px as f32 * zoom).round() as u32
 }
 
 /// How far the panel has been dragged from its anchored place, in logical px.
@@ -660,14 +683,14 @@ struct Drag {
 
 /// The visible gap under the panel, in logical px: a share of the output height,
 /// plus whatever the user dragged it by. Negative drags are clamped by the caller.
-fn edge_gap(output_h: Option<u32>, drag: i32) -> u32 {
-    (base_gap(output_h) + drag).max(render::SHADOW as i32) as u32
+fn edge_gap(output_h: Option<u32>, drag: i32, zoom: f32) -> u32 {
+    (base_gap(output_h) + drag).max(zoomed(render::SHADOW, zoom) as i32) as u32
 }
 
 /// The layer surface's bottom margin: the visible gap minus the shadow margin it
 /// already carries.
-fn bottom_margin(output_h: Option<u32>, drag: i32) -> i32 {
-    edge_gap(output_h, drag) as i32 - render::SHADOW as i32
+fn bottom_margin(output_h: Option<u32>, drag: i32, zoom: f32) -> i32 {
+    edge_gap(output_h, drag, zoom) as i32 - zoomed(render::SHADOW, zoom) as i32
 }
 
 /// Where a drag leaves the surface horizontally: the centred place plus the drag,
@@ -681,17 +704,17 @@ fn dragged_left(output_w: Option<u32>, sw: u32, drag: i32) -> i32 {
 
 /// The bottom margin a drag asks for, clamped so the whole surface stays on the
 /// output: it cannot go under the bar's own shadow, nor above the top edge.
-fn dragged_bottom(output_h: Option<u32>, sh: u32, drag: i32) -> i32 {
+fn dragged_bottom(output_h: Option<u32>, sh: u32, drag: i32, zoom: f32) -> i32 {
     let room = output_h
         .map(|oh| (oh as i32 - sh as i32).max(0))
         .unwrap_or(i32::MAX / 2);
-    bottom_margin(output_h, drag).clamp(0, room)
+    bottom_margin(output_h, drag, zoom).clamp(0, room)
 }
 
 /// The drag offset that produces a bottom margin: the inverse of `dragged_bottom`,
 /// so `edge_gap` — and the cap derived from it — matches what is on screen.
-fn drag_for_bottom(output_h: Option<u32>, bottom: i32) -> i32 {
-    bottom + render::SHADOW as i32 - base_gap(output_h)
+fn drag_for_bottom(output_h: Option<u32>, bottom: i32, zoom: f32) -> i32 {
+    bottom + zoomed(render::SHADOW, zoom) as i32 - base_gap(output_h)
 }
 
 /// The gap the anchor asks for, before any drag.
@@ -753,19 +776,19 @@ fn transcript_y(pointer_y: f64, scale: u32, viewport_top: u32) -> u32 {
 
 /// Whether a pointer at `y` in surface coordinates is over the replies card rather
 /// than the bar: the wheel scrolls there, and does nothing over the field.
-fn over_replies(panel_h: u32, y: f64) -> bool {
-    let top = render::SHADOW as f64;
-    let bar = top + (panel_h.saturating_sub(panel::bar_height())) as f64;
+fn over_replies(panel_h: u32, y: f64, zoom: f32) -> bool {
+    let top = zoomed(render::SHADOW, zoom) as f64;
+    let bar = top + (panel_h.saturating_sub(panel::bar_height_at(font::size() * zoom))) as f64;
     y >= top && y < bar
 }
 
 /// The tallest the replies may get: the gap below the bar, or the room left above
 /// it when the panel has been dragged so high that the gap is most of the screen.
-fn reply_cap(output_h: Option<u32>, gap: u32) -> u32 {
+fn reply_cap(output_h: Option<u32>, gap: u32, zoom: f32) -> u32 {
     let h = output_h.unwrap_or(FALLBACK_OUTPUT_H);
     // What is left above the bar once the bar and the gap between the cards are
     // on screen: the panel must never leave the output.
-    let chrome = panel::bar_height() + render::SEPARATION;
+    let chrome = panel::bar_height_at(font::size() * zoom) + zoomed(render::SEPARATION, zoom);
     let room = h.saturating_sub(gap + render::SHADOW + chrome);
     (gap * REPLY_SHARE).min(room)
 }
@@ -782,31 +805,35 @@ fn left_margin(output_w: Option<u32>, surface_w: u32) -> i32 {
 /// replies' fixed box. These are the panel's sizes; `surface_size` adds the shadow
 /// margin, and the answers' own height never enters: the box is fixed. Pure, so the
 /// spec's numbers are testable without a surface.
-fn size_for(phase: Phase, output_h: Option<u32>) -> (u32, u32) {
-    let bar = panel::bar_height();
+fn size_for(phase: Phase, output_h: Option<u32>, zoom: f32) -> (u32, u32) {
+    let bar = panel::bar_height_at(font::size() * zoom);
+    let width = zoomed(WIDTH, zoom);
     match phase {
-        Phase::Idle | Phase::Thinking => (WIDTH, bar),
+        Phase::Idle | Phase::Thinking => (width, bar),
         // Fixed: the room the replies are given, and nothing about how much text
         // they hold, so the panel does not resize as an answer arrives or as it is
         // moved. The replies scroll inside it.
-        Phase::Answering => (WIDTH, bar + render::SEPARATION + room_for_replies(output_h)),
+        Phase::Answering => (
+            width,
+            bar + zoomed(render::SEPARATION, zoom) + room_for_replies(output_h, zoom),
+        ),
     }
 }
 
 /// The size a shape change is painted at: the larger of its two shapes, so the
 /// surface is resized once per transition and never per frame.
-fn morph_size(from: Phase, to: Phase, output_h: Option<u32>) -> (u32, u32) {
-    let (fw, fh) = size_for(from, output_h);
-    let (tw, th) = size_for(to, output_h);
+fn morph_size(from: Phase, to: Phase, output_h: Option<u32>, zoom: f32) -> (u32, u32) {
+    let (fw, fh) = size_for(from, output_h, zoom);
+    let (tw, th) = size_for(to, output_h, zoom);
     (fw.max(tw), fh.max(th))
 }
 
 /// How tall the replies card always is: the anchored gap, clamped by the room left
 /// above the bar and by the 64 rows the frame may draw.
-fn room_for_replies(output_h: Option<u32>) -> u32 {
-    let gap = edge_gap(output_h, 0);
-    let rows = layout::MAX_ROWS as u32 * panel::bar_height();
-    reply_cap(output_h, gap).min(rows)
+fn room_for_replies(output_h: Option<u32>, zoom: f32) -> u32 {
+    let gap = edge_gap(output_h, 0, zoom);
+    let rows = layout::MAX_ROWS as u32 * panel::bar_height_at(font::size() * zoom);
+    reply_cap(output_h, gap, zoom).min(rows)
 }
 
 /// A clock reading for the panel's own transitions, in milliseconds. With the
@@ -903,6 +930,58 @@ fn font_step(current: f32, up: bool) -> f32 {
     let range = font::SIZE_RANGE;
     let next = if up { current + 2.0 } else { current - 2.0 };
     next.clamp(*range.start() as f32, *range.end() as f32)
+}
+
+/// How far the panel zooms at a time: one keypress, one wheel notch, and the range the
+/// whole thing is allowed to move in.
+pub const ZOOM_STEP: f32 = 1.15;
+pub const ZOOM_WHEEL_STEP: f32 = 1.05;
+pub const ZOOM_RANGE: std::ops::RangeInclusive<f32> = 0.75..=2.0;
+/// Where a new zoom is pinned before it is used: the range, and no further.
+pub const ZOOM_RESET: f32 = 1.0;
+
+/// Which way a wheel event zooms and how many notches it holds: away from the user is
+/// bigger, and a touchpad's continuous scroll has no notches at all, so it counts as
+/// one step in the direction its sign says.
+pub fn wheel_zoom(absolute: f64, discrete: i32) -> (bool, u32) {
+    let up = if discrete != 0 {
+        discrete < 0
+    } else {
+        absolute < 0.0
+    };
+    (up, discrete.unsigned_abs().max(1))
+}
+
+/// What a zoom chord asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoomAction {
+    In,
+    Out,
+    /// Back to 100 %, whatever the current zoom is.
+    Reset,
+}
+
+/// The zoom chords: `Ctrl+Alt` plus `-`, `+`/`=` (they are the same key on most
+/// layouts) or `BackSpace` for 100 %. Both modifiers are required, so `Ctrl+-` and
+/// `Alt+-` keep whatever else they mean and a plain `-` is still a minus sign.
+pub fn zoom_chord(keysym: Keysym, alt: bool, ctrl: bool) -> Option<ZoomAction> {
+    if !(alt && ctrl) {
+        return None;
+    }
+    match keysym {
+        Keysym::minus | Keysym::KP_Subtract => Some(ZoomAction::Out),
+        Keysym::equal | Keysym::plus | Keysym::KP_Add => Some(ZoomAction::In),
+        Keysym::BackSpace => Some(ZoomAction::Reset),
+        _ => None,
+    }
+}
+
+/// One zoom step, kept inside the range. Multiplying and dividing by the same factor
+/// has to come back to where it started, so the step is a pure factor and not an
+/// addition in pixels.
+pub fn zoom_step(current: f32, up: bool, step: f32) -> f32 {
+    let next = if up { current * step } else { current / step };
+    next.clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end())
 }
 
 /// The shape the panel paints itself as, for a phase.
@@ -1105,6 +1184,9 @@ struct State {
     width: u32,
     height: u32,
     scale: u32,
+    /// How much bigger than its design the whole panel is drawn: the glyphs, the
+    /// padding, the radius, the shadow and the width, all by this one factor.
+    zoom: f32,
     first_frame: bool,
     /// Whether the compositor has configured the surface yet. A buffer may not be
     /// attached before that: the first commit is buffer-less and its only job is
@@ -1186,6 +1268,12 @@ struct State {
     ime: ime::Ime,
     /// The seat the text-input object was created against, once one appears.
     seat: Option<wl_seat::WlSeat>,
+    /// The gesture manager, and this seat's pinch: two fingers on the trackpad, which
+    /// is the only input that scales the panel continuously.
+    gestures: Option<ZwpPointerGesturesV1>,
+    pinch: Option<ZwpPointerGesturePinchV1>,
+    /// The pointer the pinch object was made from: kept alive for as long as it is.
+    gesture_pointer: Option<wl_pointer::WlPointer>,
     ime_manager: Option<wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
     text_input: Option<ZwpTextInputV3>,
     config: provider::Config,
@@ -1199,8 +1287,8 @@ impl State {
     /// resized once per transition rather than per frame.
     fn target_size(&self) -> (u32, u32) {
         match self.morph.filter(|_| self.morphing()) {
-            Some(m) => morph_size(m.from, m.to, self.output_h),
-            None => size_for(self.phase, self.output_h),
+            Some(m) => morph_size(m.from, m.to, self.output_h, self.zoom),
+            None => size_for(self.phase, self.output_h, self.zoom),
         }
     }
 
@@ -1342,7 +1430,7 @@ impl State {
     /// re-wrap once if the width changed.
     fn apply_size(&mut self) {
         let (w, h) = self.target_size();
-        let (sw, sh) = surface_size((w, h));
+        let (sw, sh) = surface_size((w, h), self.zoom);
         let (left, bottom) = self.margins(sw, sh);
         self.layer.set_margin(0, 0, bottom, left);
         self.layer.set_size(sw, sh);
@@ -1356,7 +1444,7 @@ impl State {
             }
             self.buffer = None;
             if let Some(font) = self.font.as_ref() {
-                self.viewport.height = panel::transcript_px(h * self.scale, font, self.scale);
+                self.viewport.height = panel::transcript_px(h * self.s(), font, self.s());
             }
             self.viewport.clamp(self.transcript.total_height());
             self.dirty = true;
@@ -1366,7 +1454,7 @@ impl State {
     /// Where the surface goes: centred plus the drag, kept on the output.
     fn margins(&self, sw: u32, sh: u32) -> (i32, i32) {
         let left = dragged_left(self.output_w, sw, self.drag.left);
-        let bottom = dragged_bottom(self.output_h, sh, self.drag.bottom);
+        let bottom = dragged_bottom(self.output_h, sh, self.drag.bottom, self.zoom);
         (left, bottom)
     }
 
@@ -1418,7 +1506,7 @@ impl State {
         }
         // The face first: a machine that lost the font between the two reads keeps the
         // size it is already drawing at instead of going blank.
-        let Ok(font) = PanelFont::load(next) else {
+        let Ok(font) = PanelFont::load(self.face_size()) else {
             return;
         };
         // shortcut: the face is read on the event loop, a few ms on a keypress; doing it
@@ -1436,17 +1524,17 @@ impl State {
 
     fn buffer_height(&self) -> u32 {
         // The surface carries the shadow margin: the panel is inside it.
-        surface_size((self.width, self.height)).1 * self.scale
+        surface_size((self.width, self.height), self.zoom).1 * self.scale
     }
 
     fn buffer_width(&self) -> u32 {
-        surface_size((self.width, self.height)).0 * self.scale
+        surface_size((self.width, self.height), self.zoom).0 * self.scale
     }
 
     /// The width text is laid out at, in buffer pixels. The panel's own width,
     /// not the surface's: the shadow margin is not content.
     fn text_width(&self) -> f32 {
-        layout_width(self.scale)
+        layout_width(self.s())
     }
 
     /// Lay the transcript out again after a width or scale change: once per
@@ -1673,12 +1761,12 @@ impl State {
     /// Which reply line a pointer position is on, if any: the same walk the
     /// transcript does for the keyboard, in the other direction.
     fn reply_row(&self, position: (f64, f64)) -> Option<usize> {
-        if !over_replies(self.height, position.1) {
+        if !over_replies(self.height, position.1, self.zoom) {
             return None;
         }
         let font = self.font.as_ref()?;
         let blocks = layout::Blocks::new(font);
-        let y = transcript_y(position.1, self.scale, self.viewport.top);
+        let y = transcript_y(position.1, self.s(), self.viewport.top);
         self.transcript.row_at(y, blocks)
     }
 
@@ -1717,12 +1805,17 @@ impl State {
     /// for both the pointer and the keyboard: the clamped margins are turned back
     /// into an offset, so the gap the cap is derived from is the gap on screen.
     fn move_panel(&mut self, dx: i32, dy: i32) {
-        let (sw, sh) = surface_size((self.width, self.height));
+        let (sw, sh) = surface_size((self.width, self.height), self.zoom);
         let centred = left_margin(self.output_w, sw);
         let left = dragged_left(self.output_w, sw, self.drag.left.saturating_add(dx));
         self.drag.left = left - centred;
-        let bottom = dragged_bottom(self.output_h, sh, self.drag.bottom.saturating_add(dy));
-        self.drag.bottom = drag_for_bottom(self.output_h, bottom);
+        let bottom = dragged_bottom(
+            self.output_h,
+            sh,
+            self.drag.bottom.saturating_add(dy),
+            self.zoom,
+        );
+        self.drag.bottom = drag_for_bottom(self.output_h, bottom, self.zoom);
         // The cap is a share of the gap, so a move can change how tall the panel may
         // grow: size it again before the margins go out.
         self.apply_size();
@@ -1890,6 +1983,61 @@ impl State {
     fn copy_note_up(&self) -> bool {
         self.copied
             .is_some_and(|(at, _)| at.elapsed() < Duration::from_millis(COPY_NOTE_MS))
+    }
+
+    /// `Ctrl` + the wheel: a notch away from the user is bigger, a notch towards them
+    /// is smaller. Every notch in one event is one zoom, so the face is read once.
+    fn wheel_zoom(&mut self, vertical: &smithay_client_toolkit::seat::pointer::AxisScroll) {
+        let (up, notches) = wheel_zoom(vertical.absolute, vertical.discrete);
+        let mut next = self.zoom;
+        for _ in 0..notches {
+            next = zoom_step(next, up, ZOOM_WHEEL_STEP);
+        }
+        self.set_zoom(next);
+    }
+
+    /// The multiplier every buffer-pixel measurement takes: the output's scale and the
+    /// zoom together. It is the only factor the drawing code sees.
+    fn s(&self) -> u32 {
+        (self.scale as f32 * self.zoom).round().max(1.0) as u32
+    }
+
+    /// The size the face is read at, so the glyphs grow with the panel.
+    fn face_size(&self) -> f32 {
+        font::size() * self.s() as f32
+    }
+
+    /// One zoom chord: the panel resizes as a whole, and nothing about the input line
+    /// or the transcript changes meaning while it does.
+    fn zoom_by(&mut self, action: ZoomAction) {
+        let next = match action {
+            ZoomAction::In => zoom_step(self.zoom, true, ZOOM_STEP),
+            ZoomAction::Out => zoom_step(self.zoom, false, ZOOM_STEP),
+            ZoomAction::Reset => ZOOM_RESET,
+        };
+        self.set_zoom(next);
+    }
+
+    fn set_zoom(&mut self, next: f32) {
+        let next = next.clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end());
+        if (next - self.zoom).abs() < 1e-6 {
+            return;
+        }
+        let was = self.zoom;
+        self.zoom = next;
+        // The face first: a machine that cannot read it keeps the zoom it is drawn at
+        // instead of going blank.
+        let Ok(font) = PanelFont::load(self.face_size()) else {
+            self.zoom = was;
+            return;
+        };
+        self.font = Some(font);
+        self.rewrap();
+        self.apply_size();
+        self.viewport.clamp(self.transcript.total_height());
+        // The bar moved and the caret with it, so the candidate window is re-placed.
+        self.report_cursor();
+        self.dirty = true;
     }
 
     /// The bar's right-hand label, which is how a swallowed keystroke explains
@@ -2104,6 +2252,7 @@ impl State {
                 }
             }
         };
+        let s = self.s();
         let Some(canvas) = self.pool.canvas(&buffer) else {
             // The compositor still holds the previous buffer; try again later.
             self.buffer = Some(buffer);
@@ -2131,7 +2280,7 @@ impl State {
             look,
             head,
             thumb,
-            self.scale,
+            s,
         );
         self.layer
             .wl_surface()
@@ -2152,6 +2301,12 @@ impl State {
     fn on_key(&mut self, event: &KeyEvent) {
         // The panel is on its way out: no key has a meaning any more.
         if self.close_start.is_some() {
+            return;
+        }
+        // The zoom chords are the panel's own size, so they are matched before the mode
+        // branches: a panel too small to read is too small to read in copy mode too.
+        if let Some(action) = zoom_chord(event.keysym, self.modifiers.alt, self.modifiers.ctrl) {
+            self.zoom_by(action);
             return;
         }
         let text = event.utf8.clone();
@@ -2280,7 +2435,7 @@ impl State {
         let (Some(text_input), Some(font)) = (self.text_input.as_ref(), self.font.as_ref()) else {
             return;
         };
-        let s = self.scale;
+        let s = self.s();
         let mo = render::SHADOW * s;
         // The caret's own place, not the end of the line: a scrolled bar would put the
         // candidate window past the panel otherwise.
@@ -2385,7 +2540,7 @@ impl CompositorHandler for State {
         self.scale = scale;
         self.layer.wl_surface().set_buffer_scale(scale as i32);
         // A different density means different glyphs and different wrapping.
-        if let Ok(font) = PanelFont::load(font::size() * scale as f32) {
+        if let Ok(font) = PanelFont::load(self.face_size()) {
             self.font = Some(font);
         }
         let max_w = self.text_width();
@@ -2549,6 +2704,13 @@ impl SeatHandler for State {
             if let Ok(pointer) = self.seat_state.get_pointer(qh, &seat) {
                 self.pointer = Some(pointer);
             }
+            // A pinch is created from a pointer, not from a seat: one of our own, whose
+            // events we ignore, so the gesture object has the focus the pointer has.
+            if let Some(gestures) = self.gestures.as_ref() {
+                let raw = seat.get_pointer(qh, ());
+                self.pinch = Some(gestures.get_pinch_gesture(&raw, qh, ()));
+                self.gesture_pointer = Some(raw);
+            }
             return;
         }
         if capability != Capability::Keyboard || self.keyboard.is_some() {
@@ -2696,6 +2858,53 @@ impl ProvidesRegistryState for State {
     registry_handlers![OutputState, SeatState,];
 }
 
+impl Dispatch<ZwpPointerGesturePinchV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _proxy: &ZwpPointerGesturePinchV1,
+        event: pinch::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // `scale` is the gesture's own factor relative to the last update: the panel
+        // follows the fingers, and a cancelled gesture leaves it where it got to.
+        if let pinch::Event::Update { scale, .. } = event
+            && scale.is_finite()
+            && scale > 0.0
+        {
+            state.set_zoom(state.zoom * scale as f32);
+        }
+    }
+}
+
+impl Dispatch<wl_pointer::WlPointer, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_pointer::WlPointer,
+        _event: <wl_pointer::WlPointer as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // This pointer exists only to carry the pinch object: its own events are the
+        // seat pointer's, which the toolkit already handles.
+    }
+}
+
+impl Dispatch<ZwpPointerGesturesV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwpPointerGesturesV1,
+        _event: <ZwpPointerGesturesV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // The manager has no events.
+    }
+}
+
 smithay_client_toolkit::delegate_dispatch2!(State);
 
 impl PointerHandler for State {
@@ -2734,9 +2943,15 @@ impl PointerHandler for State {
                 }
                 PointerEventKind::Motion { .. } => self.motion_to(event.position),
                 PointerEventKind::Axis { vertical, .. }
-                    if over_replies(self.height, event.position.1) =>
+                    if over_replies(self.height, event.position.1, self.zoom) =>
                 {
-                    self.wheel(&vertical);
+                    // `Ctrl` makes the wheel the panel's size; without it the wheel is
+                    // the transcript's, which is what it has always been.
+                    if self.modifiers.ctrl {
+                        self.wheel_zoom(&vertical);
+                    } else {
+                        self.wheel(&vertical);
+                    }
                 }
                 _ => {}
             }
@@ -2836,33 +3051,36 @@ mod tests {
     fn the_three_states_have_the_spec_s_sizes() {
         let bar = panel::bar_height();
         assert_eq!(bar, 30, "row_h_for(20) is 30 at 1x");
-        assert_eq!(size_for(Phase::Idle, Some(1080)), (640, bar));
+        assert_eq!(size_for(Phase::Idle, Some(1080), ZOOM_RESET), (640, bar));
         // Thinking is the bar: the field a question was typed in stays, and only
         // its rim lights up.
         assert_eq!(
-            size_for(Phase::Thinking, Some(1080)),
+            size_for(Phase::Thinking, Some(1080), ZOOM_RESET),
             (640, bar),
             "a running request keeps the bar"
         );
         // Answering: the bar, the 16 px between the cards, and a fixed room for the
         // replies. No term for the text, so it is the same size for one line and for
         // a thousand, and a move does not change it.
-        let room = room_for_replies(Some(1080));
+        let room = room_for_replies(Some(1080), ZOOM_RESET);
         assert_eq!(room, 410, "38 % of 1080");
         let answering = (640, bar + render::SEPARATION + room);
-        assert_eq!(size_for(Phase::Answering, Some(1080)), answering);
+        assert_eq!(
+            size_for(Phase::Answering, Some(1080), ZOOM_RESET),
+            answering
+        );
         // Before the output reports, a 1080-pixel one is assumed.
-        assert_eq!(size_for(Phase::Answering, None), answering);
+        assert_eq!(size_for(Phase::Answering, None, ZOOM_RESET), answering);
         // A tiny output cannot make the room negative.
         assert_eq!(
-            size_for(Phase::Answering, Some(10)).1,
+            size_for(Phase::Answering, Some(10), ZOOM_RESET).1,
             bar + render::SEPARATION
         );
         // The row cap bounds the box as well as the viewport: past ~5000 px the gap
         // alone would allow more rows than a frame may draw.
         let tall = Some(8000u32);
         assert_eq!(
-            room_for_replies(tall),
+            room_for_replies(tall, ZOOM_RESET),
             layout::MAX_ROWS as u32 * bar,
             "never more than the rows the frame may draw"
         );
@@ -2873,16 +3091,20 @@ mod tests {
     #[test]
     fn the_bar_sits_a_share_of_the_output_up_the_screen() {
         for (output, gap) in [(1080u32, 410u32), (1440, 547), (600, 228)] {
-            assert_eq!(edge_gap(Some(output), 0), gap, "38 % of {output}");
+            assert_eq!(
+                edge_gap(Some(output), 0, ZOOM_RESET),
+                gap,
+                "38 % of {output}"
+            );
             // The surface margin is the gap less the shadow margin it carries.
             assert_eq!(
-                bottom_margin(Some(output), 0),
+                bottom_margin(Some(output), 0, ZOOM_RESET),
                 (gap - render::SHADOW) as i32
             );
             // A drag moves the gap, and with it the cap.
-            assert_eq!(edge_gap(Some(output), 100), gap + 100);
+            assert_eq!(edge_gap(Some(output), 100, ZOOM_RESET), gap + 100);
             // The box is the gap, whatever the transcript holds.
-            let (_, h) = size_for(Phase::Answering, Some(output));
+            let (_, h) = size_for(Phase::Answering, Some(output), ZOOM_RESET);
             assert_eq!(
                 h,
                 panel::bar_height() + render::SEPARATION + gap,
@@ -2890,12 +3112,12 @@ mod tests {
             );
         }
         // Too small an output cannot make the margin negative.
-        assert_eq!(edge_gap(Some(10), 0), render::SHADOW);
-        assert_eq!(bottom_margin(Some(10), 0), 0);
+        assert_eq!(edge_gap(Some(10), 0, ZOOM_RESET), render::SHADOW);
+        assert_eq!(bottom_margin(Some(10), 0, ZOOM_RESET), 0);
         // Dragged so high that the gap is most of the screen: the room above the
         // bar clamps the cap instead, and the panel still fits.
-        let gap = edge_gap(Some(1080), 500);
-        let cap = reply_cap(Some(1080), gap);
+        let gap = edge_gap(Some(1080), 500, ZOOM_RESET);
+        let cap = reply_cap(Some(1080), gap, ZOOM_RESET);
         let chrome = panel::bar_height() + render::SEPARATION;
         assert_eq!(
             cap,
@@ -3176,6 +3398,106 @@ mod tests {
         assert!(close_tracks(clock_ms(true, now)).1 > 0.0);
     }
 
+    /// A wheel notch is a direction and a count, and a touchpad's continuous scroll is
+    /// one step: `Ctrl` + the wheel must not need a notched mouse.
+    #[test]
+    fn the_wheel_counts_notches_and_takes_a_touchpad_as_one() {
+        assert_eq!(wheel_zoom(-1.0, -1), (true, 1), "away from the user");
+        assert_eq!(wheel_zoom(1.0, 2), (false, 2), "towards them, two notches");
+        assert_eq!(wheel_zoom(-3.4, 0), (true, 1), "a touchpad is one step");
+        assert_eq!(wheel_zoom(0.7, 0), (false, 1));
+        assert_eq!(wheel_zoom(0.0, 0), (false, 1), "a zero event is no step up");
+    }
+
+    /// The bar, the surface and the panel's width all take the zoom: that is what
+    /// makes a zoomed panel a magnified copy rather than a box with bigger text.
+    #[test]
+    fn the_panel_measures_itself_at_the_zoom() {
+        let size = crate::font::SIZE;
+        let one = panel::bar_height_at(size);
+        let two = panel::bar_height_at(size * 2.0);
+        assert_eq!(two, one * 2, "the bar doubles with the face: {one} / {two}");
+
+        assert_eq!(zoomed(WIDTH, 1.0), WIDTH);
+        assert_eq!(zoomed(WIDTH, 1.5), 960, "the panel widens with the zoom");
+        assert_eq!(zoomed(render::SEPARATION, 2.0), render::SEPARATION * 2);
+
+        let (w, h) = surface_size((640, 100), 2.0);
+        assert_eq!(w, 640 + 4 * render::SHADOW, "the shadow margin zooms too");
+        assert_eq!(h, 100 + 4 * render::SHADOW);
+    }
+
+    /// The zoom chords mean the same thing in every mode, so they are matched before
+    /// the mode branches: a panel that is too small to read is too small to read in
+    /// copy mode as well.
+    #[test]
+    fn the_zoom_chords_are_checked_before_any_mode() {
+        use Keysym as K;
+        assert_eq!(zoom_chord(K::minus, true, true), Some(ZoomAction::Out));
+        assert_eq!(zoom_chord(K::equal, true, true), Some(ZoomAction::In));
+        assert_eq!(zoom_chord(K::plus, true, true), Some(ZoomAction::In));
+        assert_eq!(zoom_chord(K::KP_Add, true, true), Some(ZoomAction::In));
+        assert_eq!(
+            zoom_chord(K::KP_Subtract, true, true),
+            Some(ZoomAction::Out)
+        );
+        assert_eq!(
+            zoom_chord(K::BackSpace, true, true),
+            Some(ZoomAction::Reset),
+            "Ctrl+Alt+BackSpace goes back to 100%"
+        );
+        // Without both modifiers nothing zooms: `Ctrl+-` and `Alt+-` keep whatever
+        // else they have, and a plain `-` is a minus sign.
+        for (alt, ctrl) in [(false, false), (true, false), (false, true)] {
+            assert_eq!(
+                zoom_chord(K::minus, alt, ctrl),
+                None,
+                "alt {alt} ctrl {ctrl}"
+            );
+            assert_eq!(zoom_chord(K::equal, alt, ctrl), None);
+            assert_eq!(zoom_chord(K::BackSpace, alt, ctrl), None);
+        }
+        // The text-size keys are a different thing and stay reachable: `Ctrl+T` then
+        // `+` is the font, and it is not a zoom chord.
+        assert_eq!(zoom_chord(K::plus, false, true), None);
+        assert_eq!(
+            zoom_chord(K::h, true, true),
+            None,
+            "the window chords are not zoom"
+        );
+    }
+
+    /// The zoom is a factor on the whole panel, and it has to come back: multiplying
+    /// and dividing by the same step lands on the value it started from.
+    #[test]
+    fn the_zoom_steps_and_stops_at_its_ends() {
+        let up = zoom_step(1.0, true, ZOOM_STEP);
+        assert!((up - ZOOM_STEP).abs() < 1e-5, "{up}");
+        let back = zoom_step(up, false, ZOOM_STEP);
+        assert!(
+            (back - 1.0).abs() < 1e-5,
+            "one step up and one down is home: {back}"
+        );
+
+        // The ends of the range are where it stops, whichever way it was asked.
+        let mut z = 1.0;
+        for _ in 0..40 {
+            z = zoom_step(z, true, ZOOM_STEP);
+        }
+        assert_eq!(z, *ZOOM_RANGE.end(), "stops at the top: {z}");
+        for _ in 0..80 {
+            z = zoom_step(z, false, ZOOM_STEP);
+        }
+        assert_eq!(z, *ZOOM_RANGE.start(), "stops at the bottom: {z}");
+
+        // The wheel moves less than a keypress, and the pinch is not stepped at all.
+        assert!(zoom_step(1.0, true, ZOOM_WHEEL_STEP) < up);
+        assert_eq!(
+            1.0f32.clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end()),
+            ZOOM_RESET
+        );
+    }
+
     /// The window chords: `Alt+hjkl` a padding step, `Alt+Ctrl+hjkl` ten of them,
     /// and nothing else in the Alt row moves the panel.
     #[test]
@@ -3216,25 +3538,35 @@ mod tests {
         assert_eq!(dragged_left(None, surface, -50), 0);
         // Vertically: the surface cannot be pushed off the top either.
         let sh = 200u32;
-        assert_eq!(dragged_bottom(Some(1080), sh, 10_000), 1080 - sh as i32);
-        assert_eq!(dragged_bottom(Some(1080), sh, -10_000), 0);
+        assert_eq!(
+            dragged_bottom(Some(1080), sh, 10_000, ZOOM_RESET),
+            1080 - sh as i32
+        );
+        assert_eq!(dragged_bottom(Some(1080), sh, -10_000, ZOOM_RESET), 0);
         // The offset and the painted margin always agree, clamped or not: the cap is
         // derived from the gap the user can see.
         for drag in [-500, -20, 0, 40, 400, 5000] {
-            let bottom = dragged_bottom(Some(1080), sh, drag);
-            let offset = drag_for_bottom(Some(1080), bottom);
+            let bottom = dragged_bottom(Some(1080), sh, drag, ZOOM_RESET);
+            let offset = drag_for_bottom(Some(1080), bottom, ZOOM_RESET);
             assert_eq!(
-                bottom_margin(Some(1080), offset),
+                bottom_margin(Some(1080), offset, ZOOM_RESET),
                 bottom,
                 "drag {drag} disagrees with its margin"
             );
         }
         // A drag up grows the gap, and with it the cap; a drag down shrinks both.
-        let base = bottom_margin(Some(1080), 0);
-        assert_eq!(bottom_margin(Some(1080), -100), base - 100);
+        let base = bottom_margin(Some(1080), 0, ZOOM_RESET);
+        assert_eq!(bottom_margin(Some(1080), -100, ZOOM_RESET), base - 100);
         assert!(
-            reply_cap(Some(1080), edge_gap(Some(1080), 100))
-                > reply_cap(Some(1080), edge_gap(Some(1080), -100))
+            reply_cap(
+                Some(1080),
+                edge_gap(Some(1080), 100, ZOOM_RESET),
+                ZOOM_RESET
+            ) > reply_cap(
+                Some(1080),
+                edge_gap(Some(1080), -100, ZOOM_RESET),
+                ZOOM_RESET
+            )
         );
     }
 
@@ -3243,12 +3575,18 @@ mod tests {
     fn the_wheel_only_counts_over_the_replies() {
         let panel_h = 400; // bar 30 + gap 12 + replies 358
         let top = render::SHADOW as f64;
-        assert!(!over_replies(panel_h, top - 1.0), "the shadow margin");
-        assert!(over_replies(panel_h, top + 1.0), "the replies card");
-        let bar_top = top + (panel_h - panel::bar_height()) as f64;
-        assert!(!over_replies(panel_h, bar_top + 1.0), "the bar");
         assert!(
-            over_replies(panel_h, bar_top - 0.5),
+            !over_replies(panel_h, top - 1.0, ZOOM_RESET),
+            "the shadow margin"
+        );
+        assert!(
+            over_replies(panel_h, top + 1.0, ZOOM_RESET),
+            "the replies card"
+        );
+        let bar_top = top + (panel_h - panel::bar_height()) as f64;
+        assert!(!over_replies(panel_h, bar_top + 1.0, ZOOM_RESET), "the bar");
+        assert!(
+            over_replies(panel_h, bar_top - 0.5, ZOOM_RESET),
             "just above the bar is replies"
         );
     }
@@ -3370,21 +3708,24 @@ mod tests {
     /// given for its duration.
     #[test]
     fn a_transition_runs_on_the_larger_shape() {
-        let (bw, bh) = size_for(Phase::Idle, Some(1080));
-        let (_, th) = size_for(Phase::Thinking, Some(1080));
-        let (aw, ah) = size_for(Phase::Answering, Some(1080));
+        let (bw, bh) = size_for(Phase::Idle, Some(1080), ZOOM_RESET);
+        let (_, th) = size_for(Phase::Thinking, Some(1080), ZOOM_RESET);
+        let (aw, ah) = size_for(Phase::Answering, Some(1080), ZOOM_RESET);
         // Bar to ball: the ball is narrow but taller than the bar's band.
         assert_eq!(
-            morph_size(Phase::Idle, Phase::Thinking, Some(1080)),
+            morph_size(Phase::Idle, Phase::Thinking, Some(1080), ZOOM_RESET),
             (bw, th)
         );
         // Ball to panel: the panel is the larger one in both directions.
         assert_eq!(
-            morph_size(Phase::Thinking, Phase::Answering, Some(1080)),
+            morph_size(Phase::Thinking, Phase::Answering, Some(1080), ZOOM_RESET),
             (aw, ah)
         );
         // A no-op change is the shape itself.
-        assert_eq!(morph_size(Phase::Idle, Phase::Idle, Some(1080)), (bw, bh));
+        assert_eq!(
+            morph_size(Phase::Idle, Phase::Idle, Some(1080), ZOOM_RESET),
+            (bw, bh)
+        );
     }
 
     /// The light's position comes from the clock, so a late frame lands where the
@@ -3536,13 +3877,20 @@ mod tests {
         assert_eq!(size, font::SIZE, "no configuration in a test run");
         let bar = panel::bar_height();
         assert_eq!(bar, font::row_h_for(size), "the bar is one row of the text");
-        let (_, h) = size_for(Phase::Answering, Some(1080));
-        assert_eq!(h, bar + render::SEPARATION + room_for_replies(Some(1080)));
+        let (_, h) = size_for(Phase::Answering, Some(1080), ZOOM_RESET);
+        assert_eq!(
+            h,
+            bar + render::SEPARATION + room_for_replies(Some(1080), ZOOM_RESET)
+        );
         // The room is the gap clamped by the rows a frame may draw, so a very tall
         // output stops at the row cap rather than at the gap.
         assert_eq!(
-            room_for_replies(Some(3000)),
-            (layout::MAX_ROWS as u32 * bar).min(reply_cap(Some(3000), edge_gap(Some(3000), 0))),
+            room_for_replies(Some(3000), ZOOM_RESET),
+            (layout::MAX_ROWS as u32 * bar).min(reply_cap(
+                Some(3000),
+                edge_gap(Some(3000), 0, ZOOM_RESET),
+                ZOOM_RESET
+            )),
             "the row cap is expressed in rows of this size"
         );
         assert!(font::row_h_for(30.0) > bar, "a larger size is a taller row");
