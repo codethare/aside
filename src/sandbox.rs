@@ -226,16 +226,12 @@ mod tests {
     #[test]
     fn a_network_request_still_works_from_inside() {
         // DNS and TLS need the bound files; without them the sandbox is useless.
+        // The default provider's own host, so this fails when the default changes to
+        // something the sandbox cannot reach rather than passing on a proxy host.
+        let models = format!("{}/models", crate::provider::DEFAULT_BASE_URL);
         let Some(out) = sandbox_runs(
             "/usr/bin/curl",
-            &[
-                "-sS",
-                "-o",
-                "/dev/null",
-                "-w",
-                "%{http_code}",
-                "https://api.commandcode.ai/provider/v1/models",
-            ],
+            &["-sS", "-o", "/dev/null", "-w", "%{http_code}", &models],
         ) else {
             return;
         };

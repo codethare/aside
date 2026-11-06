@@ -542,7 +542,7 @@ mod tests {
     fn a_failure_is_its_own_entry_kind() {
         let f = font();
         let mut t = Transcript::default();
-        t.fail("401 unauthorized: COMMAND_CODE_API_KEY", &f, 400.0);
+        t.fail("401 unauthorized: OPENCODE_API_KEY", &f, 400.0);
         let rows = t.rows(Blocks::new(&f));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, Kind::Error);

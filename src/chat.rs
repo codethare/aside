@@ -290,7 +290,7 @@ mod tests {
         if std::env::var("ASIDE_LIVE").as_deref() != Ok("1") {
             return;
         }
-        let key = provider::api_key().expect("COMMAND_CODE_API_KEY");
+        let key = provider::api_key().expect(provider::KEY_VAR);
         let font = PanelFont::load(crate::font::SIZE).expect("font");
         let mut transcript = Transcript::default();
         transcript.ask("Reply with the single word: pong", &font);

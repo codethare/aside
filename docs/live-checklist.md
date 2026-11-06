@@ -8,7 +8,7 @@ not reworded.
 ## Before starting
 
 ```sh
-export COMMAND_CODE_API_KEY=...
+export OPENCODE_API_KEY=...
 bind=SUPER,A   # substitute your compositor's binding syntax
 ```
 
@@ -164,4 +164,4 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 16. Ask a question with `ASIDE_MODEL=nonsense/model`: the transcript shows a
     provider error naming the status, and the panel stays usable.
 17. Unset the key and run `aside` from a terminal: one line on standard error
-    naming `COMMAND_CODE_API_KEY`, non-zero exit, and no window.
+    naming `OPENCODE_API_KEY`, non-zero exit, and no window.

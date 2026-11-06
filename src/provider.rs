@@ -6,10 +6,10 @@
 
 use std::path::PathBuf;
 
-pub const DEFAULT_BASE_URL: &str = "https://api.commandcode.ai/provider/v1";
+pub const DEFAULT_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4.1-flash";
 /// The only environment variable the panel reads for authentication.
-pub const KEY_VAR: &str = "COMMAND_CODE_API_KEY";
+pub const KEY_VAR: &str = "OPENCODE_API_KEY";
 pub const MODEL_VAR: &str = "ASIDE_MODEL";
 pub const BASE_URL_VAR: &str = "ASIDE_BASE_URL";
 pub const PROXY_VAR: &str = "ASIDE_PROXY";
@@ -341,9 +341,9 @@ mod tests {
     fn the_defaults_are_the_documented_ones() {
         let c = Config::default();
         assert_eq!(c.model, "deepseek/deepseek-v4.1-flash");
-        assert_eq!(c.base_url, "https://api.commandcode.ai/provider/v1");
+        assert_eq!(c.base_url, "https://opencode.ai/zen/go/v1");
         assert_eq!(c.proxy, None, "a bare machine goes direct");
-        assert_eq!(KEY_VAR, "COMMAND_CODE_API_KEY");
+        assert_eq!(KEY_VAR, "OPENCODE_API_KEY");
         assert_eq!(PROXY_VAR, "ASIDE_PROXY");
     }
 
@@ -461,7 +461,7 @@ mod tests {
         // would silently hand curl a broken configuration.
         assert!(
             text.contains(
-                "url = \"https://api.commandcode.ai/provider/v1/chat/completions\"\n\
+                "url = \"https://opencode.ai/zen/go/v1/chat/completions\"\n\
                  proxy = \"socks5h://127.0.0.1:1080\"\n\
                  request = \"POST\"\n"
             ),
@@ -503,7 +503,7 @@ mod tests {
         let config = Config::default();
         let text = curl_config(&config, "user_secret", "{\"a\":1}");
         assert!(text.contains("Authorization: Bearer user_secret"));
-        assert!(text.contains("url = \"https://api.commandcode.ai/provider/v1/chat/completions\""));
+        assert!(text.contains("url = \"https://opencode.ai/zen/go/v1/chat/completions\""));
         assert!(text.contains("data-binary = \"{\\\"a\\\":1}\""));
         assert!(text.contains(&format!("connect-timeout = {CONNECT_TIMEOUT_S}")));
         assert!(text.contains(&format!("speed-time = {SPEED_TIME_S}")));

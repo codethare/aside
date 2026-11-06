@@ -120,7 +120,7 @@ const USAGE: &str = "\
 usage: aside [--model MODEL] [--base-url URL] [--proxy URL] [--output OUTPUT] [--preview FILE] [--help] [--version]
 
   --model MODEL     model to ask (default deepseek/deepseek-v4.1-flash)
-  --base-url URL    provider base URL (default https://api.commandcode.ai/provider/v1)
+  --base-url URL    provider base URL (default https://opencode.ai/zen/go/v1)
   --proxy URL       proxy for the request, any scheme curl accepts
                     (e.g. socks5h://127.0.0.1:1080); default is a direct connection
   --output OUTPUT   pin the panel to this output; without it the compositor places it

@@ -53,7 +53,7 @@ A size that is not a size is an error naming the file and the line, and nothing
 opens. The credential is environment-only:
 
 ```sh
-export COMMAND_CODE_API_KEY=...
+export OPENCODE_API_KEY=...
 ```
 
 Flags override both: `--model`, `--base-url`, `--proxy`. `--output NAME` pins the
