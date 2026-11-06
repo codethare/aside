@@ -153,15 +153,17 @@ Paste the clipboard into the input line with
 .BR wl\-paste (1).
 .TP
 .B Ctrl+Alt+minus ", " Ctrl+Alt+plus ", " Ctrl+Alt+equal
-Zoom the whole panel out or in by 15 per cent, in every mode: the glyphs, the
-row height, the padding, the corner radius, the shadow margin and the panel's width
-all take the same factor.  A pinch of two fingers on the trackpad, with the pointer
-over the panel, zooms continuously instead, and \fBCtrl\fP with the wheel zooms by
-5 per cent a notch.  The zoom stays between 75 and 200 per cent and stops where the
-output can no longer hold the panel; it is not saved between runs.
+Make the panel's box smaller or bigger by 15 per cent, in every mode: its width and
+the room the replies are given.  The text keeps its size, so a bigger box shows more
+of it and the lines wrap at the new width.  A pinch of two fingers on the trackpad,
+with the pointer over the panel, resizes continuously instead, and \fBCtrl\fP with the
+wheel resizes by 5 per cent a notch.  The box stays between 75 and 200 per cent of its
+design size, and stops where the output can no longer hold it; it is not saved between
+runs.  \fBCtrl+T\fP then \fB+\fP or \fB-\fP is a different thing: that is the text's
+own size.
 .TP
 .B Ctrl+Alt+BackSpace
-Back to 100 per cent, from whatever the zoom is.
+Back to the panel's default size, from whatever it is.
 .TP
 .B Ctrl+T
 Enter the prefix mode, the way a terminal multiplexer does: it takes exactly one

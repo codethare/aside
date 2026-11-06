@@ -73,13 +73,14 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    `Ctrl+d`/`Ctrl+u` half a page, `g`/`G` to the ends. `Space` selects and `Enter`
    copies and leaves, with `copied N lines` in the bar; `q` leaves without copying.
    No letter reaches the input line.
-5b3b. `Ctrl+Alt++` grows the whole panel — text, padding, corners, shadow and width —
-   15 % each press; `Ctrl+Alt+-` shrinks it; `Ctrl+Alt+BackSpace` returns to 100 %.
-   The same in typing, prefix and copy mode, and no character reaches the input line.
-   `Ctrl` + the wheel zooms by 5 % a notch, and without `Ctrl` the wheel still
-   scrolls. A two-finger pinch on the trackpad zooms with the fingers. It stops at
-   200 % and at 75 %, and where the output cannot hold the panel; restart the panel
-   and it is back at 100 %.
+5b3b. `Ctrl+Alt++` makes the panel's box bigger — wider, and with room for more rows —
+   15 % each press; the text does not change size, more of it fits, and the lines wrap
+   at the new width. `Ctrl+Alt+-` shrinks it, `Ctrl+Alt+BackSpace` returns to the
+   default size. The same in typing, prefix and copy mode, and no character reaches
+   the input line. `Ctrl` + the wheel resizes by 5 % a notch, and without `Ctrl` the
+   wheel still scrolls. A two-finger pinch resizes with the fingers. It stops at 200 %
+   and at 75 %, and where the output cannot hold the panel; restart the panel and it
+   is back at its default size.
 5b4. `Alt+hjkl` moves the panel in every mode and `Alt+Ctrl+hjkl` ten times as far;
    it stops at the screen edges.
 5c. Press the left button on the bar and move at once: the panel follows from the
