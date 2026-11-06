@@ -806,6 +806,35 @@ fn left_margin(output_w: Option<u32>, surface_w: u32) -> i32 {
 /// replies' fixed box. These are the panel's sizes; `surface_size` adds the shadow
 /// margin, and the answers' own height never enters: the box is fixed. Pure, so the
 /// spec's numbers are testable without a surface.
+/// A size, pinned between the range's floor and what the output can hold.
+fn clamped_size(next: f32, cap: f32) -> f32 {
+    next.clamp(*SIZE_RANGE.start(), cap.max(*SIZE_RANGE.start()))
+}
+
+/// The largest size the output can hold, in both directions at once: the box grows
+/// until the tighter of them is used up, so it never becomes wide and flat because the
+/// height ran out first. A floating-point comparison against the range keeps the answer
+/// inside `SIZE_RANGE` even on a screen too small for the design's own size.
+fn size_cap(output_h: Option<u32>, output_w: Option<u32>) -> f32 {
+    let mut cap = *SIZE_RANGE.end();
+    if let Some(h) = output_h {
+        let gap = edge_gap(Some(h), 0) as f32;
+        let room = (h as f32
+            - gap
+            - render::SHADOW as f32
+            - (panel::bar_height() + render::SEPARATION) as f32)
+            .max(0.0);
+        if gap > 0.0 {
+            cap = cap.min(room / (gap * REPLY_SHARE as f32));
+        }
+    }
+    if let Some(w) = output_w {
+        let room = w.saturating_sub(2 * render::SHADOW) as f32;
+        cap = cap.min(room / WIDTH as f32);
+    }
+    cap.max(*SIZE_RANGE.start())
+}
+
 fn size_for(phase: Phase, output_h: Option<u32>, size: f32) -> (u32, u32) {
     let bar = panel::bar_height();
     let width = box_width(size);
@@ -2018,7 +2047,9 @@ impl State {
     }
 
     fn set_size(&mut self, next: f32) {
-        let next = next.clamp(*SIZE_RANGE.start(), *SIZE_RANGE.end());
+        // The tighter of the output's two directions, not just the range: the box stops
+        // when the screen does, and both of its sides stop together.
+        let next = clamped_size(next, size_cap(self.output_h, self.output_w));
         if (next - self.size).abs() < 1e-6 {
             return;
         }
@@ -3083,11 +3114,7 @@ mod tests {
     #[test]
     fn the_bar_sits_a_share_of_the_output_up_the_screen() {
         for (output, gap) in [(1080u32, 410u32), (1440, 547), (600, 228)] {
-            assert_eq!(
-                edge_gap(Some(output), 0),
-                gap,
-                "38 % of {output}"
-            );
+            assert_eq!(edge_gap(Some(output), 0), gap, "38 % of {output}");
             // The surface margin is the gap less the shadow margin it carries.
             assert_eq!(
                 bottom_margin(Some(output), 0),
@@ -3401,6 +3428,74 @@ mod tests {
         assert_eq!(wheel_size(0.0, 0), (false, 1), "a zero event is no step up");
     }
 
+    /// The size the output can hold: the width and the height at once, so the box
+    /// grows until the tighter of the two is used up rather than going wide and flat.
+    #[test]
+    fn the_output_caps_the_size_in_both_directions() {
+        // At the cap the panel is exactly on the output: its surface reaches the top
+        // edge and its width still fits. That is the property, not the arithmetic.
+        for (h, w) in [(1080u32, 1920u32), (720, 1280), (2160, 3840), (600, 800)] {
+            let cap = size_cap(Some(h), Some(w));
+            assert!(
+                (*SIZE_RANGE.start()..=*SIZE_RANGE.end()).contains(&cap),
+                "the cap is inside the range: {cap}"
+            );
+            let (bw, bh) = size_for(Phase::Answering, Some(h), cap);
+            let surface = surface_size((bw, bh));
+            let bottom = bottom_margin(Some(h), 0);
+            assert!(
+                surface.1 as i32 + bottom <= h as i32 + 1,
+                "on a {h} output the surface + margin is {}",
+                surface.1 as i32 + bottom
+            );
+            assert!(
+                surface.0 <= w,
+                "the surface is wider than the {w} output: {}",
+                surface.0
+            );
+            // At the cap one of the two directions is flush with the output, and past
+            // it the box would leave the output that way: that is what the cap is for.
+            let flush_height = surface.1 as i32 + bottom >= h as i32 - 1;
+            let flush_width = surface.0 >= w - 1;
+            assert!(
+                flush_height || flush_width,
+                "the cap leaves room on both sides at {h}x{w}: {}x{}",
+                surface.0,
+                surface.1
+            );
+            let past = (cap + 0.05).min(*SIZE_RANGE.end());
+            if past > cap {
+                let (bw2, bh2) = size_for(Phase::Answering, Some(h), past);
+                let over = surface_size((bw2, bh2));
+                // Past the cap the factor has stopped meaning anything on the axis that
+                // binds: either that side is pinned, or the surface leaves the output.
+                assert!(
+                    bw2 == bw || bh2 == bh || over.0 > w,
+                    "past the cap at {h}x{w} the factor still grew both sides: {bw2}x{bh2}"
+                );
+            }
+        }
+
+        // Bigger screens allow more; with no output known the range is all there is.
+        assert!(size_cap(Some(2160), Some(3840)) > size_cap(Some(1080), Some(1920)));
+        assert!(size_cap(Some(1080), Some(800)) < size_cap(Some(1080), Some(1920)));
+        assert_eq!(size_cap(None, None), *SIZE_RANGE.end());
+
+        // Every way in is clamped by that cap, not only by the range.
+        assert_eq!(clamped_size(2.0, 1.2), 1.2);
+        assert_eq!(
+            clamped_size(0.5, 1.2),
+            *SIZE_RANGE.start(),
+            "the floor holds"
+        );
+        assert_eq!(clamped_size(1.1, 1.2), 1.1);
+        assert_eq!(
+            clamped_size(1.5, *SIZE_RANGE.start() - 0.2),
+            *SIZE_RANGE.start(),
+            "a cap below the floor cannot invert the clamp"
+        );
+    }
+
     /// Resizing the box is not scaling the text: the width and the replies' room
     /// change, the bar and the glyphs do not, and the text wraps at the new edge.
     #[test]
@@ -3540,10 +3635,7 @@ mod tests {
         assert_eq!(dragged_left(None, surface, -50), 0);
         // Vertically: the surface cannot be pushed off the top either.
         let sh = 200u32;
-        assert_eq!(
-            dragged_bottom(Some(1080), sh, 10_000),
-            1080 - sh as i32
-        );
+        assert_eq!(dragged_bottom(Some(1080), sh, 10_000), 1080 - sh as i32);
         assert_eq!(dragged_bottom(Some(1080), sh, -10_000), 0);
         // The offset and the painted margin always agree, clamped or not: the cap is
         // derived from the gap the user can see.
@@ -3560,15 +3652,8 @@ mod tests {
         let base = bottom_margin(Some(1080), 0);
         assert_eq!(bottom_margin(Some(1080), -100), base - 100);
         assert!(
-            reply_cap(
-                Some(1080),
-                edge_gap(Some(1080), 100),
-                SIZE_RESET
-            ) > reply_cap(
-                Some(1080),
-                edge_gap(Some(1080), -100),
-                SIZE_RESET
-            )
+            reply_cap(Some(1080), edge_gap(Some(1080), 100), SIZE_RESET)
+                > reply_cap(Some(1080), edge_gap(Some(1080), -100), SIZE_RESET)
         );
     }
 
@@ -3577,14 +3662,8 @@ mod tests {
     fn the_wheel_only_counts_over_the_replies() {
         let panel_h = 400; // bar 30 + gap 12 + replies 358
         let top = render::SHADOW as f64;
-        assert!(
-            !over_replies(panel_h, top - 1.0),
-            "the shadow margin"
-        );
-        assert!(
-            over_replies(panel_h, top + 1.0),
-            "the replies card"
-        );
+        assert!(!over_replies(panel_h, top - 1.0), "the shadow margin");
+        assert!(over_replies(panel_h, top + 1.0), "the replies card");
         let bar_top = top + (panel_h - panel::bar_height()) as f64;
         assert!(!over_replies(panel_h, bar_top + 1.0), "the bar");
         assert!(

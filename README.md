@@ -149,7 +149,8 @@ edge of their card rather than being cut off mid-line.
 Two sizes, deliberately separate. `Ctrl+T` then `+`/`-` changes the **text** by two
 points. `Ctrl+Alt` `+`/`-` — or `Ctrl` with the wheel, or a pinch — changes the
 **panel's box**: the width and the room the replies get, between 75 % and 200 % of the
-design size, stopping where the output can no longer hold it. The text keeps its size,
+design size. Both sides stop together, at the point where either of them would leave
+the output, so the box never ends up wide and flat because the height ran out first. The text keeps its size,
 so a bigger box shows more of it and the lines wrap at the new width. Neither is
 written anywhere.
 

@@ -16,8 +16,10 @@ pinch with the pointer on the panel, which SHALL follow the gesture continuously
 `Ctrl+Alt+BackSpace` SHALL return the box to its design size. The wheel without
 `Ctrl` SHALL keep its present meaning.
 
-The box SHALL be clamped to a fixed range and to what the output can hold, and the
-size SHALL live only as long as the process.
+The box SHALL be clamped to a fixed range and to what the output can hold **in either
+direction**: the width and the height SHALL stop together, at the first of the two
+that would leave the output, so the box never grows wider while its height is pinned.
+The size SHALL live only as long as the process.
 
 #### Scenario: A bigger box shows more, not bigger
 

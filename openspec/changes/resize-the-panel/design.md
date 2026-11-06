@@ -28,9 +28,13 @@ caret's rectangle is reported again, and the panel redraws.
 ## Clamps
 
 1. The range: 75–200 % of the design box, so a keypress can always come back.
-2. The output: the replies' room stops where the screen's room above the bar does,
-   and the width stops at the output's width when the panel is placed. The box never
-   leaves the output.
+2. The output, in both directions at once: `size_cap(output_h, output_w)` is the
+   smaller of what the height allows (`room / gap`) and what the width allows
+   (`(output_w - 2 * SHADOW) / WIDTH`), clamped to the range. Every way in goes through
+   it, so the width cannot keep growing once the height has reached the top edge —
+   which is what a single factor otherwise does, and what made the box go wide and
+   flat. `reply_cap`'s own `min(room)` stays as the last guard for a size that arrives
+   some other way.
 
 ## Failure modes
 
