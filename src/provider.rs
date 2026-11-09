@@ -279,6 +279,21 @@ pub fn escape_curl_config(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// One routing key per panel process. opencode routes and caches per
+/// `x-opencode-session`, and a panel is one conversation from summon to exit, so
+/// the value is made once and reused for every turn; the next summon is a new
+/// conversation with a new key. Two numbers the process already has, joined: no
+/// dependency, no file, and nothing about the question.
+pub fn session_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("aside-{:x}-{:x}", std::process::id(), nanos)
+    })
+}
 /// The curl configuration the child reads on stdin: where to go, how to
 /// authenticate, how long to wait, and the body. `-K -` keeps every one of these
 /// out of the process table.
@@ -293,7 +308,9 @@ pub fn curl_config(config: &Config, key: &str, body: &str) -> String {
          {proxy}\
          request = \"POST\"\n\
          header = \"Authorization: Bearer {}\"\n\
+         header = \"x-opencode-session: {}\"\n\
          header = \"content-type: application/json\"\n\
+         user-agent = \"aside/{}\"\n\
          no-buffer\n\
          connect-timeout = {CONNECT_TIMEOUT_S}\n\
          speed-limit = {SPEED_LIMIT}\n\
@@ -305,6 +322,8 @@ pub fn curl_config(config: &Config, key: &str, body: &str) -> String {
          data-binary = \"{}\"\n",
         escape_curl_config(&url),
         escape_curl_config(key),
+        escape_curl_config(session_id()),
+        env!("CARGO_PKG_VERSION"),
         escape_curl_config(body),
     )
 }
@@ -345,6 +364,26 @@ mod tests {
         assert_eq!(c.proxy, None, "a bare machine goes direct");
         assert_eq!(KEY_VAR, "OPENCODE_API_KEY");
         assert_eq!(PROXY_VAR, "ASIDE_PROXY");
+    }
+
+    #[test]
+    fn every_request_carries_one_routing_key() {
+        // The provider routes and caches per `x-opencode-session`, so a panel's turns
+        // have to share one value: two configurations from one process are one
+        // conversation.
+        let a = curl_config(&Config::default(), "k", "{}");
+        let b = curl_config(&Config::default(), "k", "{}");
+        let id = session_id();
+        assert_eq!(a, b, "one process, one routing key");
+        assert_eq!(id, session_id(), "made once, not per request");
+        assert!(
+            id.starts_with("aside-") && id.len() > 7,
+            "an id, not a word: {id:?}"
+        );
+        assert!(
+            a.contains(&format!("header = \"x-opencode-session: {id}\"\n")),
+            "no routing key in: {a}"
+        );
     }
 
     #[test]
@@ -511,6 +550,15 @@ mod tests {
         assert!(
             text.contains("no-buffer"),
             "the stream must not be buffered"
+        );
+        // The endpoint asks clients to name themselves rather than arrive looking like
+        // a bare HTTP library.
+        assert!(
+            text.contains(&format!(
+                "user-agent = \"aside/{}\"",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "{text}"
         );
     }
 
