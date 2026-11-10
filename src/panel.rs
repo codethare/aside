@@ -24,6 +24,9 @@ use crate::{MARQUEE_HOLD, MARQUEE_SPEED};
 pub struct Pending<'a> {
     pub text: &'a str,
     pub elapsed: Duration,
+    /// Set once the request ends: how long into being drawn out of the bar this frame
+    /// is. The line keeps its heading and leaves the edge it was moving towards.
+    pub leaving: Option<Duration>,
 }
 
 /// The panel's three shapes, as shapes rather than as the state machine's phases.
@@ -646,7 +649,11 @@ fn draw_bar(
     // because there is nowhere to put one, and no pre-edit because nothing composes it.
     if let Some(p) = pending {
         let travel = (render::advance(font, p.text) - limit).max(0.0);
-        let (skip, shift) = scroll_to(font, p.text, marquee(p.elapsed, travel, s));
+        let (scroll, solid) = match p.leaving {
+            Some(since) => leaving_offset(p.elapsed, since, travel, limit, s),
+            None => (marquee(p.elapsed, travel, s), 1.0),
+        };
+        let (skip, shift) = scroll_to(font, p.text, scroll);
         render::draw_text(
             buf,
             w,
@@ -655,7 +662,7 @@ fn draw_bar(
             text_x - shift,
             baseline,
             &p.text[skip..],
-            ink,
+            render::dim(ink, solid),
             limit + shift,
             clip.clone(),
             aa,
@@ -820,6 +827,43 @@ pub fn caret_scroll(font: &PanelFont, input: &Input, limit: f32, preedit: &str, 
 /// The byte to start drawing at, and the sub-character shift, that put `scroll`
 /// pixels off the left of a line: `scroll` is how far the caret would otherwise
 /// sit past the bar's right edge.
+/// Which way the line is travelling at `elapsed`: true while it runs right to left.
+///
+/// The holds belong to the leg that follows them: a line paused at its far end is
+/// about to come back, and one paused at its start is about to run out.
+fn marquee_left(elapsed: Duration, travel: f32, s: u32) -> bool {
+    if travel <= 0.0 {
+        return true;
+    }
+    let speed = MARQUEE_SPEED * s as f32;
+    let run = travel / speed;
+    let leg = run + MARQUEE_HOLD.as_secs_f32();
+    let t = elapsed.as_secs_f32() % (2.0 * leg);
+    t < run || t >= leg + run
+}
+
+/// Where the line is and how solid it is once the request has ended: it carries on the
+/// way it was going, off the edge it was heading for, fading as it goes.
+fn leaving_offset(
+    elapsed: Duration,
+    since: Duration,
+    travel: f32,
+    limit: f32,
+    s: u32,
+) -> (f32, f32) {
+    let start = marquee(elapsed, travel, s);
+    // A line that never moved has no heading; it leaves to the left, the way a line
+    // read to its end would go.
+    let to = if marquee_left(elapsed, travel, s) {
+        travel + limit
+    } else {
+        -limit
+    };
+    let p = (since.as_secs_f32() / crate::SUCK.as_secs_f32()).clamp(0.0, 1.0);
+    // The square makes it leave at the speed it had and accelerate out.
+    (start + (to - start) * p * p, 1.0 - p)
+}
+
 /// How far into a question that is already out the bar has scrolled, in pixels.
 ///
 /// Right to left at `MARQUEE_SPEED`, a hold at the far end, back at the same speed, a
@@ -1978,31 +2022,36 @@ mod tests {
         let (bw, bh) = frame(w, h);
         let long = "a question long enough that the bar cannot hold all of it at once, \
                     and then a few words more";
-        let paint = |elapsed: Duration, caret: bool, text: Option<&str>| {
-            let mut buf = vec![0u8; (bw * bh * 4) as usize];
-            draw(
-                &mut buf,
-                bw,
-                bh,
-                &f,
-                &scene.transcript,
-                &scene.input,
-                text.map(|text| Pending { text, elapsed }),
-                &scene.viewport,
-                None,
-                None,
-                None,
-                caret,
-                "",
-                "",
-                "",
-                Look::settled(State::Replies),
-                None,
-                0.0,
-                1,
-            );
-            buf
-        };
+        let paint =
+            |elapsed: Duration, leaving: Option<Duration>, caret: bool, text: Option<&str>| {
+                let mut buf = vec![0u8; (bw * bh * 4) as usize];
+                draw(
+                    &mut buf,
+                    bw,
+                    bh,
+                    &f,
+                    &scene.transcript,
+                    &scene.input,
+                    text.map(|text| Pending {
+                        text,
+                        elapsed,
+                        leaving,
+                    }),
+                    &scene.viewport,
+                    None,
+                    None,
+                    None,
+                    caret,
+                    "",
+                    "",
+                    "",
+                    Look::settled(State::Replies),
+                    None,
+                    0.0,
+                    1,
+                );
+                buf
+            };
         let rows = (h - f.row_h + 2)..(h - 2);
         let glass = glass();
         let inked = |buf: &[u8]| {
@@ -2016,25 +2065,43 @@ mod tests {
                 .count()
         };
 
-        let start = paint(Duration::ZERO, false, Some(long));
+        let start = paint(Duration::ZERO, None, false, Some(long));
         assert!(inked(&start) > 0, "the question is drawn, at the left edge");
         assert_ne!(
             start,
-            paint(Duration::from_secs(4), false, Some(long)),
+            paint(Duration::from_secs(4), None, false, Some(long)),
             "four seconds in, it has scrolled"
         );
         // A question that fits has nowhere to go: the same frame at any age.
-        let short = paint(Duration::ZERO, false, Some("hi"));
+        let short = paint(Duration::ZERO, None, false, Some("hi"));
         assert_eq!(
             short,
-            paint(Duration::from_secs(60), false, Some("hi")),
+            paint(Duration::from_secs(60), None, false, Some("hi")),
             "a question that fits does not move"
         );
+        // The exit starts as the scroll and runs the line out of the bar: an inkless
+        // bar within `SUCK` is the same frame as an empty one.
+        assert_eq!(
+            paint(
+                Duration::from_secs(1),
+                Some(Duration::ZERO),
+                false,
+                Some(long)
+            ),
+            paint(Duration::from_secs(1), None, false, Some(long)),
+            "the exit begins where the scroll was"
+        );
+        assert_eq!(
+            paint(Duration::from_secs(1), Some(crate::SUCK), false, Some(long)),
+            paint(Duration::from_secs(1), Some(crate::SUCK), false, None),
+            "and the bar is empty once it has left"
+        );
+
         // There is no caret to draw on a line nobody can type into, whatever the
         // keyboard says.
         assert_eq!(
-            paint(Duration::from_secs(2), true, Some(long)),
-            paint(Duration::from_secs(2), false, Some(long)),
+            paint(Duration::from_secs(2), None, true, Some(long)),
+            paint(Duration::from_secs(2), None, false, Some(long)),
             "a question that is out takes the caret with it"
         );
     }
@@ -2103,6 +2170,64 @@ mod tests {
             (crate::PAD..w - crate::PAD).any(|x| inked(&without, x)),
             "the typed line is still drawn without the caret"
         );
+    }
+
+    /// The heading is what decides which edge the line leaves by, so it has to be right
+    /// through the holds too: a line paused at its end is coming back, one paused at its
+    /// start is about to run out.
+    #[test]
+    fn the_line_heads_for_the_edge_it_is_moving_towards() {
+        let travel = 200.0;
+        let s = 1;
+        let run = travel / MARQUEE_SPEED;
+        let hold = MARQUEE_HOLD.as_secs_f32();
+        let leg = run + hold;
+        let at = |secs: f32| marquee_left(Duration::from_secs_f32(secs), travel, s);
+
+        assert!(at(0.0), "it starts by running out, to the left");
+        assert!(at(run / 2.0), "and keeps running out");
+        assert!(
+            !at(run + hold / 2.0),
+            "paused at its end: it will come back right"
+        );
+        assert!(!at(leg + run / 2.0), "coming back");
+        assert!(
+            at(leg + run + hold / 2.0),
+            "paused at its start: it will run out again"
+        );
+        assert!(at(2.0 * leg + run / 2.0), "the second round is the first");
+        // A line that fits never moved, so it leaves the way a read line would: left.
+        assert!(marquee_left(Duration::from_secs(3), 0.0, s));
+    }
+
+    /// The exit is the scroll read one more way: where it was at that instant, then one
+    /// accelerated run past the edge it was heading for, fading out.
+    #[test]
+    fn a_finished_question_is_drawn_off_the_edge_it_was_heading_for() {
+        let (travel, limit, s) = (200.0, 300.0, 1);
+        let run = travel / MARQUEE_SPEED;
+        let hold = MARQUEE_HOLD.as_secs_f32();
+        let leg = run + hold;
+
+        // Outbound: the line is running left, so it leaves by the left edge.
+        let out = Duration::from_secs_f32(run / 2.0);
+        let (x, solid) = leaving_offset(out, Duration::ZERO, travel, limit, s);
+        assert_eq!(x, marquee(out, travel, s), "the exit starts on the scroll");
+        assert_eq!(solid, 1.0, "at full ink");
+        let (x, solid) = leaving_offset(out, crate::SUCK, travel, limit, s);
+        assert_eq!(x, travel + limit, "and ends past the left edge");
+        assert_eq!(solid, 0.0, "with no ink left");
+
+        // Coming back: it is running right, so it leaves by the right edge, which is a
+        // negative offset: the line is pushed out past the right edge.
+        let back = Duration::from_secs_f32(leg + run / 2.0);
+        let (x, _) = leaving_offset(back, crate::SUCK, travel, limit, s);
+        assert_eq!(x, -limit, "and ends past the right edge");
+
+        // Both keep going the way they were going, and neither arrives before its time.
+        let (early, solid) = leaving_offset(out, crate::SUCK / 2, travel, limit, s);
+        assert!(early > marquee(out, travel, s) && early < travel + limit);
+        assert!((0.0..1.0).contains(&solid), "half-way is half solid");
     }
 
     /// A question too long for the bar is read, not flicked past: it runs at

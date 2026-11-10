@@ -62,8 +62,9 @@ change.
    question you sent is kept for the request and is not part of the transcript; the
    bar keeps it while the request runs, scrolling slowly out and back when it is
    wider than the bar and turning round for as long as the request is unfinished,
-   with no caret on a line nobody can type into. It goes when the request ends or the
-   line is typed into.
+   with no caret on a line nobody can type into. When the request ends it is drawn out
+   of the bar — off the edge it was heading for, accelerating and fading, from the same
+   `marquee` read one more way — and typing drops it at once.
 5. **Frame cost is per visible row**, never per transcript row. Wrapping happens
    once per delta and once per resize; re-wrapping on every frame is a bug.
 6. **Zero dependencies beyond the seven in `Cargo.toml`.** Ask before adding one;

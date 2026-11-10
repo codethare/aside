@@ -945,6 +945,7 @@ fn bar_pending<'a>(
     question.map(|q| panel::Pending {
         text: &q.text,
         elapsed: now.saturating_duration_since(q.at),
+        leaving: q.leaving.map(|at| now.saturating_duration_since(at)),
     })
 }
 
@@ -1153,6 +1154,11 @@ const LAP_MS: u128 = 1_400;
 const MARQUEE_SPEED: f32 = 26.0;
 const MARQUEE_HOLD: Duration = Duration::from_millis(700);
 
+/// How long a question takes to be drawn out of the bar when its request ends: long
+/// enough to read as being pulled, short enough that the bar is a line again before a
+/// reader can reach the keyboard.
+pub(crate) const SUCK: Duration = Duration::from_millis(260);
+
 /// How long a request runs before the working light appears. A request that is
 /// answered sooner shows no cue at all: one that appears and vanishes is noise.
 const LIGHT_AFTER_MS: u128 = 500;
@@ -1295,6 +1301,9 @@ fn window_move(keysym: Keysym, ctrl: bool) -> Option<(i32, i32)> {
 struct Question {
     text: String,
     at: std::time::Instant,
+    /// When the request ended, if it has: the line is being drawn out of the bar, and
+    /// it goes for good once `SUCK` has run.
+    leaving: Option<std::time::Instant>,
 }
 
 /// The panel's three states. Their sizes are fixed by the spec; this is the
@@ -1815,6 +1824,7 @@ impl State {
         self.question = Some(Question {
             text: question.clone(),
             at: std::time::Instant::now(),
+            leaving: None,
         });
         let max_w = self.text_width();
         let State {
@@ -1860,7 +1870,10 @@ impl State {
         if let Some(request) = self.request.as_mut() {
             request.cancel();
             self.request = None;
-            self.question = None;
+            // Cancelling ends the request too: the question is drawn away like any other.
+            if let Some(q) = self.question.as_mut() {
+                q.leaving = Some(std::time::Instant::now());
+            }
             let max_w = self.text_width();
             let State {
                 transcript, font, ..
@@ -2289,10 +2302,13 @@ impl State {
             // The blink is the only thing moving, so keep asking for frames.
             self.dirty = true;
         }
-        if self.question.is_some() {
+        if let Some(q) = self.question.as_ref() {
             // A question that is out is still scrolling, even when the answer has
             // started and stopped between two tokens.
             self.dirty = true;
+            if q.leaving.is_some_and(|at| at.elapsed() >= SUCK) {
+                self.question = None;
+            }
         }
         if self.thumb_at.is_some() {
             // The indicator holds and then fades, so its frames are its own.
@@ -2339,9 +2355,11 @@ impl State {
                 if !open.running() {
                     let close = open.finish();
                     self.request = None;
-                    // The request is over, so its question leaves the bar: the line goes
-                    // back to being empty and typable.
-                    self.question = None;
+                    // The request is over, so its question is drawn out of the bar: it
+                    // keeps its heading and leaves the edge it was moving towards.
+                    if let Some(q) = self.question.as_mut() {
+                        q.leaving = Some(std::time::Instant::now());
+                    }
                     match close {
                         Close::Complete => transcript.finish_answer(font),
                         Close::Truncated(note) => transcript.cancel(&note, font, max_w),
@@ -3560,20 +3578,34 @@ mod tests {
     /// the line is, and the question waits behind them.
     #[test]
     fn the_question_is_the_bars_while_the_bar_is_the_line() {
-        let q = Question {
+        let at = std::time::Instant::now();
+        let question = Question {
             text: "what is the question".to_string(),
-            at: std::time::Instant::now(),
+            at,
+            leaving: None,
         };
-        let now = q.at + Duration::from_millis(1_500);
-        let shown = bar_pending(Mode::Typing, Some(&q), now).expect("typing shows it");
+        let now = at + Duration::from_millis(1_500);
+        let shown = bar_pending(Mode::Typing, Some(&question), now).expect("typing shows it");
         assert_eq!(shown.text, "what is the question");
         assert_eq!(
             shown.elapsed,
             Duration::from_millis(1_500),
             "the age is what the scroll is made of"
         );
-        assert!(bar_pending(Mode::Prefix, Some(&q), now).is_none());
-        assert!(bar_pending(Mode::Copy, Some(&q), now).is_none());
+        assert_eq!(shown.leaving, None, "it is there, not on its way out");
+
+        // Once the request ends the bar is still drawing it, and the exit has an age.
+        let leaving = Question {
+            text: "what is the question".to_string(),
+            at,
+            leaving: Some(at + Duration::from_millis(1_400)),
+        };
+        let shown =
+            bar_pending(Mode::Typing, Some(&leaving), now).expect("drawn away, still drawn");
+        assert_eq!(shown.leaving, Some(Duration::from_millis(100)));
+
+        assert!(bar_pending(Mode::Prefix, Some(&question), now).is_none());
+        assert!(bar_pending(Mode::Copy, Some(&question), now).is_none());
         assert!(bar_pending(Mode::Typing, None, now).is_none());
     }
 

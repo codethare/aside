@@ -36,9 +36,10 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 1a3. Ask a question wider than the bar and watch it while the model thinks: the
    question stays in the bar, scrolling slowly out to its last character, holding,
    coming back, and turning round again while the request is still unfinished. There
-   is no caret while it is there. When the answer arrives the bar is an empty line
-   again; type while the answer streams and the question goes, the typing being what
-   the line shows.
+   is no caret while it is there. When the answer arrives the question is drawn out
+   of the bar — it keeps going the way it was going, fast and fading, out of the edge
+   it was heading for — and the bar is an empty line again. Type while the answer
+   streams and the question goes at once, the typing being what the line shows.
 1b. While the panel is up, switch to another window with your compositor's binding
    and type there: the characters land in that window, not in the panel. Go back to
    the panel, type again: they land in the panel. This is the check that the panel

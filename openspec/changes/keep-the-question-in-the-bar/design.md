@@ -47,6 +47,22 @@ The label (`-- COPY --`, `copied N lines`) still owns the bar when copy mode doe
 question is shown only in typing mode, so one meaning per key survives. Entering copy
 mode while a question is out therefore swaps the bar to the copy label and back.
 
+## Being drawn away
+
+The exit is the same `marquee` read one more way. The panel is told when the request
+ended, not where the line was: it works out the offset at that instant from the age it
+already has, which edge that motion was heading for, and interpolates from there to
+just off that edge — `p * p`, so it starts at the speed it had and accelerates out.
+The ink fades over the same window, so the line leaves rather than being cut.
+
+A line shorter than the bar never moved, so it has no heading: it leaves to the left,
+which is where a line that was read to its end would go. Cost if wrong: a short
+question exits the side a reader might not have guessed, which costs nothing — it is a
+26 ms-of-pixels decision, not a behaviour.
+
+`SUCK_MS = 260`: long enough to read as being pulled, short enough that the bar is a
+line again before a reader can reach for the keyboard.
+
 ## Rulings
 
 - **The question leaves on any key that reaches the line, not only on a letter.** A
@@ -58,4 +74,8 @@ mode while a question is out therefore swaps the bar to the copy label and back.
   arrives, and the question outlives that phase change: the reader asked it, and the
   request is not over. It clears when the stream ends, not when it starts.
 - **A refusal clears it immediately.** If the request cannot start at all, there is
-  nothing in flight to show.
+  nothing in flight to show, so there is nothing to draw away.
+- **Typing cuts the exit short.** The drawn-away line is a departure, and a reader who
+  types is already asking the next question: the text goes at once, without the exit.
+  Cost if wrong: a reader who types within 260 ms of the answer loses the departing
+  line early, which is the animation nobody is looking at.

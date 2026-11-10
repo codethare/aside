@@ -102,8 +102,11 @@ gaps. A question you sent is kept for the next request and is not part of the
 transcript: the bar keeps it in view while the request runs, and a question wider
 than the bar scrolls slowly out to its last character, holds, comes back, and turns
 round again for as long as the request is unfinished. The bar is the question's
-while it is out — no caret on a line nobody can type into — and it goes back to
-being an empty, typable line when the request ends or a key is pressed.
+while it is out — no caret on a line nobody can type into. When the request ends
+it is drawn out of the bar: it keeps the heading it had, accelerates and fades, and
+leaves by the edge it was moving towards, so the bar is an empty, typable line again
+with the line leaving rather than blinking out. A key pressed in that moment drops
+it at once.
 `Up`/`Down` mark the highlighted line with brighter ink two pixels in from its
 neighbours, so there is no mark in the margin at all. The replies arrive with the
 panel's own growth and are not animated a second time; a follow-up's answer simply
