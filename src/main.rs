@@ -360,6 +360,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         &font,
         &transcript,
         &input,
+        None,
         &viewport,
         None,
         Some(0),
@@ -500,6 +501,7 @@ fn run(options: Options) -> Result<(), String> {
         load: Some(load),
         transcript: Transcript::default(),
         input: Input::default(),
+        question: None,
         highlight: 0,
         viewport: Viewport::new(0),
         request: None,
@@ -930,6 +932,22 @@ enum Summon {
 /// typing: with the keyboard somewhere else the caret would be a claim about focus that
 /// the window cannot keep, which is exactly the state this panel has to make visible
 /// instead of hiding.
+/// The question the bar may show, if any. A mode that has taken the bar — the prefix,
+/// copy mode — says what the line is instead, and one meaning per key has to survive.
+fn bar_pending<'a>(
+    mode: Mode,
+    question: Option<&'a Question>,
+    now: std::time::Instant,
+) -> Option<panel::Pending<'a>> {
+    if mode != Mode::Typing {
+        return None;
+    }
+    question.map(|q| panel::Pending {
+        text: &q.text,
+        elapsed: now.saturating_duration_since(q.at),
+    })
+}
+
 fn caret_shown(mode: Mode, keyboard: bool) -> bool {
     mode == Mode::Typing && keyboard
 }
@@ -1128,6 +1146,13 @@ impl Morph {
 /// How long one lap of the working light takes.
 const LAP_MS: u128 = 1_400;
 
+/// How fast a question too long for the bar scrolls, in pixels a second at scale 1,
+/// and how long it holds at each end before turning round. A question is read, not
+/// skimmed: 26 px/s is about one character every half second, and the hold is what
+/// makes the reversal look deliberate rather than like a stutter.
+const MARQUEE_SPEED: f32 = 26.0;
+const MARQUEE_HOLD: Duration = Duration::from_millis(700);
+
 /// How long a request runs before the working light appears. A request that is
 /// answered sooner shows no cue at all: one that appears and vanishes is noise.
 const LIGHT_AFTER_MS: u128 = 500;
@@ -1264,6 +1289,14 @@ fn window_move(keysym: Keysym, ctrl: bool) -> Option<(i32, i32)> {
     }
 }
 
+/// The question that is out: what was asked, and when it went out. The bar shows it
+/// instead of the input line until the request it started is over, so what a reader
+/// sees while a slow model thinks is the question they asked.
+struct Question {
+    text: String,
+    at: std::time::Instant,
+}
+
 /// The panel's three states. Their sizes are fixed by the spec; this is the
 /// state machine behind them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1312,6 +1345,8 @@ struct State {
     layer: LayerSurface,
     /// Which of the three states the panel is in.
     phase: Phase,
+    /// The question that is out, while it is: the bar's line until the answer is in.
+    question: Option<Question>,
     /// Whether the transitions are drawn, or each one is over in the frame it starts.
     animate: bool,
     /// The shape it is drawn as, which is not always the phase's own: a request
@@ -1774,6 +1809,13 @@ impl State {
             return;
         }
         let question = self.input.take();
+        // The bar keeps it while the request runs, so what a reader sees while a slow
+        // model thinks is the question they asked. The input line is empty: a follow-up
+        // is a new question, not an edit of this one.
+        self.question = Some(Question {
+            text: question.clone(),
+            at: std::time::Instant::now(),
+        });
         let max_w = self.text_width();
         let State {
             transcript,
@@ -1795,6 +1837,8 @@ impl State {
             }
             Err(e) => {
                 transcript.fail(&e, font, max_w);
+                // Nothing is in flight, so the bar goes back to being a line.
+                self.question = None;
                 false
             }
         };
@@ -1816,6 +1860,7 @@ impl State {
         if let Some(request) = self.request.as_mut() {
             request.cancel();
             self.request = None;
+            self.question = None;
             let max_w = self.text_width();
             let State {
                 transcript, font, ..
@@ -2244,6 +2289,11 @@ impl State {
             // The blink is the only thing moving, so keep asking for frames.
             self.dirty = true;
         }
+        if self.question.is_some() {
+            // A question that is out is still scrolling, even when the answer has
+            // started and stopped between two tokens.
+            self.dirty = true;
+        }
         if self.thumb_at.is_some() {
             // The indicator holds and then fades, so its frames are its own.
             self.dirty = true;
@@ -2289,6 +2339,9 @@ impl State {
                 if !open.running() {
                     let close = open.finish();
                     self.request = None;
+                    // The request is over, so its question leaves the bar: the line goes
+                    // back to being empty and typable.
+                    self.question = None;
                     match close {
                         Close::Complete => transcript.finish_answer(font),
                         Close::Truncated(note) => transcript.cancel(&note, font, max_w),
@@ -2374,6 +2427,7 @@ impl State {
             self.font.as_ref().expect("checked above"),
             &self.transcript,
             &self.input,
+            bar_pending(self.mode, self.question.as_ref(), std::time::Instant::now()),
             &self.viewport,
             selection,
             Some(self.highlight),
@@ -2527,6 +2581,8 @@ impl State {
     }
 
     fn after_typing(&mut self) {
+        // The line is the reader's now; the question it held is the previous one.
+        self.question = None;
         self.dirty = true;
         self.report_cursor();
     }
@@ -3498,6 +3554,27 @@ mod tests {
         );
         assert!(!caret_shown(Mode::Prefix, true));
         assert!(!caret_shown(Mode::Copy, true));
+    }
+
+    /// A question is the bar's only in typing mode: the prefix and copy mode say what
+    /// the line is, and the question waits behind them.
+    #[test]
+    fn the_question_is_the_bars_while_the_bar_is_the_line() {
+        let q = Question {
+            text: "what is the question".to_string(),
+            at: std::time::Instant::now(),
+        };
+        let now = q.at + Duration::from_millis(1_500);
+        let shown = bar_pending(Mode::Typing, Some(&q), now).expect("typing shows it");
+        assert_eq!(shown.text, "what is the question");
+        assert_eq!(
+            shown.elapsed,
+            Duration::from_millis(1_500),
+            "the age is what the scroll is made of"
+        );
+        assert!(bar_pending(Mode::Prefix, Some(&q), now).is_none());
+        assert!(bar_pending(Mode::Copy, Some(&q), now).is_none());
+        assert!(bar_pending(Mode::Typing, None, now).is_none());
     }
 
     /// The loop's sleep is the soonest deadline in the set, whatever order it is listed

@@ -59,7 +59,11 @@ change.
    what keeps the bar still while they grow. Both cards are one tone; the
    transcript is a stack of blocks separated by an 8 px gap, with no fill of its
    own, and the highlight is brighter ink 2 px in, never a mark in the margin. A
-   question you sent is kept for the request and drawn nowhere.
+   question you sent is kept for the request and is not part of the transcript; the
+   bar keeps it while the request runs, scrolling slowly out and back when it is
+   wider than the bar and turning round for as long as the request is unfinished,
+   with no caret on a line nobody can type into. It goes when the request ends or the
+   line is typed into.
 5. **Frame cost is per visible row**, never per transcript row. Wrapping happens
    once per delta and once per resize; re-wrapping on every frame is a bug.
 6. **Zero dependencies beyond the seven in `Cargo.toml`.** Ask before adding one;

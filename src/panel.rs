@@ -9,10 +9,22 @@
 //! The thinking state is a third drawing path, a circle with four blinking
 //! squares.
 
+use std::time::Duration;
+
 use crate::font::PanelFont;
 use crate::layout::{self, Blocks, Input, MAX_ROWS, Style, Viewport};
 use crate::render::{self, Bgra, Subpixel};
 use crate::transcript::{Kind, Row, Transcript};
+use crate::{MARQUEE_HOLD, MARQUEE_SPEED};
+
+/// A question that is already out. The bar shows it instead of the input line, at a
+/// scroll that depends only on how long it has been out, so nothing has to be kept
+/// between frames.
+#[derive(Debug, Clone, Copy)]
+pub struct Pending<'a> {
+    pub text: &'a str,
+    pub elapsed: Duration,
+}
 
 /// The panel's three shapes, as shapes rather than as the state machine's phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +147,8 @@ fn draw_content(
     font: &PanelFont,
     transcript: &Transcript,
     input: &Input,
+    // The question that is out while its request runs: shown in the bar, not typed into.
+    pending: Option<Pending<'_>>,
     viewport: &Viewport,
     // A pointer's selection, in characters; `None` when the pointer has not chosen.
     selection: Option<Selection>,
@@ -165,6 +179,7 @@ fn draw_content(
                 card,
                 font,
                 input,
+                pending,
                 card.y..(card.y + card.h),
                 caret_visible,
                 preedit,
@@ -250,6 +265,8 @@ pub fn draw(
     font: &PanelFont,
     transcript: &Transcript,
     input: &Input,
+    // The question that is out while its request runs: shown in the bar, not typed into.
+    pending: Option<Pending<'_>>,
     viewport: &Viewport,
     // A pointer's selection, in characters; `None` when the pointer has not chosen.
     selection: Option<Selection>,
@@ -304,6 +321,7 @@ pub fn draw(
             font,
             transcript,
             input,
+            pending,
             viewport,
             selection,
             highlight,
@@ -329,6 +347,7 @@ pub fn draw(
             font,
             transcript,
             input,
+            pending,
             viewport,
             selection,
             highlight,
@@ -411,6 +430,7 @@ pub fn draw(
         &bar,
         font,
         input,
+        pending,
         bar.y..(bar.y + bar.h),
         caret_visible,
         preedit,
@@ -599,6 +619,7 @@ fn draw_bar(
     panel: &render::Panel,
     font: &PanelFont,
     input: &Input,
+    pending: Option<Pending<'_>>,
     clip: std::ops::Range<u32>,
     caret_visible: bool,
     preedit: &str,
@@ -620,6 +641,27 @@ fn draw_bar(
     // this bar has none, so the text starts at the padding.
     let text_x = (panel.x + p) as f32;
     let limit = (panel.x + panel.w) as f32 - p as f32 - text_x;
+    // A question that is already out is not a line anyone can type into: the bar keeps
+    // it, the only thing drawn there, and it scrolls by its age. There is no caret
+    // because there is nowhere to put one, and no pre-edit because nothing composes it.
+    if let Some(p) = pending {
+        let travel = (render::advance(font, p.text) - limit).max(0.0);
+        let (skip, shift) = scroll_to(font, p.text, marquee(p.elapsed, travel, s));
+        render::draw_text(
+            buf,
+            w,
+            h,
+            font,
+            text_x - shift,
+            baseline,
+            &p.text[skip..],
+            ink,
+            limit + shift,
+            clip.clone(),
+            aa,
+        );
+        return;
+    }
     // While the prefix waits, the bar carries the instruction and no input: the
     // caret and the pre-edit belong to a line nobody is typing on.
     let composing = hint.is_empty();
@@ -778,6 +820,31 @@ pub fn caret_scroll(font: &PanelFont, input: &Input, limit: f32, preedit: &str, 
 /// The byte to start drawing at, and the sub-character shift, that put `scroll`
 /// pixels off the left of a line: `scroll` is how far the caret would otherwise
 /// sit past the bar's right edge.
+/// How far into a question that is already out the bar has scrolled, in pixels.
+///
+/// Right to left at `MARQUEE_SPEED`, a hold at the far end, back at the same speed, a
+/// hold at the start, and round again — for as long as the request is unfinished. It is
+/// a function of the age alone, so a frame that is dropped or late changes nothing.
+fn marquee(elapsed: Duration, travel: f32, s: u32) -> f32 {
+    if travel <= 0.0 {
+        return 0.0;
+    }
+    let speed = MARQUEE_SPEED * s as f32;
+    let run = travel / speed;
+    let hold = MARQUEE_HOLD.as_secs_f32();
+    let leg = run + hold;
+    let t = elapsed.as_secs_f32() % (2.0 * leg);
+    if t < run {
+        t * speed
+    } else if t < leg {
+        travel
+    } else if t < leg + run {
+        travel - (t - leg) * speed
+    } else {
+        0.0
+    }
+}
+
 fn scroll_to(font: &PanelFont, text: &str, scroll: f32) -> (usize, f32) {
     let mut gone = 0.0;
     for (at, ch) in text.char_indices() {
@@ -1110,6 +1177,7 @@ mod tests {
             &f,
             &scene.transcript,
             &scene.input,
+            None,
             &scene.viewport,
             Some(selection),
             None,
@@ -1143,6 +1211,7 @@ mod tests {
             &f,
             &scene.transcript,
             &scene.input,
+            None,
             &scene.viewport,
             None,
             marked,
@@ -1206,6 +1275,7 @@ mod tests {
                 &f,
                 &scene.transcript,
                 &scene.input,
+                None,
                 &scene.viewport,
                 None,
                 None,
@@ -1277,6 +1347,7 @@ mod tests {
                 &f,
                 &scene.transcript,
                 &scene.input,
+                None,
                 &scene.viewport,
                 None,
                 None,
@@ -1325,6 +1396,7 @@ mod tests {
                 &f,
                 &scene.transcript,
                 &scene.input,
+                None,
                 &scene.viewport,
                 None,
                 None,
@@ -1371,6 +1443,7 @@ mod tests {
                 &f,
                 &scene.transcript,
                 &scene.input,
+                None,
                 &scene.viewport,
                 None,
                 None,
@@ -1523,6 +1596,7 @@ mod tests {
                 &f,
                 &scene.transcript,
                 &scene.input,
+                None,
                 &scene.viewport,
                 None,
                 None,
@@ -1573,6 +1647,7 @@ mod tests {
                 &f,
                 &scene.transcript,
                 &scene.input,
+                None,
                 &scene.viewport,
                 None,
                 None,
@@ -1684,6 +1759,7 @@ mod tests {
                 &f,
                 &scene.transcript,
                 &scene.input,
+                None,
                 &scene.viewport,
                 None,
                 Some(0),
@@ -1751,6 +1827,7 @@ mod tests {
                     &f,
                     &scene.transcript,
                     input,
+                    None,
                     &scene.viewport,
                     None,
                     None,
@@ -1773,6 +1850,7 @@ mod tests {
                 &f,
                 &scene.transcript,
                 input,
+                None,
                 &scene.viewport,
                 None,
                 None,
@@ -1832,6 +1910,7 @@ mod tests {
                 &f,
                 &scene.transcript,
                 input,
+                None,
                 &scene.viewport,
                 None,
                 None,
@@ -1889,6 +1968,77 @@ mod tests {
         );
     }
 
+    /// The question stays in the bar while it is out, and it is the bar's whole line
+    /// there: no caret, and a scroll that follows its age alone.
+    #[test]
+    fn a_question_that_is_out_stays_in_the_bar_and_scrolls_with_its_age() {
+        let f = font();
+        let scene = scene(&f, 300.0);
+        let (w, h) = sized(&scene, &f);
+        let (bw, bh) = frame(w, h);
+        let long = "a question long enough that the bar cannot hold all of it at once, \
+                    and then a few words more";
+        let paint = |elapsed: Duration, caret: bool, text: Option<&str>| {
+            let mut buf = vec![0u8; (bw * bh * 4) as usize];
+            draw(
+                &mut buf,
+                bw,
+                bh,
+                &f,
+                &scene.transcript,
+                &scene.input,
+                text.map(|text| Pending { text, elapsed }),
+                &scene.viewport,
+                None,
+                None,
+                None,
+                caret,
+                "",
+                "",
+                "",
+                Look::settled(State::Replies),
+                None,
+                0.0,
+                1,
+            );
+            buf
+        };
+        let rows = (h - f.row_h + 2)..(h - 2);
+        let glass = glass();
+        let inked = |buf: &[u8]| {
+            (crate::PAD..w - crate::PAD)
+                .map(|x| {
+                    rows.clone()
+                        .filter(|&y| buf[at(bw, x, y)..][..4][..3] != glass[..3])
+                        .count()
+                })
+                .filter(|&n| n > 0)
+                .count()
+        };
+
+        let start = paint(Duration::ZERO, false, Some(long));
+        assert!(inked(&start) > 0, "the question is drawn, at the left edge");
+        assert_ne!(
+            start,
+            paint(Duration::from_secs(4), false, Some(long)),
+            "four seconds in, it has scrolled"
+        );
+        // A question that fits has nowhere to go: the same frame at any age.
+        let short = paint(Duration::ZERO, false, Some("hi"));
+        assert_eq!(
+            short,
+            paint(Duration::from_secs(60), false, Some("hi")),
+            "a question that fits does not move"
+        );
+        // There is no caret to draw on a line nobody can type into, whatever the
+        // keyboard says.
+        assert_eq!(
+            paint(Duration::from_secs(2), true, Some(long)),
+            paint(Duration::from_secs(2), false, Some(long)),
+            "a question that is out takes the caret with it"
+        );
+    }
+
     /// The caret is the painter's argument, not its guess: with the flag off the bar
     /// draws the text and nothing at the caret's column, so a panel that has no keyboard
     /// can be painted as one. Without this the caret could be reinstated by a frame that
@@ -1909,6 +2059,7 @@ mod tests {
                 &f,
                 &scene.transcript,
                 &scene.input,
+                None,
                 &scene.viewport,
                 None,
                 None,
@@ -1954,6 +2105,64 @@ mod tests {
         );
     }
 
+    /// A question too long for the bar is read, not flicked past: it runs at
+    /// `MARQUEE_SPEED`, holds at each end for `MARQUEE_HOLD`, and turns round — for as
+    /// long as the request is out. The offset is a function of the age alone, so a
+    /// dropped frame cannot make it drift.
+    #[test]
+    fn the_question_scrolls_as_far_as_it_has_to_and_turns_round() {
+        let travel = 200.0;
+        let s = 1;
+        let run = travel / MARQUEE_SPEED;
+        let hold = MARQUEE_HOLD.as_secs_f32();
+        let leg = run + hold;
+        let at = |secs: f32| marquee(Duration::from_secs_f32(secs), travel, s);
+
+        assert_eq!(at(0.0), 0.0, "it starts at the first character");
+        assert!(at(run / 2.0) > travel / 4.0, "it is moving a moment later");
+        assert_eq!(at(run), travel, "it reaches its last character");
+        assert_eq!(
+            at(run + hold / 2.0),
+            travel,
+            "and holds there so the turn is visible"
+        );
+        assert!(at(leg + run / 2.0) < travel, "then it comes back");
+        assert_eq!(at(2.0 * leg), 0.0, "all the way, one full round later");
+        assert_eq!(
+            at(2.0 * leg - hold / 2.0),
+            0.0,
+            "and holds at the start, too"
+        );
+        assert!(
+            (at(2.0 * leg + run / 2.0) - at(run / 2.0)).abs() < 0.01,
+            "and turns round again: the second round is the first"
+        );
+
+        // Nowhere in between is it off the line, and it never jumps.
+        let step = 1.0 / 60.0;
+        let mut last = 0.0;
+        let mut t = 0.0;
+        while t < 12.0 {
+            let x = at(t);
+            assert!((0.0..=travel).contains(&x), "{t}s: {x} is off the line");
+            assert!(
+                (x - last).abs() <= MARQUEE_SPEED * step + 0.01,
+                "{t}s: {last} -> {x} is a jump"
+            );
+            last = x;
+            t += step;
+        }
+
+        // A question that fits has nowhere to go.
+        for t in [0.0, 1.0, 5.0, 60.0] {
+            assert_eq!(
+                marquee(Duration::from_secs_f32(t), 0.0, s),
+                0.0,
+                "a line that fits does not move"
+            );
+        }
+    }
+
     /// Copy mode has to say so: the bar reads `-- COPY --` on the right and the
     /// caret is gone, so a swallowed keystroke is never a mystery.
     #[test]
@@ -1971,6 +2180,7 @@ mod tests {
                 &f,
                 &scene.transcript,
                 &scene.input,
+                None,
                 &scene.viewport,
                 None,
                 None,
@@ -2111,6 +2321,7 @@ mod tests {
                 &f,
                 &scene.transcript,
                 &scene.input,
+                None,
                 &scene.viewport,
                 None,
                 None,
@@ -2469,6 +2680,7 @@ mod tests {
                 &f,
                 &scene.transcript,
                 &scene.input,
+                None,
                 &scene.viewport,
                 None,
                 None,
@@ -2542,6 +2754,7 @@ mod tests {
                 &f,
                 &scene.transcript,
                 &scene.input,
+                None,
                 &scene.viewport,
                 None,
                 None,
