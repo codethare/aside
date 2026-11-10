@@ -1889,6 +1889,71 @@ mod tests {
         );
     }
 
+    /// The caret is the painter's argument, not its guess: with the flag off the bar
+    /// draws the text and nothing at the caret's column, so a panel that has no keyboard
+    /// can be painted as one. Without this the caret could be reinstated by a frame that
+    /// ignores the flag and no test would notice.
+    #[test]
+    fn the_painter_draws_the_caret_only_when_it_is_told_to() {
+        let f = font();
+        let mut scene = scene(&f, 300.0);
+        scene.input.insert("hi");
+        let (w, h) = sized(&scene, &f);
+        let (bw, bh) = frame(w, h);
+        let paint_with = |caret: bool| {
+            let mut buf = vec![0u8; (bw * bh * 4) as usize];
+            draw(
+                &mut buf,
+                bw,
+                bh,
+                &f,
+                &scene.transcript,
+                &scene.input,
+                &scene.viewport,
+                None,
+                None,
+                None,
+                caret,
+                "",
+                "",
+                "",
+                Look::settled(State::Replies),
+                None,
+                0.0,
+                1,
+            );
+            buf
+        };
+        let with = paint_with(true);
+        let without = paint_with(false);
+        // The bar's own text rows, inside the rim's bands.
+        let rows = (h - f.row_h + 2)..(h - 2);
+        let glass = glass();
+        let inked = |buf: &[u8], x: u32| {
+            rows.clone()
+                .any(|y| buf[at(bw, x, y)..][..4][..3] != glass[..3])
+        };
+        let differing: Vec<u32> = (crate::PAD..w - crate::PAD)
+            .filter(|&x| inked(&with, x) != inked(&without, x))
+            .collect();
+        assert_eq!(
+            differing.len(),
+            2,
+            "the caret is two pixels wide and it is the only difference: {differing:?}"
+        );
+        for x in &differing {
+            assert!(
+                inked(&with, *x) && !inked(&without, *x),
+                "column {x}: the caret is there only when the painter is told to draw it"
+            );
+        }
+        // And the text itself is in both frames: the flag removes the caret, not the line.
+        assert!(
+            (crate::PAD..w - crate::PAD).any(|x| inked(&without, x)),
+            "the typed line is still drawn without the caret"
+        );
+    }
+
     /// Copy mode has to say so: the bar reads `-- COPY --` on the right and the
     /// caret is gone, so a swallowed keystroke is never a mystery.
     #[test]

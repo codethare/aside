@@ -22,6 +22,12 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 1a. Summon it again while it has the keyboard: it closes, the same way `Esc` closes
    it, and the second launch exits zero. Summon it a third time while that closing is
    still running: the closing is not restarted or stretched.
+1a1b. Focus another window (or wait for `tailrace` to move focus), then look at the
+   panel: it is still on screen and its caret is gone — a panel without the keyboard
+   does not look like it has one. Press the summoning key: it takes the keyboard back
+   and the caret comes back with it. If the remap loses the race with the window
+   manager's focus request, the panel stays unfocused; press the summoning key again
+   and it closes instead of remapping for ever.
 1a2. Type a question, focus another window (a binding, or a click on the window), then
    summon the panel again: it stays on screen with the question still in the input
    line, it blinks for one frame as the surface remaps, and typing lands in it. On

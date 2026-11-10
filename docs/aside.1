@@ -69,7 +69,10 @@ unmap and a map of the same panel, one frame long.  A keybinding cannot ask for 
 focus directly: neither
 .B river_seat_v1
 nor the window-management protocol has a request that focuses another client's layer
-surface.
+surface.  The remap is a request and not a promise — river applies the window manager's
+focus request over a layer surface's — so the caret is drawn only while the panel holds
+the keyboard, and a take whose keyboard does not stick makes the next summon close the
+panel, which keeps the summoning key able to dismiss it.
 .PP
 While a request is out the bar stays exactly where it is and, once the request has
 taken half a second -- which a fast answer never reaches -- a light runs round its

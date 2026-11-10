@@ -36,7 +36,11 @@ change.
    focus and hand the keyboard to the window under the pointer. The keyboard is
    therefore the compositor's to move, and the second summon reads it: with the
    keyboard the panel goes away, without it the panel remaps its surface to take the
-   keyboard back — river hands a layer surface its keyboard only at a map, and neither
+   keyboard back — and because river applies the window manager's focus request over a
+   layer surface's, a take whose keyboard does not stick —
+   one taken away again inside the settle window counts as none — makes the next summon
+   close, so the key that summoned the panel always dismisses it. The caret is drawn only while the
+   panel holds the keyboard: an unfocused panel must look unfocused — river hands a layer surface its keyboard only at a map, and neither
    `river_seat_v1` nor its window-management protocol can focus another client's layer
    surface.
 4. **The chrome is `plush`'s.** Copied exactly: radius 12, `PAD` 16, 8 px gap,

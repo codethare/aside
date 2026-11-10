@@ -31,6 +31,14 @@ takes the keyboard back with the transcript untouched. `river` hands a layer sur
 the keyboard only when the surface maps, so that second press is an unmap and a map of
 the same panel, and the panel blinks for one frame.
 
+That remap is a request, not a promise: `river` applies the window manager's own focus
+request over a layer surface's, and `tailrace` sends one whenever its cached focus has
+moved on — so a take can come back with no keyboard at all. The panel never relies on
+it. The caret is drawn only while the panel actually holds the keyboard, so a panel
+that will not take your typing looks like one; and a take whose keyboard does not stick
+— one taken away again inside a fraction of a second counts as none — turns the next
+press into a close, so the key that summoned the panel can always dismiss it.
+
 The panel draws its own card and its own animation, so Hyprland should not animate
 the surface a second time:
 

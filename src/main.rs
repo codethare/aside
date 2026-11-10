@@ -483,7 +483,7 @@ fn run(options: Options) -> Result<(), String> {
         close_start: None,
         phase_start: std::time::Instant::now(),
         focused: false,
-        has_keyboard: false,
+        keys: Keyboard::default(),
         output_w: None,
         output_h: None,
         first_frame: true,
@@ -926,12 +926,85 @@ enum Summon {
     Nothing,
 }
 
-/// What the second press does, which turns on whether the panel still has the keyboard:
-/// with it the press means "not now", without it the press means "back here".
-fn summon_again(closing: bool, keyboard: bool) -> Summon {
+/// Whether the bar draws a caret. Only while the panel will actually receive the
+/// typing: with the keyboard somewhere else the caret would be a claim about focus that
+/// the window cannot keep, which is exactly the state this panel has to make visible
+/// instead of hiding.
+fn caret_shown(mode: Mode, keyboard: bool) -> bool {
+    mode == Mode::Typing && keyboard
+}
+
+/// How long a keyboard has to stay before it counts as the panel's own. river focuses a
+/// layer surface on map and then applies the window manager's focus request, so a take
+/// can be answered by an enter immediately followed by a leave: shorter than this, the
+/// pair is a failed take.
+const TAKE_SETTLE: Duration = Duration::from_millis(150);
+
+/// The keyboard as this panel has seen it: whether the compositor is currently giving
+/// it keys, when that started, and whether a take-keyboard remap is still unanswered.
+#[derive(Debug, Default)]
+struct Keyboard {
+    held: bool,
+    since: Option<std::time::Instant>,
+    /// A take went out and its keyboard has not stayed yet.
+    taking: bool,
+}
+
+impl Keyboard {
+    /// The keyboard arrived. Answers whether that is a change to draw.
+    fn held_from(&mut self, at: std::time::Instant) -> bool {
+        let changed = !self.held;
+        self.held = true;
+        self.since = Some(at);
+        changed
+    }
+
+    /// The keyboard left. Answers whether that is a change to draw.
+    fn lost_at(&mut self, at: std::time::Instant) -> bool {
+        let changed = self.held;
+        self.held = false;
+        let stayed = self
+            .since
+            .map_or(Duration::ZERO, |since| at.saturating_duration_since(since));
+        // A keyboard that came and went inside the settle window is the race, not an
+        // answer: the guard survives it, so the next press closes instead of remapping.
+        if stayed >= TAKE_SETTLE {
+            self.taking = false;
+        }
+        self.since = None;
+        changed
+    }
+
+    /// A take-keyboard remap went out.
+    fn took(&mut self) {
+        self.taking = true;
+    }
+
+    fn held(&self) -> bool {
+        self.held
+    }
+
+    fn take_pending(&self) -> bool {
+        self.taking
+    }
+}
+
+/// What the second press does. With the keyboard it means "not now". Without it the
+/// press means "back here", which is a remap — and a remap is only a request: on river
+/// the window manager's own focus request wins over a layer surface's, so a take can
+/// come back with no keyboard at all. Once one has, the next press closes instead:
+/// a panel that cannot be focused must still be dismissable from the key that summoned
+/// it, and a click would be the only other way out.
+///
+/// A trade made on purpose: between the take and the compositor's `leave`, `held` is
+/// still true, so two presses in that window answer `Close` where a moment later they
+/// would answer `Take`. Closing is irreversible, and that is the price of not guessing
+/// what the compositor will do — the alternative is a panel that cannot be dismissed.
+fn summon_again(closing: bool, keyboard: bool, take_pending: bool) -> Summon {
     match (closing, keyboard) {
         (true, _) => Summon::Nothing,
         (false, true) => Summon::Close,
+        (false, false) if take_pending => Summon::Close,
         (false, false) => Summon::Take,
     }
 }
@@ -1283,7 +1356,7 @@ struct State {
     /// Whether the compositor has given this surface the keyboard, input method or not.
     /// The second summon turns on this: with the keyboard it puts the panel away, without
     /// it, it takes the keyboard back.
-    has_keyboard: bool,
+    keys: Keyboard,
     /// Logical size of the output the panel is on, once it has reported one.
     output_w: Option<u32>,
     output_h: Option<u32>,
@@ -1628,9 +1701,15 @@ impl State {
 
     /// A second summon. With the keyboard, the panel goes the way `Esc` leaves it, and an
     /// open request goes with the process that owns it. Without it, the panel takes the
-    /// keyboard back, so the key that opened it brings it to the front again.
+    /// keyboard back — unless a take has already gone unanswered, in which case the panel
+    /// closes instead: a remap can lose to the window manager's own focus request, and a
+    /// panel that cannot be focused must still be dismissable from this key.
     fn toggle(&mut self) {
-        match summon_again(self.close_start.is_some(), self.has_keyboard) {
+        match summon_again(
+            self.close_start.is_some(),
+            self.keys.held(),
+            self.keys.take_pending(),
+        ) {
             Summon::Nothing => {}
             Summon::Close => {
                 self.close_start = Some(std::time::Instant::now());
@@ -1649,6 +1728,9 @@ impl State {
     /// and mapping again is therefore the only way back, and it costs one frame of the
     /// panel being gone.
     fn take_keyboard(&mut self) {
+        // The press that issued this is remembered: if no keyboard follows and stays, the
+        // next press must close rather than remap again.
+        self.keys.took();
         self.layer.wl_surface().attach(None, 0, 0);
         self.layer.commit();
         // The null commit cleared the buffer that was attached to the old surface state.
@@ -2258,7 +2340,7 @@ impl State {
         let stride = w as i32 * 4;
         let label = self.mode_label();
         let hint = self.mode_hint();
-        let typing = self.mode == Mode::Typing;
+
         let buffer = match self.buffer.take() {
             Some(buffer) => buffer,
             None => {
@@ -2296,7 +2378,9 @@ impl State {
             selection,
             Some(self.highlight),
             (self.mode == Mode::Copy).then_some(self.copy_cursor),
-            typing,
+            // The caret follows the keyboard, not the mode: a panel without it draws no
+            // caret, so an unfocused panel looks unfocused.
+            caret_shown(self.mode, self.keys.held()),
             &self.ime.preedit,
             hint,
             label,
@@ -2789,7 +2873,11 @@ impl KeyboardHandler for State {
         _keysyms: &[Keysym],
     ) {
         if self.layer.wl_surface() == surface {
-            self.has_keyboard = true;
+            // The caret follows the keyboard, so gaining it is a change to draw: on an
+            // idle panel nothing else would repaint this frame.
+            if self.keys.held_from(std::time::Instant::now()) {
+                self.dirty = true;
+            }
             if let Some(text_input) = self.text_input.as_ref() {
                 self.focused = true;
                 text_input.enable();
@@ -2808,7 +2896,11 @@ impl KeyboardHandler for State {
         _serial: u32,
     ) {
         if self.layer.wl_surface() == surface {
-            self.has_keyboard = false;
+            // Losing it takes the caret with it, and clears a pre-edit that is still on
+            // screen: both are pixels, so the frame is stale.
+            if self.keys.lost_at(std::time::Instant::now()) {
+                self.dirty = true;
+            }
             self.focused = false;
             // Stop composing, or an input method keeps a pre-edit open while the
             // panel is not focused.
@@ -3309,17 +3401,103 @@ mod tests {
     }
 
     /// The second summon reads the keyboard: with it the panel goes away, without it the
-    /// panel takes it back, and once it is leaving the press changes nothing.
+    /// press takes it back — unless a take is already unanswered, in which case the press
+    /// closes, because a remap can lose to the window manager's own focus request and a
+    /// panel that cannot be focused still has to be dismissable from this key.
     #[test]
     fn the_second_summon_closes_with_the_keyboard_and_takes_it_back_without_it() {
-        assert_eq!(summon_again(false, true), Summon::Close);
-        assert_eq!(summon_again(false, false), Summon::Take);
-        assert_eq!(summon_again(true, true), Summon::Nothing, "already leaving");
         assert_eq!(
-            summon_again(true, false),
-            Summon::Nothing,
-            "already leaving"
+            summon_again(false, true, false),
+            Summon::Close,
+            "it is typable"
         );
+        assert_eq!(
+            summon_again(false, false, false),
+            Summon::Take,
+            "the keyboard went elsewhere"
+        );
+        assert_eq!(
+            summon_again(false, false, true),
+            Summon::Close,
+            "a take that did not stick: the next press closes"
+        );
+        // Closing wins whatever the take was doing, and a panel already leaving does
+        // nothing at all.
+        assert_eq!(summon_again(true, true, false), Summon::Nothing);
+        assert_eq!(summon_again(true, false, false), Summon::Nothing);
+        assert_eq!(summon_again(true, false, true), Summon::Nothing);
+    }
+
+    /// The two states the take guard exists for, and the one where it must stand down.
+    ///
+    /// river focuses a layer surface on map and then applies the window manager's own
+    /// focus request, so a take can be answered by an enter immediately followed by a
+    /// leave. That pair is a failed take, not a successful one: the guard has to survive
+    /// it, or the summon key remaps for ever and never dismisses the panel.
+    #[test]
+    fn a_take_guard_survives_a_keyboard_that_comes_and_goes() {
+        let t0 = std::time::Instant::now();
+        let mut k = Keyboard::default();
+
+        // The keyboard went to another window: the press asks for it back.
+        assert!(!k.held());
+        assert!(!k.take_pending());
+        assert_eq!(
+            summon_again(false, k.held(), k.take_pending()),
+            Summon::Take
+        );
+
+        // That press issues the take, and the compositor answers with a keyboard it then
+        // takes away in the same sequence.
+        k.took();
+        k.held_from(t0);
+        k.lost_at(t0 + Duration::from_millis(1));
+        assert!(
+            k.take_pending(),
+            "a keyboard that came and went inside the settle window is not an answer"
+        );
+        assert_eq!(
+            summon_again(false, k.held(), k.take_pending()),
+            Summon::Close,
+            "so the next press closes instead of remapping again"
+        );
+
+        // A keyboard that stayed is the take working, however it is lost later.
+        let mut k = Keyboard::default();
+        k.took();
+        k.held_from(t0);
+        k.lost_at(t0 + Duration::from_secs(2));
+        assert!(!k.take_pending(), "a keyboard that stayed settles the take");
+        assert_eq!(
+            summon_again(false, k.held(), k.take_pending()),
+            Summon::Take,
+            "and losing it later asks for it back again"
+        );
+    }
+
+    /// A change of the keyboard is a change of the caret, so whoever handles it has to
+    /// learn that the frame is stale: on an idle panel nothing else would repaint.
+    #[test]
+    fn a_keyboard_gained_or_lost_reports_a_stale_frame() {
+        let t0 = std::time::Instant::now();
+        let mut k = Keyboard::default();
+        assert!(k.held_from(t0), "gaining it changes the caret");
+        assert!(!k.held_from(t0), "and gaining it twice changes nothing");
+        assert!(k.lost_at(t0), "losing it changes the caret back");
+        assert!(!k.lost_at(t0), "and losing it twice changes nothing");
+    }
+
+    /// A panel without the keyboard must not look like it has it: the caret goes with
+    /// the focus, not with the mode.
+    #[test]
+    fn the_caret_follows_the_keyboard_not_the_mode() {
+        assert!(caret_shown(Mode::Typing, true), "typing with the keyboard");
+        assert!(
+            !caret_shown(Mode::Typing, false),
+            "typing without the keyboard: the caret would lie about the focus"
+        );
+        assert!(!caret_shown(Mode::Prefix, true));
+        assert!(!caret_shown(Mode::Copy, true));
     }
 
     /// The loop's sleep is the soonest deadline in the set, whatever order it is listed
