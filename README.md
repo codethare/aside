@@ -110,8 +110,10 @@ it at once.
 `Up`/`Down` mark the highlighted line with brighter ink two pixels in from its
 neighbours, so there is no mark in the margin at all. The replies arrive with the
 panel's own growth and are not animated a second time; a follow-up's answer simply
-appears. The wheel scrolls the replies while the pointer is over them — three lines a notch, a touchpad's own
-delta otherwise — and does nothing over the bar.
+appears. The wheel scrolls the replies while the pointer is over them — five rows a notch, a touchpad's own
+delta otherwise — and does nothing over the bar. The notch is counted from whichever step field the
+compositor fills in, so a modern wheel and an old one move the same distance, and a
+touchpad's fraction is carried rather than rounded away.
 
 The sizes are the panel's own; the layer surface adds the shadow margin on every
 side and sits that margin inside the visible gap. The answering panel is a
@@ -119,7 +121,11 @@ side and sits that margin inside the visible gap. The answering panel is a
 bar's own gap above the screen's bottom edge (38 % of the output, clamped by the
 room left above it). It does not grow as the answer does — a longer answer scrolls
 inside the box, and the 3 px scroll indicator on the right edge shows while the view
-is moving and then fades out of the way. Holding the
+is moving and then fades out of the way. It can be dragged: a press anywhere in the
+card's right 16 px padding column takes hold of it — where it was pressed if that
+was on the thumb, the thumb's middle if it was on the track — and moving carries the
+view with it, from the transcript's first line to its last. Held, it stays at full
+ink, however long the button is down. Holding the
 left button on the bar and moving drags the panel, in both axes, from the first
 motion; it stays on the output, keeps its size, and where it was is never written
 down. Dragging across the replies selects whole lines instead — press on a line,

@@ -116,11 +116,20 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    three lines on the clipboard. `Esc` clears the selection and leaves the panel
    open; a second `Esc` closes it.
 5d0. Put the pointer over the replies and turn the wheel (and slide two fingers):
-   the transcript scrolls, three lines a notch, and it stops at both ends. A 3 px
+   the transcript scrolls, five rows a notch, and it stops at both ends. A slow
+   two-finger slide creeps at the speed of the fingers instead of sticking, and a
+   wheel notch on a modern compositor moves as far as on an older one. A 3 px
    indicator on the card's right edge comes up with the scroll, holds a moment, and
    fades out about a second after you stop; it is not on the card at rest. Over the
    bar, nothing scrolls. Mid-scroll, no two lines ever overlap: the line at the
    card's bottom edge fades out instead of being cut off.
+5d0b. Press in the card's right padding, on the indicator, and drag it to the top of
+   the card: the replies show the transcript's first line, and an answer that is
+   still streaming no longer pulls them down. Drag it to the bottom: the newest line
+   is back and following resumes. Press well below the thumb and drag: it lands
+   centred on the pointer rather than jumping. Hold it still for a few seconds: it
+   stays at full ink while the button is down, and fades once you let go. Press the
+   same padding while the transcript fits: nothing is grabbed and nothing scrolls.
 5d. Ask something long enough to overflow the box: the panel is the same size it
    was, the newest lines are the ones on screen, and scrolling reaches the older
    ones.

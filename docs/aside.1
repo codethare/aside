@@ -43,7 +43,9 @@ draws (and
 .BR wlmenu (1)
 draws once it catches up): a translucent body with a lit rim, a dark underside
 and a dark band inside it, within a 26-pixel drop shadow,
-and a 3-pixel scroll indicator at the right edge while the view is being scrolled.
+and a 3-pixel scroll indicator at the right edge while the view is being scrolled,
+which can be dragged by its column: a press in the card's right 16-pixel padding
+takes hold of it, and moving carries the view with it.  Held, it stays at full ink.
 Pressing the left button on the bar and moving drags the panel in both directions
 from the first motion; it stays on the output and keeps its size, and where it was
 is never written down.  Pressing on a reply line and dragging selects whole lines,
@@ -53,7 +55,8 @@ Two cards of one tone, 16 pixels apart: the replies above, the field below, in a
 box of fixed height -- as tall as the field's gap above the screen's bottom edge --
 so a longer answer scrolls inside it instead of growing the panel.  With the
 pointer over the replies, the wheel and a two-finger slide scroll them: a notch is
-three lines, a continuous delta is taken as pixels.
+five rows, counted from whichever step field the compositor fills in, and a
+continuous delta is taken as pixels, its fraction carried rather than dropped.
 Only the model's text about the question just asked is drawn -- its answer, and a
 failure or note that belongs to it, 8 pixels apart.  Earlier turns are kept for
 the request and drawn nowhere.  The question you typed is not part of the

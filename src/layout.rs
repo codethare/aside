@@ -226,6 +226,15 @@ impl Viewport {
         self.following = top >= max;
     }
 
+    /// Put the view at `top`, clamped, and follow only when that is the tail. What
+    /// a dragged scroll indicator writes: the same rule `scroll_by` applies to a
+    /// wheel, so a drag to the end resumes following like a scroll to it.
+    pub fn scroll_to(&mut self, top: u32, total: u32) {
+        let max = total.saturating_sub(self.height);
+        self.top = top.min(max);
+        self.following = self.top >= max;
+    }
+
     /// Scroll so the row of `row_h` at `y` is inside the window (the highlight
     /// must stay visible). Moving the highlight back to the newest row resumes
     /// following.
@@ -408,6 +417,28 @@ mod tests {
         assert!(v.following);
         // Everything fits: there is nothing to scroll.
         v.scroll_by(-90, 60);
+        assert_eq!(v.top, 0);
+        assert!(v.following);
+    }
+
+    #[test]
+    fn the_drag_places_the_view_and_keeps_the_follow_rule() {
+        let mut v = Viewport::new(120);
+        v.follow(1200);
+        // The indicator's drag writes a place, not a distance.
+        v.scroll_to(990, 1200);
+        assert_eq!(v.top, 990);
+        assert!(!v.following, "a place short of the tail stops following");
+        v.scroll_to(1080, 1200);
+        assert!(v.following, "the tail resumes it");
+        // Past either end the drag clamps exactly as the wheel does.
+        v.scroll_to(0, 1200);
+        assert_eq!(v.top, 0);
+        v.scroll_to(9_999, 1200);
+        assert_eq!(v.top, 1080);
+        assert!(v.following);
+        // Everything fits: one place, and following.
+        v.scroll_to(500, 60);
         assert_eq!(v.top, 0);
         assert!(v.following);
     }

@@ -413,10 +413,9 @@ pub fn draw(
 
     // Scroll position indicator: only while the view has recently moved, and only
     // while the transcript overflows the card.
-    let track_y = replies.map_or(bar.y, |r| r.y);
-    let track_h = bar.y.saturating_sub(sep).saturating_sub(track_y);
     let total = transcript.total_height();
     if thumb > 0.0
+        && let Some((track_y, track_h)) = scroll_track(h, bar_h, s)
         && let Some((ty, th)) =
             render::scroll_thumb(track_y, track_h, viewport.height, total, viewport.top)
     {
@@ -1115,6 +1114,26 @@ fn byte_at(text: &str, index: usize) -> usize {
 /// note reads as the panel's own voice without changing tone.
 fn colours(_kind: Kind) -> Bgra {
     render::FG_NORMAL
+}
+
+/// The rows the scroll indicator's track spans, in buffer pixels, inside a panel `h`
+/// tall whose bar is `bar_h`: the replies card, less the gap that keeps the bar
+/// still. The painter puts the strip here and the pointer grabs it here, so the
+/// strip drawn is the strip grabbed. `None` when there is no card to draw it on.
+pub fn scroll_track(h: u32, bar_h: u32, scale: u32) -> Option<(u32, u32)> {
+    let s = scale.max(1);
+    let top = render::SHADOW * s;
+    let track = h.saturating_sub(2 * top + bar_h + render::SEPARATION * s);
+    (track > 0).then_some((top, track))
+}
+
+/// The column a press grabs the indicator from, in buffer pixels, and the card's own
+/// right edge: the replies' `PAD`, which is where the 3 px strip is painted and
+/// where no reply text is, because rows wrap at the same `PAD`.
+pub fn scroll_column(w: u32, scale: u32) -> (u32, u32) {
+    let s = scale.max(1);
+    let right = w.saturating_sub(render::SHADOW * s);
+    (right.saturating_sub(crate::PAD * s), right)
 }
 
 /// Replies height a panel of `h` buffer pixels can show above its bar, in buffer
@@ -2705,6 +2724,62 @@ mod tests {
             &short[at(bw, tx, 2)..][..4][..3],
             &render::LABEL_ACCENT[..3]
         );
+    }
+
+    /// The strip painted is the strip grabbed: every pixel of the indicator is inside
+    /// the card's right padding column and inside the track, which are the two the
+    /// pointer reads. A change to `PAD`, `SHADOW` or the gap moves both or neither.
+    #[test]
+    fn the_indicator_is_drawn_where_the_pointer_grabs_it() {
+        let f = font();
+        let mut scene = scene(&f, 300.0);
+        scene.transcript.ask("and at dusk?", &f);
+        scene.transcript.delta(
+            " The same scattering leaves only the long wavelengths at dusk, which is\
+             why the sky reads red, and why the sea reads grey, and why a fire reads\
+             orange from a mile away.",
+            &f,
+            300.0,
+        );
+        scene.transcript.finish_answer(&f);
+        scene.viewport = Viewport::new(2 * f.row_h);
+        let (w, h) = (500u32, height_for(2 * f.row_h, &f, 1));
+        let (bw, bh) = frame(w, h);
+        let buf = paint_with(&scene, w, h, None, 1.0);
+        let (left, right) = scroll_column(bw, 1);
+        let (top, tall) = scroll_track(bh, f.row_h, 1).expect("a replies card to draw on");
+        // The column is the padding and nothing else: it starts where the rows wrap
+        // and ends at the card's own edge.
+        assert_eq!(left, bw - render::SHADOW - crate::PAD);
+        assert_eq!(right, bw - render::SHADOW);
+        assert!(
+            scroll_track(f.row_h, f.row_h, 1).is_none(),
+            "a bar with no room for replies has no track"
+        );
+        let (mut seen, mut xs) = (0, Vec::new());
+        for y in 0..bh {
+            for x in 0..bw {
+                let px = &buf[((y * bw + x) * 4) as usize..][..3];
+                if px != &render::LABEL_ACCENT[..3] {
+                    continue;
+                }
+                seen += 1;
+                assert!(
+                    (left..right).contains(&x),
+                    "the indicator at x {x} is outside the column {left}..{right}"
+                );
+                assert!(
+                    (top..top + tall).contains(&y),
+                    "the indicator at y {y} is outside the track {top}..{}",
+                    top + tall
+                );
+                xs.push(x);
+            }
+        }
+        xs.sort_unstable();
+        xs.dedup();
+        assert_eq!(xs.len(), 3, "the indicator is 3 px wide: {xs:?}");
+        assert!(seen > 0, "nothing was drawn where the pointer grabs");
     }
 
     /// The working light runs the bar's rim: the lit stretch of the edge is the one

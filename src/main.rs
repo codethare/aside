@@ -478,6 +478,9 @@ fn run(options: Options) -> Result<(), String> {
         copy_cursor: (0, 0),
         copied: None,
         thumb_at: None,
+        scroll_frac: 0.0,
+        axis_source: None,
+        thumb_grab: None,
         pointer: None,
         morph: None,
         enter_start: None,
@@ -1189,6 +1192,101 @@ pub fn thumb_alpha(elapsed_ms: u128) -> f32 {
     (1.0 - faded).clamp(0.0, 1.0)
 }
 
+/// The scroll indicator's ink while it is held: full, however long the button has
+/// been down. Held is not idle, and the fade's clock is the view's, not the
+/// pointer's.
+pub fn thumb_ink(held: bool, elapsed_ms: u128) -> f32 {
+    if held { 1.0 } else { thumb_alpha(elapsed_ms) }
+}
+
+/// Rows one wheel notch moves. The terminal standard's three is a rate for a 17 px
+/// text line; this row is 1.5 em, so three of them is 90 px and reads slow. Five is
+/// what kitty, whose row is the same, ships.
+pub const NOTCH_ROWS: i64 = 5;
+
+/// The unit a wheel's `absolute` axis distance is measured in: one notch is fifteen
+/// of them (`value120` over eight), which is what a compositor that fills in neither
+/// of the two step counts still sends for a turned wheel.
+const AXIS_UNITS_PER_NOTCH: f64 = 15.0;
+
+/// How far an axis event scrolls the replies, in fractional buffer pixels. A notch
+/// is counted from `value120`, which is what a modern compositor sends (120 units a
+/// notch, a high-resolution wheel less), then from the deprecated `discrete`, and
+/// last from the axis distance itself — which is notches only when the source is the
+/// wheel, because on a finger that same distance is already pixels.
+pub fn axis_delta(vertical: &AxisScroll, wheel: bool, row_h: u32, scale: f64) -> f64 {
+    let notch = NOTCH_ROWS as f64 * row_h as f64;
+    if vertical.value120 != 0 {
+        return vertical.value120 as f64 / 120.0 * notch;
+    }
+    if vertical.discrete != 0 {
+        return vertical.discrete as f64 * notch;
+    }
+    let px = vertical.absolute * scale;
+    if wheel {
+        px / AXIS_UNITS_PER_NOTCH * notch
+    } else {
+        px
+    }
+}
+
+/// The whole buffer pixels a scroll moves, and what is left over. The remainder
+/// rides along to the next event: a two-finger slide asks for tenths of a pixel at a
+/// time, and a `round()` per event dropped every one of those.
+pub fn whole(delta: f64, carried: f64) -> (i64, f64) {
+    let sum = delta + carried;
+    let moved = sum.round();
+    (moved as i64, sum - moved)
+}
+
+/// Where the pointer can grab the scroll indicator, in buffer pixels: the track it
+/// slides in, the thumb inside it, and the furthest the view can scroll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Thumb {
+    /// Top of the track, and its height.
+    track: (u32, u32),
+    /// The thumb's own top, and its height.
+    at: (u32, u32),
+    /// Where the view's offset stops.
+    max_top: u32,
+}
+
+/// How far down the thumb the pointer took hold: where it pressed when that was on
+/// the thumb, so the thumb does not jump under the pointer, and the thumb's middle
+/// otherwise, so a press anywhere on the track centres it and the 3 px target never
+/// has to be hit.
+fn grab_offset(thumb: &Thumb, y: u32) -> u32 {
+    let (ty, th) = thumb.at;
+    if (ty..ty + th).contains(&y) {
+        y - ty
+    } else {
+        th / 2
+    }
+}
+
+/// The view's offset for a thumb held `grab` pixels down it and dragged to `y`: the
+/// thumb's top travels the track's free span, which is the mapping
+/// `render::scroll_thumb` draws, read the other way round — so the indicator's
+/// position and the view's offset always agree.
+pub fn thumb_top(thumb: &Thumb, y: u32, grab: u32) -> u32 {
+    let (track_y, track_h) = thumb.track;
+    let span = track_h.saturating_sub(thumb.at.1);
+    if span == 0 {
+        return 0;
+    }
+    let top = (y as i64 - track_y as i64 - grab as i64).clamp(0, span as i64) as u64;
+    (top * thumb.max_top as u64 / span as u64) as u32
+}
+
+/// Whether a pointer at `(x, y)`, in buffer pixels, is on the indicator: inside the
+/// column at the card's right edge and inside the rows its track spans. Both are the
+/// painter's own numbers, so the strip drawn is the strip grabbed.
+pub fn grabs(column: (u32, u32), track: (u32, u32), x: f64, y: f64) -> bool {
+    let (left, right) = column;
+    let (top, tall) = track;
+    (left as f64..right as f64).contains(&x) && (top as f64..(top + tall) as f64).contains(&y)
+}
+
 /// Who owns the keyboard. `Prefix` is one key wide, the way a terminal
 /// multiplexer's prefix is; `Copy` keeps it until it is left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1383,6 +1481,14 @@ struct State {
     copied: Option<(std::time::Instant, usize)>,
     /// When the user last moved the view: the scroll indicator's clock.
     thumb_at: Option<std::time::Instant>,
+    /// What is left of a scroll that has not reached a whole pixel yet: a touchpad
+    /// asks for tenths at a time, and rounding each one away is what made it stick.
+    scroll_frac: f64,
+    /// The pointer's last axis source. The step counts say how far a wheel turned,
+    /// and the source is the only thing that says it was a wheel at all.
+    axis_source: Option<wl_pointer::AxisSource>,
+    /// Where inside the thumb the pointer took hold, while the indicator is held.
+    thumb_grab: Option<u32>,
     pointer: Option<wl_pointer::WlPointer>,
     /// The shape change in progress, if any.
     morph: Option<Morph>,
@@ -1554,8 +1660,9 @@ impl State {
 
     /// How strongly the scroll indicator is drawn this frame.
     fn thumb(&self) -> f32 {
+        let held = self.thumb_grab.is_some();
         self.thumb_at
-            .map_or(0.0, |at| thumb_alpha(at.elapsed().as_millis()))
+            .map_or(0.0, |at| thumb_ink(held, at.elapsed().as_millis()))
     }
 
     /// How long until the scroll indicator can look different: `None` when it is
@@ -1899,9 +2006,25 @@ impl State {
         }
     }
 
-    /// What a press on the panel starts. On a reply line it anchors a selection;
-    /// anywhere else it leaves the panel ready to be dragged, from the press itself.
+    /// What a press on the panel starts. On the scroll indicator's column it takes
+    /// hold of the indicator; on a reply line it anchors a selection; anywhere else
+    /// it leaves the panel ready to be dragged, from the press itself.
     fn press_on(&mut self, position: (f64, f64)) {
+        let thumb = self
+            .font
+            .as_ref()
+            .and_then(|font| self.thumb_at(position, font));
+        if let Some(thumb) = thumb {
+            let y = (position.1 * self.s() as f64).round().max(0.0) as u32;
+            self.thumb_grab = Some(grab_offset(&thumb, y));
+            // No selection starts here and none is taken away: a wheel scroll leaves
+            // the selection alone, and this is a scroll the pointer drives.
+            self.selecting = false;
+            self.dragging = None;
+            self.thumb_at = Some(std::time::Instant::now());
+            self.dirty = true;
+            return;
+        }
         let spot = self.reply_spot(position);
         self.selecting = spot.is_some();
         self.selection = spot.map(|(row, ch)| panel::Selection {
@@ -1910,6 +2033,36 @@ impl State {
         });
         self.dragging = spot.is_none().then_some(position);
         self.dirty = true;
+    }
+
+    /// The scroll indicator as the pointer sees it, in buffer pixels. `None` when the
+    /// transcript fits the card: there is no thumb to grab then.
+    fn thumb_of(&self, font: &PanelFont) -> Option<Thumb> {
+        let (track_y, track_h) = panel::scroll_track(self.buffer_height(), font.row_h, self.s())?;
+        let total = self.transcript.total_height();
+        let (ty, th) = render::scroll_thumb(
+            track_y,
+            track_h,
+            self.viewport.height,
+            total,
+            self.viewport.top,
+        )?;
+        Some(Thumb {
+            track: (track_y, track_h),
+            at: (ty, th),
+            max_top: total - self.viewport.height,
+        })
+    }
+
+    /// The same, and only where a press takes hold of it: the replies card's right
+    /// `PAD`-wide padding column, which is the column the strip is painted in and
+    /// where no reply text is, because rows wrap at the same `PAD`.
+    fn thumb_at(&self, position: (f64, f64), font: &PanelFont) -> Option<Thumb> {
+        let thumb = self.thumb_of(font)?;
+        let s = self.s() as f64;
+        let (left, right) = panel::scroll_column(self.buffer_width(), self.s());
+        let (x, y) = (position.0 * s, position.1 * s);
+        grabs((left, right), thumb.track, x, y).then_some(thumb)
     }
 
     /// Which reply character a pointer position is over: the row, and how many
@@ -1946,6 +2099,10 @@ impl State {
     /// button is down. A pointer merely passing over the replies selects nothing:
     /// that was the reported bug, a hover painting text as if it had been dragged.
     fn motion_to(&mut self, position: (f64, f64)) {
+        if self.thumb_grab.is_some() {
+            self.drag_thumb(position);
+            return;
+        }
         match motion_with(self.press, self.dragging, self.selecting) {
             Motion::Hover => {}
             Motion::Drag => self.drag_to(position),
@@ -1989,23 +2146,40 @@ impl State {
         self.dirty = true;
     }
 
-    /// Scroll the replies from a pointer axis event. A notch is three lines; a
-    /// touchpad's continuous delta is already pixels, which is what `discrete`
-    /// being zero means.
+    /// Carry the view with the thumb: the pointer's own place in the track is where
+    /// the thumb's top goes, and the thumb's top is the view's offset. The grab holds
+    /// whatever the pointer's x does, so a drag that strays out of the column keeps
+    /// dragging instead of stalling.
+    fn drag_thumb(&mut self, position: (f64, f64)) {
+        let Some(grab) = self.thumb_grab else { return };
+        let Some(thumb) = self.font.as_ref().and_then(|font| self.thumb_of(font)) else {
+            return;
+        };
+        let y = (position.1 * self.s() as f64).round().max(0.0) as u32;
+        let top = thumb_top(&thumb, y, grab);
+        self.viewport.scroll_to(top, self.transcript.total_height());
+        self.thumb_at = Some(std::time::Instant::now());
+        self.dirty = true;
+    }
+
+    /// Scroll the replies from a pointer axis event. The distance is in buffer
+    /// pixels, and its fraction is carried rather than rounded away.
     fn wheel(&mut self, vertical: &AxisScroll) {
         let Some(font) = self.font.as_ref() else {
             return;
         };
-        let delta = if vertical.discrete != 0 {
-            vertical.discrete as i64 * 3 * font.row_h as i64
-        } else {
-            (vertical.absolute * self.scale.max(1) as f64).round() as i64
-        };
-        if delta == 0 {
+        // A finger's axis distance is pixels and a wheel's is notches; the source is
+        // the only thing that says which, and `value120`/`discrete` say how far a
+        // wheel turned whichever of the two the compositor fills in.
+        let wheel = matches!(self.axis_source, Some(wl_pointer::AxisSource::Wheel));
+        let delta = axis_delta(vertical, wheel, font.row_h, self.scale.max(1) as f64);
+        let (shift, carried) = whole(delta, self.scroll_frac);
+        self.scroll_frac = carried;
+        if shift == 0 {
             return;
         }
         let total = self.transcript.total_height();
-        self.viewport.scroll_by(delta, total);
+        self.viewport.scroll_by(shift, total);
         self.thumb_at = Some(std::time::Instant::now());
         self.dirty = true;
     }
@@ -3119,6 +3293,10 @@ impl PointerHandler for State {
                 PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
                     self.press = None;
                     self.dragging = None;
+                    if self.thumb_grab.take().is_some() {
+                        // Let go: the indicator goes back to its hold and its fade.
+                        self.thumb_at = Some(std::time::Instant::now());
+                    }
                     // The selection stays where it was chosen; the gesture that made
                     // it is over, so a later hover cannot extend it.
                     self.selecting = false;
@@ -3126,20 +3304,28 @@ impl PointerHandler for State {
                 // The pointer can leave because the panel moved out from under it,
                 // which is what a drag does. The drag outlives it: the release that
                 // ends it still arrives, because the press took an implicit grab.
+                // The same grip carries the indicator's drag.
                 PointerEventKind::Leave { .. } => {
                     self.press = None;
                     self.selecting = false;
                 }
                 PointerEventKind::Motion { .. } => self.motion_to(event.position),
-                PointerEventKind::Axis { vertical, .. }
-                    if over_replies(self.height, event.position.1) =>
-                {
-                    // `Ctrl` makes the wheel the panel's size; without it the wheel is
-                    // the transcript's, which is what it has always been.
-                    if self.modifiers.ctrl {
-                        self.wheel_size(&vertical);
-                    } else {
-                        self.wheel(&vertical);
+                PointerEventKind::Axis {
+                    vertical, source, ..
+                } => {
+                    // Remembered, not used here: the source only changes when the
+                    // pointer's kind of scrolling does.
+                    if let Some(source) = source {
+                        self.axis_source = Some(source);
+                    }
+                    if over_replies(self.height, event.position.1) {
+                        // `Ctrl` makes the wheel the panel's size; without it the wheel
+                        // is the transcript's, which is what it has always been.
+                        if self.modifiers.ctrl {
+                            self.wheel_size(&vertical);
+                        } else {
+                            self.wheel(&vertical);
+                        }
                     }
                 }
                 _ => {}
@@ -3957,6 +4143,139 @@ mod tests {
             over_replies(panel_h, bar_top - 0.5),
             "just above the bar is replies"
         );
+    }
+
+    /// One notch moves five lines, and which of the three fields carried it makes no
+    /// difference. The reported slowness was a wheel falling through to the axis
+    /// distance, where one notch was 15 px — half of a 30 px row.
+    #[test]
+    fn a_notch_is_five_rows_whichever_field_carries_it() {
+        let row_h = 30;
+        let five = 5.0 * row_h as f64;
+        let event = |value120: i32, discrete: i32, absolute: f64| AxisScroll {
+            absolute,
+            discrete,
+            value120,
+            ..AxisScroll::default()
+        };
+        // What a modern compositor sends: 120 units a notch, whatever the axis
+        // distance beside it says.
+        assert_eq!(axis_delta(&event(120, 0, 15.0), true, row_h, 1.0), five);
+        // An older one: the deprecated step count.
+        assert_eq!(axis_delta(&event(0, 1, 15.0), true, row_h, 1.0), five);
+        // Neither: the axis distance of a wheel, in the 15-unit notches it counts in.
+        assert_eq!(axis_delta(&event(0, 0, 15.0), true, row_h, 1.0), five);
+        // A high-resolution wheel's half notch is half a notch.
+        assert_eq!(axis_delta(&event(60, 0, 7.5), true, row_h, 1.0), five / 2.0);
+        // A finger's axis distance is pixels: no notch multiplier, and the output's
+        // scale turns surface coordinates into buffer pixels.
+        assert_eq!(axis_delta(&event(0, 0, 3.4), false, row_h, 1.0), 3.4);
+        assert_eq!(axis_delta(&event(0, 0, 3.4), false, row_h, 2.0), 6.8);
+        // Nothing asked for, nothing moved, whichever way it came.
+        assert_eq!(axis_delta(&event(0, 0, 0.0), true, row_h, 2.0), 0.0);
+    }
+
+    /// A two-finger slide asks for tenths of a pixel an event. Rounding each one away
+    /// dropped them all, which is what made a slow slide stick; the remainder rides to
+    /// the next event, and nothing is dropped or invented on the way.
+    #[test]
+    fn a_slide_smaller_than_a_pixel_is_carried() {
+        // Quarters are exact in binary, so the count is exact too: four of them are
+        // one pixel, in either direction.
+        for (event, expected) in [(0.25, 25), (-0.25, -25)] {
+            let (mut carried, mut moved) = (0.0, 0i64);
+            for _ in 0..100 {
+                let (step, left) = whole(event, carried);
+                carried = left;
+                moved += step;
+            }
+            assert_eq!(moved, expected, "a hundred {event} px events");
+            assert!(carried.abs() < 0.5, "the leftover is under a pixel");
+        }
+        // A whole notch is never split, and an event that asks for nothing is nothing.
+        assert_eq!(whole(150.0, 0.0), (150, 0.0));
+        assert_eq!(whole(0.0, 0.0), (0, 0.0));
+    }
+
+    /// The drag is the painter's mapping read the other way: the thumb's top on the
+    /// track's free span is the view's offset, so the ends of the track are the ends of
+    /// the transcript and half way is half.
+    #[test]
+    fn dragging_the_indicator_puts_the_view_where_the_thumb_is() {
+        let thumb = Thumb {
+            track: (26, 200),
+            at: (60, 50),
+            max_top: 3000,
+        };
+        assert_eq!(thumb_top(&thumb, 26, 0), 0, "the track's top");
+        assert_eq!(
+            thumb_top(&thumb, 26 + 150, 0),
+            3000,
+            "and its bottom, which is the transcript's end"
+        );
+        assert_eq!(thumb_top(&thumb, 26 + 75, 0), 1500, "half way is half");
+        // Past either end the thumb stops at the end rather than running off it.
+        assert_eq!(thumb_top(&thumb, 0, 0), 0);
+        assert_eq!(thumb_top(&thumb, 9_999, 0), 3000);
+        // Held where it already was, it does not jump: the grab is an offset into the
+        // thumb, so a press and no motion leave the view where it stood.
+        let grab = grab_offset(&thumb, 70);
+        assert_eq!(grab, 10, "pressed 10 px down the thumb");
+        let stood = (thumb.at.0 - thumb.track.0) * 3000 / 150;
+        assert_eq!(thumb_top(&thumb, 70, grab), stood);
+        // A press on the track below the thumb takes hold of its middle, so the thumb
+        // lands centred on the pointer instead of being pushed by its whole height.
+        let below = 150;
+        let grab = grab_offset(&thumb, below);
+        assert_eq!(grab, 25, "the middle of a 50 px thumb");
+        assert_eq!(
+            thumb_top(&thumb, below, grab),
+            (below - 25 - 26) * 3000 / 150,
+            "the thumb's middle is at the pointer"
+        );
+    }
+
+    /// Held is not idle: the indicator keeps its full ink for as long as the button is
+    /// down, however long past its hold and fade that is.
+    #[test]
+    fn a_held_indicator_stays_at_full_ink() {
+        assert_eq!(thumb_ink(true, THUMB_HOLD_MS * 10), 1.0);
+        assert_eq!(
+            thumb_ink(false, THUMB_HOLD_MS * 10),
+            0.0,
+            "let go, it fades"
+        );
+        assert_eq!(thumb_ink(true, 0), thumb_ink(false, 0), "both start full");
+    }
+
+    /// The column is the card's right padding and nothing else: it takes the press
+    /// where the 3 px strip is drawn and gives the whole row of text back, and the
+    /// track's own rows, no farther.
+    #[test]
+    fn only_the_padding_column_grabs_the_indicator() {
+        let (left, right) = panel::scroll_column(1_384, 2); // 640 logical px at 2×
+        assert_eq!(right, 1_384 - 2 * render::SHADOW, "the card's own edge");
+        assert_eq!(
+            right - left,
+            2 * crate::PAD,
+            "the padding, at the output's scale"
+        );
+        let track = (2 * render::SHADOW, 400);
+        assert!(grabs((left, right), track, left as f64, 100.0));
+        assert!(grabs((left, right), track, (right - 1) as f64, 451.0));
+        assert!(
+            !grabs((left, right), track, (left - 1) as f64, 100.0),
+            "the end of a line is text, and stays text"
+        );
+        assert!(
+            !grabs((left, right), track, right as f64, 100.0),
+            "the shadow margin is not the card"
+        );
+        assert!(
+            !grabs((left, right), track, 1_310.0, 51.0),
+            "above the track"
+        );
+        assert!(!grabs((left, right), track, 1_310.0, 452.0), "below it");
     }
 
     /// The shape changes are springs that land on exactly 1 at their deadline, and
