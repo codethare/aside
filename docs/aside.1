@@ -56,7 +56,11 @@ box of fixed height -- as tall as the field's gap above the screen's bottom edge
 so a longer answer scrolls inside it instead of growing the panel.  With the
 pointer over the replies, the wheel and a two-finger slide scroll them: a notch is
 five rows, counted from whichever step field the compositor fills in, and a
-continuous delta is taken as pixels, its fraction carried rather than dropped.
+continuous delta is taken as pixels, its fraction carried rather than dropped.  A
+burst of quick notches travels farther as it runs -- each step half again as far as
+the one before, up to four times five rows -- and 150 ms without a notch returns it
+to five rows.  A touchpad counts one gesture as one step, so one slide moves exactly
+with the fingers and repeated quick flicks grow.
 Only the model's text about the question just asked is drawn -- its answer, and a
 failure or note that belongs to it, 8 pixels apart.  Earlier turns are kept for
 the request and drawn nowhere.  The question you typed is not part of the

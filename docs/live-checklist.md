@@ -90,7 +90,8 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    15 % each press; the text does not change size, more of it fits, and the lines wrap
    at the new width. `Ctrl+Alt+-` shrinks it, `Ctrl+Alt+BackSpace` returns to the
    default size. The same in typing, prefix and copy mode, and no character reaches
-   the input line. `Ctrl` + the wheel resizes by 5 % a notch, and without `Ctrl` the
+   the input line. `Ctrl` + the wheel resizes by 5 % a notch however fast it is spun -
+   it never accelerates - and without `Ctrl` the
    wheel still scrolls. A two-finger pinch resizes with the fingers. It stops at 200 %
    and at 75 %, and where the output cannot hold the panel; restart the panel and it
    is back at its default size.
@@ -118,7 +119,11 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 5d0. Put the pointer over the replies and turn the wheel (and slide two fingers):
    the transcript scrolls, five rows a notch, and it stops at both ends. A slow
    two-finger slide creeps at the speed of the fingers instead of sticking, and a
-   wheel notch on a modern compositor moves as far as on an older one. A 3 px
+   wheel notch on a modern compositor moves as far as on an older one. Spin it: the
+   first notch is five rows and each one after it travels farther, up to four times
+   five rows, and holding still for a moment brings the next notch back to five
+   rows. One two-finger slide follows the fingers exactly however fast it is; three
+   quick flicks in a row each go farther than the one before. A 3 px
    indicator on the card's right edge comes up with the scroll, holds a moment, and
    fades out about a second after you stop; it is not on the card at rest. Over the
    bar, nothing scrolls. Mid-scroll, no two lines ever overlap: the line at the

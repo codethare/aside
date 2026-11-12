@@ -113,7 +113,11 @@ panel's own growth and are not animated a second time; a follow-up's answer simp
 appears. The wheel scrolls the replies while the pointer is over them — five rows a notch, a touchpad's own
 delta otherwise — and does nothing over the bar. The notch is counted from whichever step field the
 compositor fills in, so a modern wheel and an old one move the same distance, and a
-touchpad's fraction is carried rather than rounded away.
+touchpad's fraction is carried rather than rounded away. A burst of quick notches
+travels farther as it runs: each step is half again as far as the one before, up to
+four times five rows, and 150 ms without a notch returns it to five rows. A touchpad
+counts one gesture as one step, so a single slide moves exactly with the fingers and
+it is repeated quick flicks that grow.
 
 The sizes are the panel's own; the layer surface adds the shadow margin on every
 side and sits that margin inside the visible gap. The answering panel is a

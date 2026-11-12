@@ -481,6 +481,7 @@ fn run(options: Options) -> Result<(), String> {
         scroll_frac: 0.0,
         axis_source: None,
         thumb_grab: None,
+        burst: Burst::default(),
         pointer: None,
         morph: None,
         enter_start: None,
@@ -1239,6 +1240,76 @@ pub fn whole(delta: f64, carried: f64) -> (i64, f64) {
     (moved as i64, sum - moved)
 }
 
+/// How close two scroll steps have to be to count as one burst, how long a burst
+/// survives a pause, and how fast it grows. 150 ms is faster than any deliberate
+/// notch-by-notch scroll (a detent is 200-330 ms apart in careful use) and slower
+/// than a spin (50-100 ms apart), so intent changes at that line.
+pub const GAP_MS: u128 = 150;
+/// A touchpad's flicks are separated by a gesture break, not by a notch: a burst
+/// survives a longer pause there, so three quick flicks are one burst.
+pub const BURST_MS: u128 = 400;
+/// What each further step of a burst adds, and the most it can become: four times
+/// five rows is 20 rows, more than the card is tall, and as far as a notch can go
+/// without the eye losing the line it was on.
+pub const BURST_GAIN: f64 = 0.5;
+pub const BURST_MAX: f64 = 4.0;
+
+/// The burst's step for an event `since_ms` after the last one. A wheel notch is one
+/// step a notch; a touchpad is one step a gesture, so a single slide — whose events
+/// are milliseconds apart — stays at whatever step it starts on, and it is repeated
+/// quick slides that accelerate.
+pub fn burst_step(steps: u32, since_ms: u128, wheel: bool) -> u32 {
+    if wheel {
+        if since_ms < GAP_MS {
+            steps.saturating_add(1)
+        } else {
+            1
+        }
+    } else if since_ms < GAP_MS {
+        // Inside one gesture: the burst has not moved on.
+        steps.max(1)
+    } else if since_ms < BURST_MS {
+        steps.max(1).saturating_add(1)
+    } else {
+        1
+    }
+}
+
+/// How many times one step moves the view, in a burst's nth step: the second notch
+/// of a spin is half again as far, and the seventh is the cap.
+pub fn burst_factor(steps: u32) -> f64 {
+    (1.0 + BURST_GAIN * steps.saturating_sub(1) as f64).min(BURST_MAX)
+}
+
+/// Whether an axis event asks for any distance at all, and so whether it is a step of
+/// a burst. The toolkit delivers a source notice and a stop notice as axis events with
+/// nothing in them, and a notch that counted those would accelerate twice as fast as
+/// its reader turned it.
+pub fn is_step(raw: f64) -> bool {
+    raw != 0.0
+}
+
+/// One scroll burst: the step it is on, and when its last event arrived.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Burst {
+    steps: u32,
+    last: Option<std::time::Instant>,
+}
+
+impl Burst {
+    /// Take the next event, `wheel` saying whether it was a notch or a slide, and
+    /// answer the step it belongs to. The clock is the panel's own: the toolkit
+    /// leaves the timestamp of the events that carry the step counts at zero.
+    fn take(&mut self, now: std::time::Instant, wheel: bool) -> u32 {
+        let since = self
+            .last
+            .map_or(u128::MAX, |at| now.duration_since(at).as_millis());
+        self.last = Some(now);
+        self.steps = burst_step(self.steps, since, wheel);
+        self.steps
+    }
+}
+
 /// Where the pointer can grab the scroll indicator, in buffer pixels: the track it
 /// slides in, the thumb inside it, and the furthest the view can scroll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1489,6 +1560,9 @@ struct State {
     axis_source: Option<wl_pointer::AxisSource>,
     /// Where inside the thumb the pointer took hold, while the indicator is held.
     thumb_grab: Option<u32>,
+    /// The scroll burst in progress: how many steps it has run, and when the last one
+    /// arrived. What makes a quick spin travel farther.
+    burst: Burst,
     pointer: Option<wl_pointer::WlPointer>,
     /// The shape change in progress, if any.
     morph: Option<Morph>,
@@ -2163,7 +2237,8 @@ impl State {
     }
 
     /// Scroll the replies from a pointer axis event. The distance is in buffer
-    /// pixels, and its fraction is carried rather than rounded away.
+    /// pixels, its fraction is carried rather than rounded away, and a quick burst of
+    /// events travels farther the longer it runs.
     fn wheel(&mut self, vertical: &AxisScroll) {
         let Some(font) = self.font.as_ref() else {
             return;
@@ -2172,8 +2247,14 @@ impl State {
         // the only thing that says which, and `value120`/`discrete` say how far a
         // wheel turned whichever of the two the compositor fills in.
         let wheel = matches!(self.axis_source, Some(wl_pointer::AxisSource::Wheel));
-        let delta = axis_delta(vertical, wheel, font.row_h, self.scale.max(1) as f64);
-        let (shift, carried) = whole(delta, self.scroll_frac);
+        let raw = axis_delta(vertical, wheel, font.row_h, self.scale.max(1) as f64);
+        if !is_step(raw) {
+            // A source or a stop notice asks for no distance, so it is no step of a
+            // burst either: a notch that counted one would accelerate twice as fast.
+            return;
+        }
+        let step = self.burst.take(std::time::Instant::now(), wheel);
+        let (shift, carried) = whole(raw * burst_factor(step), self.scroll_frac);
         self.scroll_frac = carried;
         if shift == 0 {
             return;
@@ -4195,6 +4276,69 @@ mod tests {
         // A whole notch is never split, and an event that asks for nothing is nothing.
         assert_eq!(whole(150.0, 0.0), (150, 0.0));
         assert_eq!(whole(0.0, 0.0), (0, 0.0));
+    }
+
+    /// A source notice and a stop notice arrive as axis events asking for no distance:
+    /// they are not steps of a burst, so a spin accelerates on its own notches only.
+    #[test]
+    fn a_notice_with_no_distance_is_no_step() {
+        assert!(!is_step(0.0));
+        assert!(!is_step(-0.0));
+        assert!(is_step(0.001), "a slide's tenth of a pixel is a step");
+        assert!(is_step(-150.0));
+    }
+
+    /// A burst of quick notches travels farther each step and then stops growing: the
+    /// cap is what keeps a spin readable, and half a step is what a reader can feel.
+    #[test]
+    fn a_burst_of_notches_travels_farther_and_then_stops() {
+        assert_eq!(burst_factor(1), 1.0, "one notch is one notch");
+        assert_eq!(burst_factor(2), 1.5);
+        assert_eq!(burst_factor(3), 2.0);
+        assert_eq!(burst_factor(7), 4.0, "the seventh step is the cap");
+        assert_eq!(burst_factor(50), BURST_MAX, "and it stays there");
+        let mut previous = 0.0;
+        for step in 1..40 {
+            let factor = burst_factor(step);
+            assert!(factor >= previous, "step {step} went backwards");
+            assert!(factor <= BURST_MAX, "step {step} passed the cap");
+            previous = factor;
+        }
+        // What the reader feels: five rows of 30 px, then seven and a half.
+        let notch = AxisScroll {
+            value120: 120,
+            ..AxisScroll::default()
+        };
+        let one = axis_delta(&notch, true, 30, 1.0);
+        assert_eq!(one, 150.0, "five rows of 30 px");
+        assert_eq!(one * burst_factor(2), 225.0, "seven and a half rows");
+    }
+
+    /// The burst's clock: notches 100 ms apart are one burst and a pause ends it, while
+    /// a touchpad counts one step a gesture, so a single slide stays 1:1 and it is
+    /// repeated quick flicks that accelerate.
+    #[test]
+    fn a_pause_ends_the_burst_and_one_slide_is_one_step() {
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        let mut burst = Burst::default();
+        // A spin: one step a notch.
+        assert_eq!(burst.take(at(0), true), 1);
+        assert_eq!(burst.take(at(100), true), 2);
+        assert_eq!(burst.take(at(200), true), 3);
+        // A pause longer than the gap: the notch after it is a notch again.
+        assert_eq!(burst.take(at(400), true), 1);
+        assert_eq!(burst.take(at(1_000), true), 1, "and stays one");
+        // One touchpad slide: events ten milliseconds apart, one step all the way.
+        for ms in 1_010..1_100 {
+            assert_eq!(burst.take(at(ms), false), 1, "inside one gesture");
+        }
+        // A new flick 200 ms after the last event is one more step of the burst.
+        assert_eq!(burst.take(at(1_300), false), 2);
+        assert_eq!(burst.take(at(1_310), false), 2, "still that gesture");
+        assert_eq!(burst.take(at(1_500), false), 3);
+        // A pause longer than the burst's own window starts it over.
+        assert_eq!(burst.take(at(2_500), false), 1);
     }
 
     /// The drag is the painter's mapping read the other way: the thumb's top on the
