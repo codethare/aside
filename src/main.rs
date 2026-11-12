@@ -781,11 +781,14 @@ fn transcript_y(pointer_y: f64, scale: u32, viewport_top: u32) -> u32 {
 }
 
 /// Whether a pointer at `y` in surface coordinates is over the replies card rather
-/// than the bar: the wheel scrolls there, and does nothing over the field.
+/// than the gap below it or the bar: the wheel scrolls there, and does nothing over
+/// the field. The bar hangs from the panel's own bottom edge, which is `SHADOW`
+/// inside the surface's, and the card ends where the bar's gap begins — the whole
+/// bar, not an estimate of where it starts, which is what let the wheel scroll it.
 fn over_replies(panel_h: u32, y: f64) -> bool {
     let top = render::SHADOW as f64;
-    let bar = top + (panel_h.saturating_sub(panel::bar_height())) as f64;
-    y >= top && y < bar
+    let bottom = panel_h.saturating_sub(render::SHADOW + panel::bar_height() + render::SEPARATION);
+    y >= top && y < bottom as f64
 }
 
 /// The tallest the replies may get: the gap below the bar, or the room left above
@@ -4211,18 +4214,32 @@ mod tests {
         );
     }
 
-    /// The wheel scrolls over the replies and nowhere else.
+    /// The wheel scrolls over the replies card and nowhere else. The reported failure:
+    /// the bar took a scroll, so a pointer resting on the bar stopped an answer from
+    /// following while it streamed, and the view stayed above the last line.
     #[test]
     fn the_wheel_only_counts_over_the_replies() {
-        let panel_h = 400; // bar 30 + gap 12 + replies 358
+        let panel_h = 400; // shadow 26 + replies + gap 16 + bar 30 = 400
         let top = render::SHADOW as f64;
+        // The bar hangs from the panel's own bottom edge, which is `SHADOW` inside
+        // the surface's; the card ends where the bar's gap begins.
+        let bar_top = (panel_h - render::SHADOW - panel::bar_height()) as f64;
+        let card_bottom = bar_top - render::SEPARATION as f64;
         assert!(!over_replies(panel_h, top - 1.0), "the shadow margin");
         assert!(over_replies(panel_h, top + 1.0), "the replies card");
-        let bar_top = top + (panel_h - panel::bar_height()) as f64;
-        assert!(!over_replies(panel_h, bar_top + 1.0), "the bar");
+        assert!(over_replies(panel_h, card_bottom - 0.5), "its last row");
         assert!(
-            over_replies(panel_h, bar_top - 0.5),
-            "just above the bar is replies"
+            !over_replies(panel_h, card_bottom),
+            "the gap above the bar is not the card"
+        );
+        assert!(!over_replies(panel_h, bar_top), "the bar's first row");
+        assert!(
+            !over_replies(panel_h, bar_top + 10.0),
+            "nor any row of the bar"
+        );
+        assert!(
+            !over_replies(panel_h, (panel_h - 1) as f64),
+            "nor the margin below it"
         );
     }
 

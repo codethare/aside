@@ -126,8 +126,10 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    quick flicks in a row each go farther than the one before. A 3 px
    indicator on the card's right edge comes up with the scroll, holds a moment, and
    fades out about a second after you stop; it is not on the card at rest. Over the
-   bar, nothing scrolls. Mid-scroll, no two lines ever overlap: the line at the
-   card's bottom edge fades out instead of being cut off.
+   bar — its first row and its last — and in the gap just above it, nothing scrolls;
+   with an answer streaming, rest the pointer there and flick: the newest line stays
+   in view and stays in view when the answer ends. Mid-scroll, no two lines ever
+   overlap: the line at the card's bottom edge fades out instead of being cut off.
 5d0b. Press in the card's right padding, on the indicator, and drag it to the top of
    the card: the replies show the transcript's first line, and an answer that is
    still streaming no longer pulls them down. Drag it to the bottom: the newest line
