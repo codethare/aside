@@ -21,7 +21,12 @@ scale, on a thread that overlaps the compositor handshake. The burst lives in
 **1. The number is drawn in the strip's own column, centred on the thumb's middle.**
 The strip is the thing being described, so the label sits on it: centred horizontally
 on the 3 px column and vertically on the thumb's middle, so it moves with the position
-it explains. The strip is painted first and the number over it.
+it explains. The strip is cut in two around the number's rows instead of being drawn
+through it: a bar crossing a digit reads as a strikethrough, and the gap is what makes
+the number look set into the indicator rather than printed on it. A fragment shorter
+than two pixels is dropped rather than left as a speck, and when the number's rows are
+taller than the whole thumb nothing of the strip is left — the number's own place then
+carries the position, which is why it is centred on the thumb.
 *Alternative rejected:* the capsule that was built first — as wide as a word, it stops
 reading as the view's position and hides a slice of the answer's last column; and a
 fixed readout in a corner, which has no relation to what it describes.

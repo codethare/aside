@@ -425,34 +425,46 @@ pub fn draw(
         let ink = render::dim(render::LABEL_ACCENT, thumb);
         let tw = 3 * s;
         let tx = panel.x + panel.w - (crate::PAD * s + tw) / 2;
-        render::rect(buf, w, h, tx, ty, tw, th, ink);
-        if let Some(burst) = burst.filter(|b| b.factor > 1.0) {
-            // The multiplier is written on the strip: centred on the strip's own column
-            // and on the thumb's middle, in a face smaller than the answer's, so the
-            // number belongs to the indicator and cannot be read as a line of text.
-            let label = burst_label(burst.factor);
-            let text_w = render::measure(burst.font, &label, panel.w as f32).ceil() as u32;
+        // Where the number goes while a burst accelerates, and the rows it takes: the
+        // strip leaves those rows empty rather than being drawn through the digits.
+        let label = burst.filter(|b| b.factor > 1.0).map(|burst| {
+            let text = burst_label(burst.factor);
+            let w = render::measure(burst.font, &text, panel.w as f32).ceil() as u32;
             let row = burst.font.row_h;
-            // Centred on the strip, but never past the card's right edge and never off
-            // its rows: a mark on the right edge stays on the card.
+            // Centred on the strip's own column, but never past the card's right edge
+            // and never off its rows: a mark on the right edge stays on the card.
             let x = (tx + tw / 2)
-                .saturating_sub(text_w / 2)
-                .min((panel.x + panel.w).saturating_sub(2 * s + text_w))
+                .saturating_sub(w / 2)
+                .min((panel.x + panel.w).saturating_sub(2 * s + w))
                 .max(panel.x);
             let y = (ty + th / 2)
                 .saturating_sub(row / 2)
                 .clamp(track_y, (track_y + track_h).saturating_sub(row));
+            Label {
+                text,
+                w,
+                x,
+                y,
+                row,
+                font: burst.font,
+            }
+        });
+        let gap = label.as_ref().map(|l| (l.y, l.y + l.row));
+        for (top, bottom) in strip_segments(ty, th, gap) {
+            render::rect(buf, w, h, tx, top, tw, bottom - top, ink);
+        }
+        if let Some(label) = label {
             render::draw_text(
                 buf,
                 w,
                 h,
-                burst.font,
-                x as f32,
-                render::row_baseline(burst.font, y),
-                &label,
+                label.font,
+                label.x as f32,
+                render::row_baseline(label.font, label.y),
+                &label.text,
                 render::dim(render::FG_NORMAL, thumb),
-                text_w as f32 + 1.0,
-                y..y + row,
+                label.w as f32 + 1.0,
+                label.y..label.y + label.row,
                 aa,
             );
         }
@@ -1186,6 +1198,35 @@ pub fn burst_label(factor: f32) -> String {
 pub struct Burst<'a> {
     pub factor: f32,
     pub font: &'a PanelFont,
+}
+
+/// The number the strip carries while a burst accelerates: its text, the width it
+/// measured, and the box it takes on the card. The strip leaves that box empty.
+struct Label<'a> {
+    text: String,
+    w: u32,
+    x: u32,
+    y: u32,
+    row: u32,
+    font: &'a PanelFont,
+}
+
+/// The pieces of the strip a gap leaves: the rows of it above the gap and below it,
+/// and no fragment shorter than two pixels, which reads as a speck rather than as a
+/// bar. A gap that covers the strip leaves nothing — the number's own place then says
+/// where the view is.
+pub fn strip_segments(ty: u32, th: u32, gap: Option<(u32, u32)>) -> Vec<(u32, u32)> {
+    let end = ty + th;
+    let Some((gap_top, gap_bottom)) = gap else {
+        return vec![(ty, end)];
+    };
+    let mut pieces = Vec::new();
+    for (top, bottom) in [(ty, gap_top.min(end)), (gap_bottom.clamp(ty, end), end)] {
+        if bottom.saturating_sub(top) >= 2 {
+            pieces.push((top, bottom));
+        }
+    }
+    pieces
 }
 
 /// Replies height a panel of `h` buffer pixels can show above its bar, in buffer
@@ -2912,16 +2953,20 @@ mod tests {
         let f = font();
         let mut scene = scene(&f, 300.0);
         scene.transcript.ask("and at dusk?", &f);
-        scene.transcript.delta(
-            " The same scattering leaves only the long wavelengths at dusk, which is\
-             why the sky reads red, and why the sea reads grey, and why a fire reads\
-             orange from a mile away.",
-            &f,
-            300.0,
-        );
+        // Enough answer to overflow the box several times over, so the thumb is tall:
+        // the number's rows are left empty, so the strip needs rows above and below it
+        // to be interrupted in the middle.
+        for _ in 0..6 {
+            scene.transcript.delta(
+                " The same scattering leaves only the long wavelengths at dusk, which is\
+                 why the sky reads red, and why the sea reads grey.",
+                &f,
+                300.0,
+            );
+        }
         scene.transcript.finish_answer(&f);
-        scene.viewport = Viewport::new(2 * f.row_h);
-        let (w, h) = (500u32, height_for(2 * f.row_h, &f, 1));
+        scene.viewport = Viewport::new(8 * f.row_h);
+        let (w, h) = (500u32, height_for(8 * f.row_h, &f, 1));
         let (bw, bh) = frame(w, h);
         let strip = paint_with(&scene, w, h, None, 1.0, None);
         let burst = paint_with(&scene, w, h, None, 1.0, Some(2.5));
@@ -2974,13 +3019,24 @@ mod tests {
             })
             .collect();
         assert!(!changed.is_empty(), "the multiplier was not drawn");
+        // What the burst added that is the number: pixels that changed where the strip
+        // had no ink. The strip's own rows inside the gap changed too — they are gone —
+        // so those are not the number's.
+        let glyphs: Vec<(u32, u32)> = changed
+            .iter()
+            .copied()
+            .filter(|&(x, y)| {
+                strip[((y * bw + x) * 4) as usize..][..3] != render::LABEL_ACCENT[..3]
+            })
+            .collect();
+        assert!(!glyphs.is_empty(), "the number was not drawn");
         let (x0, x1) = (
-            changed.iter().map(|p| p.0).min().expect("ink"),
-            changed.iter().map(|p| p.0).max().expect("ink"),
+            glyphs.iter().map(|p| p.0).min().expect("ink"),
+            glyphs.iter().map(|p| p.0).max().expect("ink"),
         );
         let (y0, y1) = (
-            changed.iter().map(|p| p.1).min().expect("ink"),
-            changed.iter().map(|p| p.1).max().expect("ink"),
+            glyphs.iter().map(|p| p.1).min().expect("ink"),
+            glyphs.iter().map(|p| p.1).max().expect("ink"),
         );
         let card_right = bw - render::SHADOW;
         assert!(x1 < card_right, "the number ran past the card's right edge");
@@ -3003,6 +3059,19 @@ mod tests {
             y1 - y0 + 1,
             small().line_h as u32
         );
+        // The strip is interrupted where the number is: not one of its pixels sits in
+        // the number's rows, and it is still there above and below them.
+        let (strip_y0, strip_y1) = rows(&accent(&burst));
+        for y in y0..=y1 {
+            for x in 0..bw {
+                assert!(
+                    burst[((y * bw + x) * 4) as usize..][..3] != render::LABEL_ACCENT[..3],
+                    "the strip was drawn through the number at ({x}, {y})"
+                );
+            }
+        }
+        assert!(strip_y0 < y0, "no strip above the number");
+        assert!(strip_y1 > y1, "no strip below it");
         // Centred on the strip's own column: its width straddles the three columns.
         let strip_x = &columns(&accent(&strip))[..];
         assert!(
@@ -3028,6 +3097,36 @@ mod tests {
             x1 - x0 + 1,
             wide(&whole)
         );
+    }
+
+    /// The strip is cut around the number rather than through it, and a fragment too
+    /// short to read as a bar is dropped: the number's own place says where the view is.
+    #[test]
+    fn the_strip_leaves_the_numbers_rows_empty() {
+        assert_eq!(strip_segments(100, 40, None), vec![(100, 140)], "no number");
+        assert_eq!(
+            strip_segments(100, 40, Some((112, 130))),
+            vec![(100, 112), (130, 140)],
+            "a number in the middle"
+        );
+        assert_eq!(
+            strip_segments(100, 18, Some((98, 120))),
+            vec![],
+            "a number taller than the whole strip"
+        );
+        assert_eq!(
+            strip_segments(100, 40, Some((90, 110))),
+            vec![(110, 140)],
+            "a number at the top"
+        );
+        assert_eq!(
+            strip_segments(100, 40, Some((130, 200))),
+            vec![(100, 130)],
+            "a number at the bottom"
+        );
+        // A sliver under two pixels reads as dirt, not as a bar.
+        assert_eq!(strip_segments(100, 40, Some((101, 110))), vec![(110, 140)]);
+        assert_eq!(strip_segments(100, 40, Some((130, 139))), vec![(100, 130)]);
     }
 
     /// The number the strip carries: the multiplier, with one decimal only when it is not

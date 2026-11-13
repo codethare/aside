@@ -128,8 +128,9 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    fades out about a second after you stop; it is not on the card at rest. Spin fast
    enough for the burst and that strip carries the multiplier on it -- small type at
    the strip's own middle reading `1.5x`, `2x`, on up to `4x`, no wider than the text
-   needs and never past the card's edge -- and the number goes 400 ms after the last
-   notch while the strip fades on its own clock. One notch, or one slide, is only
+   needs and never past the card's edge -- with the strip cut above and below the
+   number, never drawn through it -- and the number goes 400 ms after the last notch
+   while the strip fades on its own clock. One notch, or one slide, is only
    ever the strip. Over the
    bar — its first row and its last — and in the gap just above it, nothing scrolls;
    with an answer streaming, rest the pointer there and flick: the newest line stays

@@ -131,8 +131,9 @@ was on the thumb, the thumb's middle if it was on the track — and moving carri
 view with it, from the transcript's first line to its last. Held, it stays at full
 ink, however long the button is down. While a burst accelerates, that strip carries
 the multiplier in small type on its own column — `1.5x`, `2x`, up to `4x` — set
-smaller than the answer's text, and the number goes 400 ms after the last notch while
-the strip fades on its own clock. Holding the
+smaller than the answer's text, with the strip cut around the number rather than drawn
+through it, and the number goes 400 ms after the last notch while the strip fades on
+its own clock. Holding the
 left button on the bar and moving drags the panel, in both axes, from the first
 motion; it stays on the output, keeps its size, and where it was is never written
 down. Dragging across the replies selects whole lines instead — press on a line,

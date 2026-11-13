@@ -35,8 +35,11 @@ multiplier, set on the strip (see the multiplier requirement below).
 While a burst is accelerating — its multiplier above one — the indicator SHALL show
 that multiplier as text in the strip's own column, centred on the strip's width and on
 the thumb's middle, so the number belongs to the indicator rather than to a widget
-beside it. The strip SHALL NOT change shape: it stays 3 px wide and its length keeps
-showing the view's position, and the number SHALL be drawn over it.
+beside it. The strip SHALL NOT be drawn through the number: the rows the number takes
+SHALL be left empty, the strip being painted above and below them, and a piece of it
+too short to read as a bar SHALL be dropped — a number taller than the whole strip
+leaves none of it, its own place then showing where the view is. Otherwise the strip
+SHALL keep its shape: 3 px wide, its length showing the view's position.
 
 The number SHALL be `1.5x`, `2x`, `3.5x`, `4x` — one decimal only when the multiplier
 is not whole — and SHALL be set in a face smaller than the panel's own text, so a
@@ -53,7 +56,14 @@ SHALL show nothing, because one gesture is one step and its multiplier is one.
 #### Scenario: A burst writes the multiplier on the strip
 
 - **WHEN** the wheel turns fast enough for the burst to reach twice a step
-- **THEN** the strip is 3 px wide as it always was, with `2x` set over it at the thumb's middle
+- **THEN** the strip is 3 px wide as it always was, with `2x` set on its column at the
+  thumb's middle, and the strip's rows where that number sits are empty
+
+#### Scenario: The number is not crossed by its own strip
+
+- **WHEN** the number is drawn on the strip
+- **THEN** no pixel of the strip lies inside the number's rows, and the strip is still
+  there above them and below them
 
 #### Scenario: The number grows to the cap and stops
 
