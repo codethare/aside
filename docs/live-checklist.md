@@ -157,6 +157,12 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 7c. Put `font_size = "28"` and `font_family = "DejaVu Sans Mono"` in the config and
    start again: the text is that size and that face, the bar is taller, and Chinese
    still renders. A `font_size = "2"` refuses to start, naming the file and line.
+7c1. Put `instructions = "Answer in Chinese, at most three sentences."` in the config
+   and ask something: the answer is Chinese and short. Add a second `instructions`
+   line — the second rule holds as well: both are in the request, joined in the order
+   they were written. Ask a follow-up: the rules still apply. Empty the value, or set
+   more than 2000 characters: it refuses to start with one line naming the file and the
+   line, instead of opening with part of the rules applied. Nothing of them is drawn.
 7d. Put `animations = "false"` in the config: summon, ask, close — each is one
    frame, with no spreading line, no unfolding card and no collapse; a slow request
    still lights the rim. `animations = "sometimes"` refuses to start, naming the

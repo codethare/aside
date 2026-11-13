@@ -252,12 +252,11 @@ lines, with
 .IR model ,
 .IR base_url ,
 .IR proxy ,
-.I font_size
+.IR font_family ,
+.IR animations
 and
-.I font_family
-and
-.I animations
-recognised.  A
+.I instructions
+are recognised.  A
 .I font_size
 outside 8 to 72 logical pixels is an error naming the file and the line, and the
 panel does not open; a
@@ -271,7 +270,13 @@ or
 and
 .B false
 skips the opening, the growth and the closing while keeping the light on the rim
-and the scroll indicator.  No credential may be stored
+and the scroll indicator.  .I instructions
+may appear more than once: its lines are joined in file order with a newline, and
+sent as the first message of every request, of role
+.BR system ,
+so the model answers under them on a follow-up too.  They are drawn nowhere.  An
+empty line, or more than 2000 characters in total, is an error naming the file and
+the line: the panel refuses rather than sending part of them.  No credential may be stored
 here.
 .SH EXIT STATUS
 .TP

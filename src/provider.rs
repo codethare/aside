@@ -22,6 +22,11 @@ pub const SPEED_LIMIT: u32 = 1;
 pub const SPEED_TIME_S: u32 = 30;
 pub const MAX_TIME_S: u32 = 300;
 
+/// How much room the reader's own constraints get: enough for a page of rules, short
+/// enough that a config file cannot quietly become the prompt. Past it the panel refuses
+/// rather than cutting the last rule the reader wrote.
+pub const INSTRUCTIONS_MAX: usize = 2000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub base_url: String,
@@ -31,6 +36,9 @@ pub struct Config {
     /// the sandbox it is the only way to use a proxy at all — `--clearenv`
     /// keeps `http_proxy` and friends out.
     pub proxy: Option<String>,
+    /// The reader's own constraints on the model, from the `instructions` key: sent as
+    /// the leading `system` message of every request, and never drawn.
+    pub instructions: Option<String>,
 }
 
 impl Default for Config {
@@ -39,6 +47,7 @@ impl Default for Config {
             base_url: DEFAULT_BASE_URL.to_string(),
             model: DEFAULT_MODEL.to_string(),
             proxy: None,
+            instructions: None,
         }
     }
 }
@@ -120,6 +129,17 @@ pub fn resolve(
             Some(&file),
             "proxy",
         ),
+        instructions: {
+            // The one key that repeats: a rule a line, joined in the order they were
+            // written. No flag and no environment variable, so the constraints live in
+            // one place.
+            let rules: Vec<&str> = file
+                .iter()
+                .filter(|(k, _)| k == "instructions")
+                .map(|(_, v)| v.as_str())
+                .collect();
+            (!rules.is_empty()).then(|| rules.join("\n"))
+        },
     })
 }
 
@@ -155,6 +175,10 @@ fn read_config(path: &std::path::Path) -> Result<Vec<(String, String)>, ConfigEr
 /// validated here, where its line number is known.
 pub fn parse_config(text: &str) -> Result<Vec<(String, String)>, (usize, String)> {
     let mut out = Vec::new();
+    // The joined length so far, so a file that writes too many rules is refused at the
+    // line that crossed the cap rather than silently cut.
+    let mut rules = 0usize;
+    let mut rule_lines = 0usize;
     for (i, raw) in text.lines().enumerate() {
         let line = i + 1;
         let s = raw.split('#').next().unwrap_or("").trim();
@@ -201,6 +225,26 @@ pub fn parse_config(text: &str) -> Result<Vec<(String, String)>, (usize, String)
                 }
                 out.push((key.to_string(), value));
             }
+            "instructions" => {
+                if value.trim().is_empty() {
+                    return Err((
+                        line,
+                        "`instructions` must say something: an empty rule constrains nothing"
+                            .to_string(),
+                    ));
+                }
+                rules += value.chars().count() + usize::from(rule_lines > 0);
+                rule_lines += 1;
+                if rules > INSTRUCTIONS_MAX {
+                    return Err((
+                        line,
+                        format!(
+                            "`instructions` is longer than {INSTRUCTIONS_MAX} characters: {rules} with this line"
+                        ),
+                    ));
+                }
+                out.push((key.to_string(), value));
+            }
             "model" | "base_url" | "proxy" | "font_family" => {
                 out.push((key.to_string(), value));
             }
@@ -232,16 +276,29 @@ impl Role {
     }
 }
 
-/// The OpenAI-compatible request body: this run's turns, in order, streamed.
-pub fn request_body(turns: &[Turn], model: &str) -> Result<String, String> {
+/// The OpenAI-compatible request body: the reader's constraints, then this run's turns,
+/// in order, streamed.
+pub fn request_body(
+    turns: &[Turn],
+    model: &str,
+    instructions: Option<&str>,
+) -> Result<String, String> {
     let mut body = String::with_capacity(256);
     body.push_str("{\"model\":\"");
     body.push_str(&escape_json(model)?);
     body.push_str("\",\"messages\":[");
-    for (i, turn) in turns.iter().enumerate() {
-        if i > 0 {
-            body.push(',');
-        }
+    // The constraints lead every request, so a follow-up is under the same rules as the
+    // question that started the exchange.
+    let mut sep = "";
+    if let Some(instructions) = instructions {
+        body.push_str("{\"role\":\"system\",\"content\":\"");
+        body.push_str(&escape_json(instructions)?);
+        body.push_str("\"}");
+        sep = ",";
+    }
+    for turn in turns {
+        body.push_str(sep);
+        sep = ",";
         body.push_str("{\"role\":\"");
         body.push_str(turn.role.wire());
         body.push_str("\",\"content\":\"");
@@ -530,11 +587,111 @@ mod tests {
                 text: "and 折行?".to_string(),
             },
         ];
-        let body = request_body(&turns, DEFAULT_MODEL).expect("escapes");
+        // No instructions: this is the body the panel sent before the key existed,
+        // byte for byte.
+        let body = request_body(&turns, DEFAULT_MODEL, None).expect("escapes");
         assert_eq!(
             body,
             "{\"model\":\"deepseek/deepseek-v4.1-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"why\"},{\"role\":\"assistant\",\"content\":\"because\"},{\"role\":\"user\",\"content\":\"and 折行?\"}],\"stream\":true}"
         );
+    }
+
+    /// The reader's own constraints lead every request, as one system message before
+    /// the conversation, so a follow-up is under them too.
+    #[test]
+    fn the_instructions_lead_the_request_as_a_system_message() {
+        let turns = vec![Turn {
+            role: Role::User,
+            text: "why".to_string(),
+        }];
+        let body = request_body(&turns, "m", Some("Be brief.\nNo preamble.")).expect("escapes");
+        assert_eq!(
+            body,
+            "{\"model\":\"m\",\"messages\":[{\"role\":\"system\",\"content\":\"Be brief.\\nNo preamble.\"},{\"role\":\"user\",\"content\":\"why\"}],\"stream\":true}"
+        );
+        // A quote is escaped like any other text, and no raw newline reaches the body.
+        let quoted = request_body(&turns, "m", Some("say \"hi\"")).expect("escapes");
+        assert!(quoted.contains("say \\\"hi\\\""), "{quoted}");
+        assert!(!quoted.contains('\n'), "{quoted}");
+    }
+
+    /// A rule a line: the key repeats, and `resolve` joins the values in file order.
+    #[test]
+    fn the_instructions_key_takes_one_rule_a_line() {
+        let one = parse_config("instructions = \"Answer in Chinese.\"\n").expect("a rule");
+        assert_eq!(
+            one,
+            vec![("instructions".to_string(), "Answer in Chinese.".to_string())]
+        );
+        let two = parse_config("instructions = \"Be brief.\"\ninstructions = \"No preamble.\"\n")
+            .expect("two rules");
+        assert_eq!(
+            two,
+            vec![
+                ("instructions".to_string(), "Be brief.".to_string()),
+                ("instructions".to_string(), "No preamble.".to_string()),
+            ],
+            "each line is its own entry, in file order"
+        );
+    }
+
+    /// An empty rule constrains nothing and must not look as if it was applied.
+    #[test]
+    fn an_empty_instruction_is_refused_at_its_line() {
+        for text in [
+            "model = \"m\"\ninstructions = \"\"\n",
+            "instructions = \"   \"\n",
+        ] {
+            let (line, message) = parse_config(text).expect_err("empty rules say nothing");
+            assert_eq!(
+                line,
+                text.lines().count(),
+                "the empty line is the one named: {message}"
+            );
+            assert!(message.contains("instructions"), "{message}");
+        }
+    }
+
+    /// Past the cap the panel refuses rather than cutting the last rule the reader wrote.
+    #[test]
+    fn instructions_past_the_cap_are_refused_at_the_line_that_crosses_it() {
+        let first = "a".repeat(INSTRUCTIONS_MAX - 10);
+        let text = format!(
+            "instructions = \"{first}\"\ninstructions = \"{}\"\n",
+            "b".repeat(20)
+        );
+        let (line, message) = parse_config(&text).expect_err("past the cap");
+        assert_eq!(line, 2, "the line that crossed the cap: {message}");
+        assert!(message.contains("2000"), "{message}");
+        // Exactly at the cap is allowed: the limit is a limit, not a guess.
+        let at = "a".repeat(INSTRUCTIONS_MAX);
+        assert!(parse_config(&format!("instructions = \"{at}\"\n")).is_ok());
+    }
+
+    #[test]
+    fn resolve_joins_the_instruction_lines_and_leaves_other_keys_alone() {
+        let file = vec![
+            ("instructions".to_string(), "Be brief.".to_string()),
+            ("model".to_string(), "first".to_string()),
+            ("instructions".to_string(), "No preamble.".to_string()),
+            ("model".to_string(), "second".to_string()),
+        ];
+        let config =
+            resolve(Some("m"), Some("https://x"), Some("socks5h://p"), &file).expect("resolves");
+        assert_eq!(
+            config.instructions.as_deref(),
+            Some("Be brief.\nNo preamble."),
+            "one value, one rule a line"
+        );
+        // No other key starts accepting a repeat: a second `model` is still ignored.
+        assert_eq!(
+            pick(None, None, Some(&file), "model").as_deref(),
+            Some("first")
+        );
+        // Unset is no instructions at all, not an empty string.
+        let none =
+            resolve(Some("m"), Some("https://x"), Some("socks5h://p"), &[]).expect("resolves");
+        assert_eq!(none.instructions, None);
     }
 
     #[test]
@@ -572,6 +729,7 @@ mod tests {
                 text: question.clone(),
             }],
             DEFAULT_MODEL,
+            None,
         )
         .expect("escapes");
         let text = curl_config(&Config::default(), "k", &body);

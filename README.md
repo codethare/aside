@@ -47,15 +47,23 @@ layerrule = no_anim, aside
 ```
 
 Configuration is optional: `~/.config/aside/config.toml` with flat `key = "value"`
-lines, and six keys — `model`, `base_url`, `proxy`, `font_size`, `font_family` and
-`animations`:
+lines, and seven keys — `model`, `base_url`, `proxy`, `font_size`, `font_family`,
+`animations` and `instructions`:
 
 ```toml
 model = "deepseek/deepseek-v4.1-flash"
 font_size = "24"                 # 8 to 72 logical px; the bar follows it
 font_family = "Noto Sans Mono"    # a name nothing provides falls back to the chain
 animations = "true"               # "false" skips the opening, the growth and the closing
+instructions = "Answer in Chinese."          # the reader's own constraints: one
+instructions = "At most three sentences."    # rule a line, joined in this order
 ```
+
+`instructions` is what an `AGENTS.md` is for a coding agent: every request leads with
+them as a `system` message, so a question and its follow-ups all answer under the same
+rules, and the panel never draws them. The key may repeat — the lines join in file
+order with a newline — and it is the only key that may. An empty line, or more than
+2000 characters in total, is refused with the file and the line rather than cut.
 
 A size that is not a size is an error naming the file and the line, and nothing
 opens. The credential is environment-only:

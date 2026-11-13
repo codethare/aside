@@ -44,7 +44,7 @@ impl Request {
     /// Start one request: a sandboxed curl, with the whole configuration —
     /// credential included — on its stdin.
     pub fn start(config: &Config, key: &str, turns: &[Turn]) -> Result<Request, String> {
-        let body = provider::request_body(turns, &config.model)?;
+        let body = provider::request_body(turns, &config.model, config.instructions.as_deref())?;
         let mut child = sandbox::start().map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => {
                 "bwrap is not installed: refusing to run the request unsandboxed".to_string()
