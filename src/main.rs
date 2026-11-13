@@ -372,7 +372,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         panel::Look::settled(panel::State::Replies),
         None,
         0.0,
-        1.0,
+        None,
         1,
     );
     std::fs::write(path, panel::to_ppm(&buf, w, h)).map_err(|e| format!("{}: {e}", path.display()))
@@ -431,6 +431,10 @@ fn run(options: Options) -> Result<(), String> {
     // Fonts load on a thread while the handshake happens: the first frame must
     // not wait for a font file.
     let load = font::spawn_load(font::size());
+    // The burst's own face, smaller than the panel's text, read on a thread of its own
+    // so the handshake pays for it too. A machine where it fails loses the number, not
+    // the panel.
+    let label_load = font::spawn_load(font::size() * LABEL_SHARE);
 
     let compositor = CompositorState::bind(&globals, &qh)
         .map_err(|e| format!("wl_compositor is missing: {e}"))?;
@@ -504,6 +508,8 @@ fn run(options: Options) -> Result<(), String> {
         modifiers: Modifiers::default(),
         font: None,
         load: Some(load),
+        label_font: None,
+        label_load: Some(label_load),
         transcript: Transcript::default(),
         input: Input::default(),
         question: None,
@@ -1209,6 +1215,12 @@ pub fn thumb_ink(held: bool, elapsed_ms: u128) -> f32 {
 /// what kitty, whose row is the same, ships.
 pub const NOTCH_ROWS: i64 = 5;
 
+/// What the indicator's multiplier is set at, as a share of the panel's own text size.
+/// A number the size of the answer would be a line of the answer on the right edge;
+/// at three fifths its glyphs are shorter than half a row, which is what keeps the
+/// reader's lines reading as they did.
+pub const LABEL_SHARE: f32 = 0.6;
+
 /// The unit a wheel's `absolute` axis distance is measured in: one notch is fifteen
 /// of them (`value120` over eight), which is what a compositor that fills in neither
 /// of the two step counts still sends for a turned wheel.
@@ -1602,6 +1614,10 @@ struct State {
     modifiers: Modifiers,
     font: Option<PanelFont>,
     load: Option<font::FontLoad>,
+    /// The face the indicator's multiplier is set in, and its load: a size below the
+    /// panel's own, so a number on the right edge is a mark rather than a line.
+    label_font: Option<PanelFont>,
+    label_load: Option<font::FontLoad>,
     transcript: Transcript,
     input: Input,
     highlight: usize,
@@ -1836,6 +1852,11 @@ impl State {
         let font = load
             .join()
             .map_err(|_| "the font thread died".to_string())??;
+        // The indicator's face is a bonus: it was read on its own thread, and a machine
+        // that lost it loses the number, not the panel.
+        if let Some(load) = self.label_load.take() {
+            self.label_font = load.join().ok().and_then(Result::ok);
+        }
         self.viewport = Viewport::new(panel::transcript_px(
             self.height * self.scale,
             &font,
@@ -1864,6 +1885,9 @@ impl State {
         // shortcut: the face is read on the event loop, a few ms on a keypress; doing it
         // on a thread would draw the old metrics at the new bar height for a frame.
         font::resize(next);
+        // The indicator's own face follows the text's size; losing it costs the number,
+        // not the panel.
+        self.label_font = PanelFont::load(self.face_size() * LABEL_SHARE).ok();
         self.font = Some(font);
         self.rewrap();
         self.apply_size();
@@ -2686,7 +2710,10 @@ impl State {
             // dropped and the indicator stops asking for frames.
             self.thumb_at = None;
         }
-        let burst = self.burst_now();
+        let burst = match (self.burst_now(), self.label_font.as_ref()) {
+            (factor, Some(font)) if factor > 1.0 => Some(panel::Burst { factor, font }),
+            _ => None,
+        };
         let stride = w as i32 * 4;
         let label = self.mode_label();
         let hint = self.mode_hint();

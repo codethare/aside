@@ -290,9 +290,9 @@ pub fn draw(
     head: Option<f32>,
     // How strongly the scroll indicator is drawn: 0 leaves it off entirely.
     thumb: f32,
-    // The burst's multiplier as it stands: above one, the indicator is a capsule
-    // carrying it instead of a strip.
-    burst: f32,
+    // The burst's multiplier and the face it is set in: above one, the indicator
+    // carries the number on the strip.
+    burst: Option<Burst<'_>>,
     scale: u32,
 ) {
     let s = scale.max(1);
@@ -423,47 +423,38 @@ pub fn draw(
             render::scroll_thumb(track_y, track_h, viewport.height, total, viewport.top)
     {
         let ink = render::dim(render::LABEL_ACCENT, thumb);
-        if burst > 1.0 {
-            // A burst grows the strip into a capsule with its multiplier on it: in the
-            // thumb's own place, so the position still reads off it, and as wide as its
-            // own number, so the label is never cut.
-            let label = burst_label(burst);
-            let pad = 8 * s;
-            let text_w = render::measure(font, &label, panel.w as f32).ceil() as u32;
-            let cap_h = bar_h.max(th);
-            let cap_w = text_w + 2 * pad;
-            let cap_x = (panel.x + panel.w).saturating_sub(4 * s + cap_w);
-            let cap_y = ty
-                .min((track_y + track_h).saturating_sub(cap_h))
-                .max(track_y);
-            let pill = render::Panel {
-                x: cap_x,
-                y: cap_y,
-                w: cap_w,
-                h: cap_h,
-                r: cap_h / 2,
-            };
-            render::fill(buf, w, &pill, ink, cap_y..cap_y + cap_h);
-            // One row of text, centred in the capsule: the baseline a row of that
-            // height would have.
-            let text_y = cap_y + (cap_h - bar_h) / 2;
+        let tw = 3 * s;
+        let tx = panel.x + panel.w - (crate::PAD * s + tw) / 2;
+        render::rect(buf, w, h, tx, ty, tw, th, ink);
+        if let Some(burst) = burst.filter(|b| b.factor > 1.0) {
+            // The multiplier is written on the strip: centred on the strip's own column
+            // and on the thumb's middle, in a face smaller than the answer's, so the
+            // number belongs to the indicator and cannot be read as a line of text.
+            let label = burst_label(burst.factor);
+            let text_w = render::measure(burst.font, &label, panel.w as f32).ceil() as u32;
+            let row = burst.font.row_h;
+            // Centred on the strip, but never past the card's right edge and never off
+            // its rows: a mark on the right edge stays on the card.
+            let x = (tx + tw / 2)
+                .saturating_sub(text_w / 2)
+                .min((panel.x + panel.w).saturating_sub(2 * s + text_w))
+                .max(panel.x);
+            let y = (ty + th / 2)
+                .saturating_sub(row / 2)
+                .clamp(track_y, (track_y + track_h).saturating_sub(row));
             render::draw_text(
                 buf,
                 w,
                 h,
-                font,
-                (cap_x + pad) as f32,
-                render::row_baseline(font, text_y),
+                burst.font,
+                x as f32,
+                render::row_baseline(burst.font, y),
                 &label,
-                render::FG_NORMAL,
+                render::dim(render::FG_NORMAL, thumb),
                 text_w as f32 + 1.0,
-                cap_y..cap_y + cap_h,
+                y..y + row,
                 aa,
             );
-        } else {
-            let tw = 3 * s;
-            let tx = panel.x + panel.w - (crate::PAD * s + tw) / 2;
-            render::rect(buf, w, h, tx, ty, tw, th, ink);
         }
     }
 
@@ -1188,6 +1179,15 @@ pub fn burst_label(factor: f32) -> String {
     }
 }
 
+/// The burst's multiplier as the indicator carries it: the factor, and the smaller
+/// face it is set in so a number on the right edge cannot read as a line of the
+/// answer.
+#[derive(Clone, Copy)]
+pub struct Burst<'a> {
+    pub factor: f32,
+    pub font: &'a PanelFont,
+}
+
 /// Replies height a panel of `h` buffer pixels can show above its bar, in buffer
 /// pixels: the rows the spec caps, expressed where the painter needs it.
 pub fn transcript_px(h: u32, font: &PanelFont, scale: u32) -> u32 {
@@ -1275,13 +1275,19 @@ mod tests {
             look,
             head,
             thumb,
-            1.0,
+            None,
             scale,
         );
     }
 
     fn font() -> PanelFont {
         PanelFont::load(crate::font::SIZE).expect("system font available")
+    }
+
+    /// The face the indicator's multiplier is set in: the panel's size times the share
+    /// the panel itself uses, so what a frame shows is what the session draws.
+    fn small() -> PanelFont {
+        PanelFont::load(crate::font::SIZE * crate::LABEL_SHARE).expect("system font available")
     }
 
     fn scene(font: &PanelFont, w: f32) -> Scene {
@@ -1359,7 +1365,7 @@ mod tests {
     }
 
     fn paint_highlighted(scene: &Scene, w: u32, h: u32, marked: Option<usize>) -> Vec<u8> {
-        paint_with(scene, w, h, marked, 0.0, 1.0)
+        paint_with(scene, w, h, marked, 0.0, None)
     }
 
     /// One frame with the scroll indicator at `thumb` strength and, when `burst` is
@@ -1372,9 +1378,14 @@ mod tests {
         h: u32,
         marked: Option<usize>,
         thumb: f32,
-        burst: f32,
+        burst: Option<f32>,
     ) -> Vec<u8> {
         let f = font();
+        let label = small();
+        let burst = burst.map(|factor| Burst {
+            factor,
+            font: &label,
+        });
         let (bw, bh) = frame(w, h);
         let mut buf = vec![0u8; (bw * bh * 4) as usize];
         super::draw(
@@ -2811,7 +2822,7 @@ mod tests {
         scene.viewport = Viewport::new(2 * f.row_h);
         let (w, h) = (500u32, height_for(2 * f.row_h, &f, 1));
         let (bw, _) = frame(w, h);
-        let buf = paint_with(&scene, w, h, None, 1.0, 1.0);
+        let buf = paint_with(&scene, w, h, None, 1.0, None);
         let tw = 3;
         let tx = w - (crate::PAD + tw) / 2;
         assert_eq!(
@@ -2856,7 +2867,7 @@ mod tests {
         scene.viewport = Viewport::new(2 * f.row_h);
         let (w, h) = (500u32, height_for(2 * f.row_h, &f, 1));
         let (bw, bh) = frame(w, h);
-        let buf = paint_with(&scene, w, h, None, 1.0, 1.0);
+        let buf = paint_with(&scene, w, h, None, 1.0, None);
         let (left, right) = scroll_column(bw, 1);
         let (top, tall) = scroll_track(bh, f.row_h, 1).expect("a replies card to draw on");
         // The column is the padding and nothing else: it starts where the rows wrap
@@ -2893,11 +2904,11 @@ mod tests {
         assert!(seen > 0, "nothing was drawn where the pointer grabs");
     }
 
-    /// While a burst accelerates, the indicator is a capsule carrying its multiplier:
-    /// in the strip's own place, as wide as its own number, and rounded rather than
-    /// boxed, with the number drawn inside it.
+    /// A burst writes the multiplier on the strip: the strip keeps its 3 px and its
+    /// length, the number is set over it at the thumb's middle, and its glyphs are
+    /// shorter than a row of the answer.
     #[test]
-    fn a_burst_turns_the_indicator_into_a_capsule_with_its_multiplier() {
+    fn a_burst_writes_the_multiplier_on_the_strip() {
         let f = font();
         let mut scene = scene(&f, 300.0);
         scene.transcript.ask("and at dusk?", &f);
@@ -2912,7 +2923,17 @@ mod tests {
         scene.viewport = Viewport::new(2 * f.row_h);
         let (w, h) = (500u32, height_for(2 * f.row_h, &f, 1));
         let (bw, bh) = frame(w, h);
-        let ink = |buf: &Vec<u8>| -> Vec<(u32, u32)> {
+        let strip = paint_with(&scene, w, h, None, 1.0, None);
+        let burst = paint_with(&scene, w, h, None, 1.0, Some(2.5));
+        // Nothing is drawn for a burst of one step: the strip alone, byte for byte.
+        assert_eq!(
+            strip,
+            paint_with(&scene, w, h, None, 1.0, Some(1.0)),
+            "one step is one step"
+        );
+        // The strip's own geometry is untouched by the number: the same three columns,
+        // over the same rows.
+        let accent = |buf: &Vec<u8>| -> Vec<(u32, u32)> {
             (0..bw)
                 .flat_map(|x| (0..bh).map(move |y| (x, y)))
                 .filter(|&(x, y)| {
@@ -2920,64 +2941,99 @@ mod tests {
                 })
                 .collect()
         };
-        let span = |v: &Vec<(u32, u32)>| -> (u32, u32, u32) {
-            let (x0, x1) = (
-                v.iter().map(|p| p.0).min().expect("ink"),
-                v.iter().map(|p| p.0).max().expect("ink"),
-            );
-            let (y0, y1) = (
+        let columns = |v: &Vec<(u32, u32)>| -> Vec<u32> {
+            let mut xs: Vec<u32> = v.iter().map(|p| p.0).collect();
+            xs.sort_unstable();
+            xs.dedup();
+            xs
+        };
+        let rows = |v: &Vec<(u32, u32)>| -> (u32, u32) {
+            (
                 v.iter().map(|p| p.1).min().expect("ink"),
                 v.iter().map(|p| p.1).max().expect("ink"),
-            );
-            (x1 - x0 + 1, y0, y1)
+            )
         };
-        let strip = paint_with(&scene, w, h, None, 1.0, 1.0);
-        let capsule = paint_with(&scene, w, h, None, 1.0, 2.5);
-        let (a, b) = (ink(&strip), ink(&capsule));
-        let ((strip_w, _, _), (capsule_w, y0, y1)) = (span(&a), span(&b));
-        assert_eq!(strip_w, 3, "without a burst it is still the 3 px strip");
-        assert!(
-            capsule_w > 20,
-            "a capsule is as wide as its number: {capsule_w} px"
+        assert_eq!(columns(&accent(&strip)).len(), 3, "a strip is 3 px wide");
+        assert_eq!(
+            columns(&accent(&burst)),
+            columns(&accent(&strip)),
+            "and a burst does not widen it"
         );
-        // Rounded, not a box: no ink at its own top-left corner, and its left edge is
-        // filled at the middle of its height.
-        let x0 = b.iter().map(|p| p.0).min().expect("ink");
-        let mid = (y0 + y1) / 2;
-        assert!(
-            !b.contains(&(x0, y0)),
-            "a capsule has no corner at its top left"
+        assert_eq!(
+            rows(&accent(&burst)),
+            rows(&accent(&strip)),
+            "nor lengthen it"
         );
-        assert!(
-            b.contains(&(x0, mid)),
-            "but its left edge is filled half way down"
-        );
-        // The multiplier is drawn inside it: pixels of the capsule that are not its
-        // own fill.
-        let glyphs = (x0..x0 + capsule_w)
-            .flat_map(|x| (y0..=y1).map(move |y| (x, y)))
+        // What the burst adds is the number: pixels that were not there before, inside
+        // the card's rows, one small row tall rather than a line of the answer.
+        let changed: Vec<(u32, u32)> = (0..bw)
+            .flat_map(|x| (0..bh).map(move |y| (x, y)))
             .filter(|&(x, y)| {
-                capsule[((y * bw + x) * 4) as usize..][..3] != render::LABEL_ACCENT[..3]
+                strip[((y * bw + x) * 4) as usize..][..4]
+                    != burst[((y * bw + x) * 4) as usize..][..4]
             })
-            .count();
-        assert!(
-            glyphs > 20,
-            "the number is drawn inside the capsule: {glyphs} px"
+            .collect();
+        assert!(!changed.is_empty(), "the multiplier was not drawn");
+        let (x0, x1) = (
+            changed.iter().map(|p| p.0).min().expect("ink"),
+            changed.iter().map(|p| p.0).max().expect("ink"),
         );
-        // A shorter number is a narrower capsule, so the label is measured rather than
-        // assumed: `2.5x` needs more room than `4x`.
-        let whole = paint_with(&scene, w, h, None, 1.0, 4.0);
-        let (whole_w, _, _) = span(&ink(&whole));
+        let (y0, y1) = (
+            changed.iter().map(|p| p.1).min().expect("ink"),
+            changed.iter().map(|p| p.1).max().expect("ink"),
+        );
+        let card_right = bw - render::SHADOW;
+        assert!(x1 < card_right, "the number ran past the card's right edge");
+        let (track_y, track_h) = scroll_track(bh, f.row_h, 1).expect("a replies card");
         assert!(
-            capsule_w > whole_w + 4,
-            "\"2.5x\" ({capsule_w} px) is wider than \"4x\" ({whole_w} px)"
+            y0 >= track_y && y1 < track_y + track_h,
+            "the number left the card's rows"
+        );
+        assert!(
+            y1 - y0 + 1 < f.row_h,
+            "the number is {} px tall against a {} px row of the answer",
+            y1 - y0 + 1,
+            f.row_h
+        );
+        // And it is the small face, not the answer's at a lower place: its ink is no
+        // taller than one line of that smaller face.
+        assert!(
+            y1 - y0 < small().line_h as u32,
+            "the number is {} px of ink against a {} px line at its own size",
+            y1 - y0 + 1,
+            small().line_h as u32
+        );
+        // Centred on the strip's own column: its width straddles the three columns.
+        let strip_x = &columns(&accent(&strip))[..];
+        assert!(
+            x0 < strip_x[0] && x1 > strip_x[2],
+            "the number is centred on the strip, not pushed to one side"
+        );
+        // And it is measured, not assumed: `2.5x` needs more room than `4x`.
+        let whole = paint_with(&scene, w, h, None, 1.0, Some(4.0));
+        let wide = |buf: &Vec<u8>| -> u32 {
+            let xs: Vec<u32> = (0..bw)
+                .flat_map(|x| (0..bh).map(move |y| (x, y)))
+                .filter(|&(x, y)| {
+                    strip[((y * bw + x) * 4) as usize..][..4]
+                        != buf[((y * bw + x) * 4) as usize..][..4]
+                })
+                .map(|p| p.0)
+                .collect();
+            xs.iter().max().expect("ink") - xs.iter().min().expect("ink") + 1
+        };
+        assert!(
+            x1 - x0 + 1 > wide(&whole) + 4,
+            "\"2.5x\" ({} px) is wider than \"4x\" ({} px): the label is measured",
+            x1 - x0 + 1,
+            wide(&whole)
         );
     }
 
-    /// The capsule's number: the multiplier, with one decimal only when it is not
+    /// The number the strip carries: the multiplier, with one decimal only when it is not
     /// whole, so the halves of the burst's ramp read as halves.
     #[test]
-    fn the_capsule_says_the_multiplier() {
+    fn the_strip_says_the_multiplier() {
         assert_eq!(burst_label(1.0), "1x");
         assert_eq!(burst_label(1.5), "1.5x");
         assert_eq!(burst_label(2.0), "2x");

@@ -129,9 +129,10 @@ is moving and then fades out of the way. It can be dragged: a press anywhere in 
 card's right 16 px padding column takes hold of it — where it was pressed if that
 was on the thumb, the thumb's middle if it was on the track — and moving carries the
 view with it, from the transcript's first line to its last. Held, it stays at full
-ink, however long the button is down. While a burst accelerates, that strip grows
-into a capsule in its own place, carrying the multiplier — `1.5x`, `2x`, up to `4x`
-— and is a strip again 400 ms after the last notch. Holding the
+ink, however long the button is down. While a burst accelerates, that strip carries
+the multiplier in small type on its own column — `1.5x`, `2x`, up to `4x` — set
+smaller than the answer's text, and the number goes 400 ms after the last notch while
+the strip fades on its own clock. Holding the
 left button on the bar and moving drags the panel, in both axes, from the first
 motion; it stays on the output, keeps its size, and where it was is never written
 down. Dragging across the replies selects whole lines instead — press on a line,
