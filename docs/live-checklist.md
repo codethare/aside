@@ -125,7 +125,11 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    rows. One two-finger slide follows the fingers exactly however fast it is; three
    quick flicks in a row each go farther than the one before. A 3 px
    indicator on the card's right edge comes up with the scroll, holds a moment, and
-   fades out about a second after you stop; it is not on the card at rest. Over the
+   fades out about a second after you stop; it is not on the card at rest. Spin fast
+   enough for the burst and that strip becomes a capsule in its place reading `1.5x`,
+   `2x`, on up to `4x`, and it is the plain strip again 400 ms after the last notch
+   while the strip itself fades on its own clock. One notch, or one slide, is only
+   ever the strip. Over the
    bar — its first row and its last — and in the gap just above it, nothing scrolls;
    with an answer streaming, rest the pointer there and flick: the newest line stays
    in view and stays in view when the answer ends. Mid-scroll, no two lines ever

@@ -290,6 +290,9 @@ pub fn draw(
     head: Option<f32>,
     // How strongly the scroll indicator is drawn: 0 leaves it off entirely.
     thumb: f32,
+    // The burst's multiplier as it stands: above one, the indicator is a capsule
+    // carrying it instead of a strip.
+    burst: f32,
     scale: u32,
 ) {
     let s = scale.max(1);
@@ -419,10 +422,49 @@ pub fn draw(
         && let Some((ty, th)) =
             render::scroll_thumb(track_y, track_h, viewport.height, total, viewport.top)
     {
-        let tw = 3 * s;
-        let tx = panel.x + panel.w - (crate::PAD * s + tw) / 2;
         let ink = render::dim(render::LABEL_ACCENT, thumb);
-        render::rect(buf, w, h, tx, ty, tw, th, ink);
+        if burst > 1.0 {
+            // A burst grows the strip into a capsule with its multiplier on it: in the
+            // thumb's own place, so the position still reads off it, and as wide as its
+            // own number, so the label is never cut.
+            let label = burst_label(burst);
+            let pad = 8 * s;
+            let text_w = render::measure(font, &label, panel.w as f32).ceil() as u32;
+            let cap_h = bar_h.max(th);
+            let cap_w = text_w + 2 * pad;
+            let cap_x = (panel.x + panel.w).saturating_sub(4 * s + cap_w);
+            let cap_y = ty
+                .min((track_y + track_h).saturating_sub(cap_h))
+                .max(track_y);
+            let pill = render::Panel {
+                x: cap_x,
+                y: cap_y,
+                w: cap_w,
+                h: cap_h,
+                r: cap_h / 2,
+            };
+            render::fill(buf, w, &pill, ink, cap_y..cap_y + cap_h);
+            // One row of text, centred in the capsule: the baseline a row of that
+            // height would have.
+            let text_y = cap_y + (cap_h - bar_h) / 2;
+            render::draw_text(
+                buf,
+                w,
+                h,
+                font,
+                (cap_x + pad) as f32,
+                render::row_baseline(font, text_y),
+                &label,
+                render::FG_NORMAL,
+                text_w as f32 + 1.0,
+                cap_y..cap_y + cap_h,
+                aa,
+            );
+        } else {
+            let tw = 3 * s;
+            let tx = panel.x + panel.w - (crate::PAD * s + tw) / 2;
+            render::rect(buf, w, h, tx, ty, tw, th, ink);
+        }
     }
 
     draw_bar(
@@ -1136,6 +1178,16 @@ pub fn scroll_column(w: u32, scale: u32) -> (u32, u32) {
     (right.saturating_sub(crate::PAD * s), right)
 }
 
+/// The multiplier a capsule shows: one decimal only when it is not whole, so the two
+/// halves of a burst's ramp read as `1.5x` and the whole ones as `4x`.
+pub fn burst_label(factor: f32) -> String {
+    if (factor - factor.round()).abs() < 0.05 {
+        format!("{}x", factor.round() as i32)
+    } else {
+        format!("{factor:.1}x")
+    }
+}
+
 /// Replies height a panel of `h` buffer pixels can show above its bar, in buffer
 /// pixels: the rows the spec caps, expressed where the painter needs it.
 pub fn transcript_px(h: u32, font: &PanelFont, scale: u32) -> u32 {
@@ -1178,6 +1230,55 @@ pub fn to_ppm(buf: &[u8], w: u32, h: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The panel's own `draw` with no burst, so every frame here but the capsule's own
+    /// test is the strip: a burst is one argument the rest of the suite does not name.
+    #[allow(clippy::too_many_arguments)] // the same list the painter itself takes
+    fn draw(
+        buf: &mut [u8],
+        w: u32,
+        h: u32,
+        font: &PanelFont,
+        transcript: &Transcript,
+        input: &Input,
+        pending: Option<Pending<'_>>,
+        viewport: &Viewport,
+        selection: Option<Selection>,
+        highlight: Option<usize>,
+        cursor: Option<(usize, usize)>,
+        caret_visible: bool,
+        preedit: &str,
+        hint: &str,
+        label: &str,
+        look: Look,
+        head: Option<f32>,
+        thumb: f32,
+        scale: u32,
+    ) {
+        #[allow(clippy::too_many_arguments)]
+        super::draw(
+            buf,
+            w,
+            h,
+            font,
+            transcript,
+            input,
+            pending,
+            viewport,
+            selection,
+            highlight,
+            cursor,
+            caret_visible,
+            preedit,
+            hint,
+            label,
+            look,
+            head,
+            thumb,
+            1.0,
+            scale,
+        );
+    }
 
     fn font() -> PanelFont {
         PanelFont::load(crate::font::SIZE).expect("system font available")
@@ -1258,16 +1359,25 @@ mod tests {
     }
 
     fn paint_highlighted(scene: &Scene, w: u32, h: u32, marked: Option<usize>) -> Vec<u8> {
-        paint_with(scene, w, h, marked, 0.0)
+        paint_with(scene, w, h, marked, 0.0, 1.0)
     }
 
-    /// One frame with the scroll indicator at `thumb` strength: 0 is the indicator
-    /// this panel draws at rest, and what every other frame here holds.
-    fn paint_with(scene: &Scene, w: u32, h: u32, marked: Option<usize>, thumb: f32) -> Vec<u8> {
+    /// One frame with the scroll indicator at `thumb` strength and, when `burst` is
+    /// above one, as the capsule that carries it. 0 is the indicator a panel at rest
+    /// draws, and what every other frame here holds.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_with(
+        scene: &Scene,
+        w: u32,
+        h: u32,
+        marked: Option<usize>,
+        thumb: f32,
+        burst: f32,
+    ) -> Vec<u8> {
         let f = font();
         let (bw, bh) = frame(w, h);
         let mut buf = vec![0u8; (bw * bh * 4) as usize];
-        draw(
+        super::draw(
             &mut buf,
             bw,
             bh,
@@ -1286,6 +1396,7 @@ mod tests {
             Look::settled(State::Replies),
             None,
             thumb,
+            burst,
             1,
         );
         buf
@@ -2700,7 +2811,7 @@ mod tests {
         scene.viewport = Viewport::new(2 * f.row_h);
         let (w, h) = (500u32, height_for(2 * f.row_h, &f, 1));
         let (bw, _) = frame(w, h);
-        let buf = paint_with(&scene, w, h, None, 1.0);
+        let buf = paint_with(&scene, w, h, None, 1.0, 1.0);
         let tw = 3;
         let tx = w - (crate::PAD + tw) / 2;
         assert_eq!(
@@ -2745,7 +2856,7 @@ mod tests {
         scene.viewport = Viewport::new(2 * f.row_h);
         let (w, h) = (500u32, height_for(2 * f.row_h, &f, 1));
         let (bw, bh) = frame(w, h);
-        let buf = paint_with(&scene, w, h, None, 1.0);
+        let buf = paint_with(&scene, w, h, None, 1.0, 1.0);
         let (left, right) = scroll_column(bw, 1);
         let (top, tall) = scroll_track(bh, f.row_h, 1).expect("a replies card to draw on");
         // The column is the padding and nothing else: it starts where the rows wrap
@@ -2780,6 +2891,99 @@ mod tests {
         xs.dedup();
         assert_eq!(xs.len(), 3, "the indicator is 3 px wide: {xs:?}");
         assert!(seen > 0, "nothing was drawn where the pointer grabs");
+    }
+
+    /// While a burst accelerates, the indicator is a capsule carrying its multiplier:
+    /// in the strip's own place, as wide as its own number, and rounded rather than
+    /// boxed, with the number drawn inside it.
+    #[test]
+    fn a_burst_turns_the_indicator_into_a_capsule_with_its_multiplier() {
+        let f = font();
+        let mut scene = scene(&f, 300.0);
+        scene.transcript.ask("and at dusk?", &f);
+        scene.transcript.delta(
+            " The same scattering leaves only the long wavelengths at dusk, which is\
+             why the sky reads red, and why the sea reads grey, and why a fire reads\
+             orange from a mile away.",
+            &f,
+            300.0,
+        );
+        scene.transcript.finish_answer(&f);
+        scene.viewport = Viewport::new(2 * f.row_h);
+        let (w, h) = (500u32, height_for(2 * f.row_h, &f, 1));
+        let (bw, bh) = frame(w, h);
+        let ink = |buf: &Vec<u8>| -> Vec<(u32, u32)> {
+            (0..bw)
+                .flat_map(|x| (0..bh).map(move |y| (x, y)))
+                .filter(|&(x, y)| {
+                    buf[((y * bw + x) * 4) as usize..][..3] == render::LABEL_ACCENT[..3]
+                })
+                .collect()
+        };
+        let span = |v: &Vec<(u32, u32)>| -> (u32, u32, u32) {
+            let (x0, x1) = (
+                v.iter().map(|p| p.0).min().expect("ink"),
+                v.iter().map(|p| p.0).max().expect("ink"),
+            );
+            let (y0, y1) = (
+                v.iter().map(|p| p.1).min().expect("ink"),
+                v.iter().map(|p| p.1).max().expect("ink"),
+            );
+            (x1 - x0 + 1, y0, y1)
+        };
+        let strip = paint_with(&scene, w, h, None, 1.0, 1.0);
+        let capsule = paint_with(&scene, w, h, None, 1.0, 2.5);
+        let (a, b) = (ink(&strip), ink(&capsule));
+        let ((strip_w, _, _), (capsule_w, y0, y1)) = (span(&a), span(&b));
+        assert_eq!(strip_w, 3, "without a burst it is still the 3 px strip");
+        assert!(
+            capsule_w > 20,
+            "a capsule is as wide as its number: {capsule_w} px"
+        );
+        // Rounded, not a box: no ink at its own top-left corner, and its left edge is
+        // filled at the middle of its height.
+        let x0 = b.iter().map(|p| p.0).min().expect("ink");
+        let mid = (y0 + y1) / 2;
+        assert!(
+            !b.contains(&(x0, y0)),
+            "a capsule has no corner at its top left"
+        );
+        assert!(
+            b.contains(&(x0, mid)),
+            "but its left edge is filled half way down"
+        );
+        // The multiplier is drawn inside it: pixels of the capsule that are not its
+        // own fill.
+        let glyphs = (x0..x0 + capsule_w)
+            .flat_map(|x| (y0..=y1).map(move |y| (x, y)))
+            .filter(|&(x, y)| {
+                capsule[((y * bw + x) * 4) as usize..][..3] != render::LABEL_ACCENT[..3]
+            })
+            .count();
+        assert!(
+            glyphs > 20,
+            "the number is drawn inside the capsule: {glyphs} px"
+        );
+        // A shorter number is a narrower capsule, so the label is measured rather than
+        // assumed: `2.5x` needs more room than `4x`.
+        let whole = paint_with(&scene, w, h, None, 1.0, 4.0);
+        let (whole_w, _, _) = span(&ink(&whole));
+        assert!(
+            capsule_w > whole_w + 4,
+            "\"2.5x\" ({capsule_w} px) is wider than \"4x\" ({whole_w} px)"
+        );
+    }
+
+    /// The capsule's number: the multiplier, with one decimal only when it is not
+    /// whole, so the halves of the burst's ramp read as halves.
+    #[test]
+    fn the_capsule_says_the_multiplier() {
+        assert_eq!(burst_label(1.0), "1x");
+        assert_eq!(burst_label(1.5), "1.5x");
+        assert_eq!(burst_label(2.0), "2x");
+        assert_eq!(burst_label(2.5), "2.5x");
+        assert_eq!(burst_label(3.5), "3.5x");
+        assert_eq!(burst_label(4.0), "4x");
     }
 
     /// The working light runs the bar's rim: the lit stretch of the edge is the one

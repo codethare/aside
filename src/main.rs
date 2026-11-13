@@ -372,6 +372,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         panel::Look::settled(panel::State::Replies),
         None,
         0.0,
+        1.0,
         1,
     );
     std::fs::write(path, panel::to_ppm(&buf, w, h)).map_err(|e| format!("{}: {e}", path.display()))
@@ -1284,6 +1285,16 @@ pub fn burst_factor(steps: u32) -> f64 {
     (1.0 + BURST_GAIN * steps.saturating_sub(1) as f64).min(BURST_MAX)
 }
 
+/// The burst's multiplier as it stands `since_ms` after its last step: one once the
+/// burst's own window has passed without another, which is what turns the indicator's
+/// capsule back into a strip.
+pub fn live_factor(steps: u32, since_ms: Option<u128>) -> f32 {
+    match since_ms {
+        Some(ms) if ms < BURST_MS => burst_factor(steps) as f32,
+        _ => 1.0,
+    }
+}
+
 /// Whether an axis event asks for any distance at all, and so whether it is a step of
 /// a burst. The toolkit delivers a source notice and a stop notice as axis events with
 /// nothing in them, and a notch that counted those would accelerate twice as fast as
@@ -1740,6 +1751,15 @@ impl State {
         let held = self.thumb_grab.is_some();
         self.thumb_at
             .map_or(0.0, |at| thumb_ink(held, at.elapsed().as_millis()))
+    }
+
+    /// The burst's multiplier as it stands now: what the indicator carries while it is
+    /// a capsule, and one while it is a strip.
+    fn burst_now(&self) -> f32 {
+        live_factor(
+            self.burst.steps,
+            self.burst.last.map(|at| at.elapsed().as_millis()),
+        )
     }
 
     /// How long until the scroll indicator can look different: `None` when it is
@@ -2666,6 +2686,7 @@ impl State {
             // dropped and the indicator stops asking for frames.
             self.thumb_at = None;
         }
+        let burst = self.burst_now();
         let stride = w as i32 * 4;
         let label = self.mode_label();
         let hint = self.mode_hint();
@@ -2717,6 +2738,7 @@ impl State {
             look,
             head,
             thumb,
+            burst,
             s,
         );
         self.layer
@@ -4356,6 +4378,22 @@ mod tests {
         assert_eq!(burst.take(at(1_500), false), 3);
         // A pause longer than the burst's own window starts it over.
         assert_eq!(burst.take(at(2_500), false), 1);
+    }
+
+    /// The multiplier as it stands: what the indicator carries while it is a capsule,
+    /// and one — the plain strip — once the burst's own window has passed.
+    #[test]
+    fn the_multiplier_stands_only_while_the_burst_does() {
+        assert_eq!(live_factor(7, Some(0)), 4.0, "just after a step");
+        assert_eq!(live_factor(3, Some(149)), 2.0, "still inside the window");
+        assert_eq!(live_factor(3, Some(BURST_MS)), 1.0, "the window has passed");
+        assert_eq!(
+            live_factor(7, Some(0)),
+            BURST_MAX as f32,
+            "and no more than the cap"
+        );
+        assert_eq!(live_factor(7, None), 1.0, "no step at all: a strip");
+        assert_eq!(live_factor(1, Some(10)), 1.0, "one step is one step");
     }
 
     /// The drag is the painter's mapping read the other way: the thumb's top on the
