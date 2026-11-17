@@ -99,6 +99,25 @@ only while its surface holds keyboard focus.
 - **WHEN** the input method delivers a pre-edit, a commit or a `done`
 - **THEN** the panel leaves subsequent text to it and does not also insert the raw key
 
+### Requirement: The input caret blinks while the line can be typed on
+
+While the panel holds the keyboard and the bar is an input line, the caret SHALL
+blink: lit for 530 ms, dark for 530 ms, repeating — the insertion-point period
+Windows and macOS use. It MUST be lit when the panel takes the keyboard, and the
+panel MUST repaint only when the blink changes state. It MUST NOT draw the caret
+at all when the panel does not hold the keyboard, while the bar shows a question
+that is not being typed, or in a mode that has taken the bar.
+
+#### Scenario: An idle panel blinks
+
+- **WHEN** the panel holds the keyboard and the bar is the input line
+- **THEN** the caret is lit for 530 ms and dark for 530 ms, and the panel paints a frame only when it changes
+
+#### Scenario: An unfocused panel has no caret
+
+- **WHEN** the keyboard goes elsewhere
+- **THEN** the caret is not drawn and no frame is scheduled for it
+
 ### Requirement: Turns accumulate in one transcript
 
 The panel SHALL keep every turn of the current run in one ordered transcript, and

@@ -502,6 +502,7 @@ fn run(options: Options) -> Result<(), String> {
         panel_output: None,
         painted: false,
         dirty: true,
+        caret_drawn: false,
         exit: false,
         layer,
         keyboard: None,
@@ -965,6 +966,21 @@ fn bar_pending<'a>(
 
 fn caret_shown(mode: Mode, keyboard: bool) -> bool {
     mode == Mode::Typing && keyboard
+}
+
+/// The caret's half-period: 530 ms lit, then 530 ms dark. That is the insertion-point
+/// default Windows and macOS ship, which is what most editors copy.
+const CARET_BLINK: Duration = Duration::from_millis(530);
+
+/// Whether the caret is lit `age` after the panel took the keyboard. It opens lit: a
+/// panel that has just appeared should show a caret at once, not half a period later.
+fn caret_lit(age: Duration) -> bool {
+    (age.as_millis() / CARET_BLINK.as_millis()).is_multiple_of(2)
+}
+
+/// How long until the caret's next change of state.
+fn caret_flip_in(age: Duration) -> Duration {
+    CARET_BLINK - Duration::from_millis((age.as_millis() % CARET_BLINK.as_millis()) as u64)
 }
 
 /// How long a keyboard has to stay before it counts as the panel's own. river focuses a
@@ -1545,6 +1561,9 @@ struct State {
     /// refused startup from a session that ended after the panel was on screen.
     painted: bool,
     dirty: bool,
+    /// Whether the last frame drew the caret, so a blink flip is the only thing that
+    /// makes the idle loop repaint for it.
+    caret_drawn: bool,
     exit: bool,
     layer: LayerSurface,
     /// Which of the three states the panel is in.
@@ -2024,7 +2043,21 @@ impl State {
                 self.copy_note_up().then_some(COPY_NOTE_WAKE),
                 self.light_in(),
                 self.thumb_in(),
+                self.caret_age().map(caret_flip_in),
             ],
+        )
+    }
+
+    /// How long a caret that the bar would draw has been up: `None` when the bar is not
+    /// a line being typed on. The blink's clock, anchored at the keyboard's arrival.
+    fn caret_age(&self) -> Option<Duration> {
+        if !caret_shown(self.mode, self.keys.held()) || self.question.is_some() {
+            return None;
+        }
+        Some(
+            self.keys
+                .since
+                .map_or(Duration::ZERO, |since| since.elapsed()),
         )
     }
 
@@ -2604,6 +2637,12 @@ impl State {
             // The blink is the only thing moving, so keep asking for frames.
             self.dirty = true;
         }
+        if let Some(age) = self.caret_age()
+            && caret_lit(age) != self.caret_drawn
+        {
+            // The caret's half-period ended: this is the frame that shows it.
+            self.dirty = true;
+        }
         if let Some(q) = self.question.as_ref() {
             // A question that is out is still scrolling, even when the answer has
             // started and stopped between two tokens.
@@ -2717,6 +2756,10 @@ impl State {
         let stride = w as i32 * 4;
         let label = self.mode_label();
         let hint = self.mode_hint();
+        // The caret's half of the blink is paint state, not a clock the painter owns: the
+        // loop compares this against the clock to know when the next frame must go out.
+        let caret = self.caret_age().is_some_and(caret_lit);
+        self.caret_drawn = caret;
 
         let buffer = match self.buffer.take() {
             Some(buffer) => buffer,
@@ -2756,9 +2799,9 @@ impl State {
             selection,
             Some(self.highlight),
             (self.mode == Mode::Copy).then_some(self.copy_cursor),
-            // The caret follows the keyboard, not the mode: a panel without it draws no
-            // caret, so an unfocused panel looks unfocused.
-            caret_shown(self.mode, self.keys.held()),
+            // The caret follows the keyboard, not the mode, and blinks: an unfocused
+            // panel draws none, so it cannot look focused.
+            caret,
             &self.ime.preedit,
             hint,
             label,
@@ -3891,6 +3934,26 @@ mod tests {
         );
         assert!(!caret_shown(Mode::Prefix, true));
         assert!(!caret_shown(Mode::Copy, true));
+    }
+
+    /// The caret blinks on the 530 ms half-period the platforms use, opening lit, and
+    /// names the exact deadline so the idle loop wakes for the flip and not before.
+    #[test]
+    fn the_caret_blinks_on_the_platform_half_period() {
+        assert!(caret_lit(Duration::ZERO), "it appears lit");
+        assert!(caret_lit(Duration::from_millis(529)));
+        assert!(!caret_lit(Duration::from_millis(530)));
+        assert!(!caret_lit(Duration::from_millis(1_059)));
+        assert!(caret_lit(Duration::from_millis(1_060)));
+        assert_eq!(
+            caret_flip_in(Duration::from_millis(100)),
+            Duration::from_millis(430)
+        );
+        assert_eq!(
+            caret_flip_in(CARET_BLINK),
+            CARET_BLINK,
+            "a flip boundary starts the next half-period whole"
+        );
     }
 
     /// A question is the bar's only in typing mode: the prefix and copy mode say what

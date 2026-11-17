@@ -117,3 +117,7 @@
 - [x] 16.4 Paint at every scale — verify: at output scale 2 the panel panicked (`attempt to subtract with overflow`, `panel.rs` rail height scaled a second time because `line_h` is already in buffer pixels) and nothing appeared; fixed, a test paints at 1×/2×/3× and fails with the panic when the fix is reverted, and a headless compositor at scale 1, 2 and 3 now stays up with the panel drawn
 - [x] 16.5 Never attach a buffer before the first configure — verify: reproduced against river, which ends the connection with `Protocol error 3 on object xdg_surface@11: xdg_surface has never been configured` after aside attached and committed a buffer 205 ms before any configure (sway tolerates it, which is why earlier runs passed); after the fix river logs zero protocol errors, sway shows `xdg_surface.configure` (serial 3) before the first `attach`, and `draw()` refuses to paint until `configured`
 - [x] 16.6 Report a compositor that never configures — verify: river sends no configure at all, so after the fix aside would wait forever; a 5 s deadline now reports `the compositor did not configure the window within 5s` and exits 1 (measured: exit 1 after 5 s), while sway still draws and stays up
+
+## 17. Blink the input caret
+
+- [x] 17.1 Blink the caret with a 530 ms lit and 530 ms dark half-period, awake only while the panel holds the keyboard and the bar is the input line — verify: unit tests pin the phase across the half-period boundaries and the next-flip deadline; the idle loop wakes at a flip, not every idle tick
