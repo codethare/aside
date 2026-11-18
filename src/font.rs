@@ -3,7 +3,7 @@
 //! without paying for the 19 MB CJK collection on the first frame.
 
 use skrifa::prelude::*;
-use std::cell::{Ref, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -90,8 +90,11 @@ pub struct PanelFont {
     /// startup latency the panel exists to avoid.
     faces: RefCell<Vec<FaceState>>,
     /// Paths for faces 1.., parallel to `faces`; the index stays stable so the
-    /// glyph cache keys stay valid across lazy loads.
-    chain: Vec<(PathBuf, u32)>,
+    /// glyph cache keys stay valid across lazy loads. Growable: the first glyph
+    /// no face covers appends the system's script faces once.
+    chain: RefCell<Vec<(PathBuf, u32)>>,
+    /// Whether the one system-fallback scan has run.
+    fallback_loaded: Cell<bool>,
     /// Pixel size (em height).
     pub size: f32,
     pub ascent_px: f32,
@@ -332,7 +335,8 @@ impl PanelFont {
             .collect();
         PanelFont {
             faces: RefCell::new(faces),
-            chain,
+            chain: RefCell::new(chain),
+            fallback_loaded: Cell::new(false),
             size,
             ascent_px,
             descent_px,
@@ -356,8 +360,8 @@ impl PanelFont {
         if unread {
             let read = i
                 .checked_sub(1)
-                .and_then(|k| self.chain.get(k))
-                .and_then(|(path, index)| read_face(path, *index));
+                .and_then(|k| self.chain.borrow().get(k).cloned())
+                .and_then(|(path, index)| read_face(&path, index));
             if let Some(slot) = self.faces.borrow_mut().get_mut(i) {
                 *slot = match read {
                     Some(font) => FaceState::Loaded(font),
@@ -395,17 +399,48 @@ impl PanelFont {
         if let Some(hit) = self.lookups.borrow().get(&ch) {
             return *hit;
         }
-        let found = (0..self.face_count()).find_map(|i| {
-            let face = self.face(i)?;
-            let font = face.font()?;
-            let (gid, advance) = face.glyph(&font, self.size, ch)?;
-            Some((i, gid, advance))
-        });
+        let mut found = self.walk_chain(ch);
+        if found.is_none() && self.load_system_fallback() {
+            // The newly appended script faces may cover it; a second miss is
+            // memoised like any other, and the scan never runs again.
+            found = self.walk_chain(ch);
+        }
         if self.lookups.borrow().len() >= LOOKUP_CACHE_CAP {
             self.lookups.borrow_mut().clear();
         }
         self.lookups.borrow_mut().insert(ch, found);
         found
+    }
+
+    /// The chain's answer for `ch`, without the fallback scan.
+    fn walk_chain(&self, ch: char) -> Option<GlyphLookup> {
+        (0..self.face_count()).find_map(|i| {
+            let face = self.face(i)?;
+            let font = face.font()?;
+            let (gid, advance) = face.glyph(&font, self.size, ch)?;
+            Some((i, gid, advance))
+        })
+    }
+
+    /// Append the system's script and emoji faces to the chain, once. Runs on the
+    /// first glyph no face covers, never at startup: the database scan reads every
+    /// installed font's header, and Latin text must not pay for it.
+    fn load_system_fallback(&self) -> bool {
+        if self.fallback_loaded.replace(true) {
+            return false;
+        }
+        let mut chain = self.chain.borrow_mut();
+        let mut faces = self.faces.borrow_mut();
+        let mut added = false;
+        for (path, index) in system_chain() {
+            if chain.iter().any(|(p, i)| *p == path && *i == index) {
+                continue;
+            }
+            chain.push((path, index));
+            faces.push(FaceState::Unread);
+            added = true;
+        }
+        added
     }
 
     /// True if any face in the chain (primary first) has a glyph for `ch`.
@@ -566,6 +601,33 @@ fn system_chain() -> Vec<(PathBuf, u32)> {
             break;
         }
     }
+    // Script faces outside the Latin/CJK families. Only consulted after a glyph
+    // no face covers, and read lazily, so a Latin answer never pays for them.
+    const SCRIPTS: &[&str] = &[
+        "Noto Sans Devanagari",
+        "Noto Sans Bengali",
+        "Noto Sans Tamil",
+        "Noto Sans Telugu",
+        "Noto Sans Kannada",
+        "Noto Sans Malayalam",
+        "Noto Sans Gujarati",
+        "Noto Sans Gurmukhi",
+        "Noto Sans Oriya",
+        "Noto Sans Sinhala",
+        "Noto Sans Thai",
+        "Noto Sans Lao",
+        "Noto Sans Khmer",
+        "Noto Sans Myanmar",
+        "Noto Sans Ethiopic",
+        "Noto Sans Hebrew",
+        "Noto Sans Arabic",
+        "Noto Emoji",
+    ];
+    for fam in SCRIPTS {
+        if let Some(found) = query_path(&db, fam) {
+            out.push(found);
+        }
+    }
     if out.is_empty() {
         // Give up on family preference: just take the first face so the panel
         // still renders.
@@ -605,6 +667,26 @@ fn read_face(path: &Path, index: u32) -> Option<Face> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_system_fallback_is_appended_once_and_deduplicated() {
+        let m = PanelFont::load(SIZE).expect("system font available");
+        let before = m.face_count();
+        // Plane 16 private use: no text face maps it, so this is the miss that
+        // triggers the one system scan.
+        assert!(m.glyph('\u{10FFFD}').is_none());
+        let after = m.face_count();
+        assert!(after >= before);
+        assert!(m.glyph('\u{10FFFC}').is_none());
+        assert_eq!(m.face_count(), after, "the scan does not run twice");
+        let chain = m.chain.borrow();
+        for (i, entry) in chain.iter().enumerate() {
+            assert!(
+                !chain[..i].contains(entry),
+                "the chain has no duplicate face"
+            );
+        }
+    }
 
     #[test]
     fn the_cjk_face_is_not_read_before_a_cjk_glyph() {

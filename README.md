@@ -257,7 +257,9 @@ blocks in a monospace face, inline code, bold, italic, headings, lists, quotes,
 tables and the text of links — and everything outside it (task lists, raw HTML) is
 drawn as the characters the model sent. A table is drawn in the monospace face with
 its columns padded so they line up, and narrowed until it fits the card. There is no
-complex-script shaping.
+complex-script shaping. A character no installed face covers is drawn as a hollow
+box, and a tab keeps four spaces' width; the first such miss adds the system's
+script faces to the chain.
 
 ## Security
 

@@ -712,11 +712,28 @@ pub fn draw_text(
     };
     let bucket = |v: f32| ((v.fract() * BUCKETS_PER_PX) as u8).min(BUCKETS_PER_PX as u8 - 1);
     let canonical = |v: f32| (v.fract() * BUCKETS_PER_PX).floor() / BUCKETS_PER_PX;
+    let space = space_width(font);
     'ch: for ch in s.chars() {
-        // The chain answers in order (primary first), so CJK and anything else
-        // the primary lacks falls back to a system font.
+        // A tab is a fixed four-space stop in the layout and in the pen: no face
+        // maps U+0009, and dropping it would collapse the indentation it stands for.
+        if ch == '\t' {
+            let advance = space * 4.0;
+            if cx + advance > end {
+                break 'ch;
+            }
+            cx += advance;
+            continue;
+        }
         let Some((face_idx, gid, advance)) = font.glyph(ch) else {
-            continue; // no face in the chain has this glyph; skip it silently
+            // No face covers it, and the missing box below says so; skipping it
+            // would join the words on either side.
+            let advance = space;
+            if cx + advance > end {
+                break 'ch;
+            }
+            missing_box(buf, w, h, cx, baseline, font.line_h, advance, color, &rows);
+            cx += advance;
+            continue;
         };
         if cx + advance > end {
             break 'ch;
@@ -781,6 +798,52 @@ pub fn draw_text(
     cx
 }
 
+/// The advance of one space, the yardstick a tab and a missing box use.
+fn space_width(font: &crate::font::PanelFont) -> f32 {
+    font.glyph(' ')
+        .map_or(font.size * 0.5, |(_, _, advance)| advance)
+}
+
+/// A hollow box for a character no face covers: text around it keeps its place,
+/// and the reader sees that something arrived rather than a hole.
+#[allow(clippy::too_many_arguments)] // the pen, the box and the clip, like `rect`
+fn missing_box(
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    x: f32,
+    baseline: f32,
+    line_h: f32,
+    advance: f32,
+    color: Bgra,
+    rows: &std::ops::Range<u32>,
+) {
+    let bw = (advance * 0.6).round().max(1.0) as i64;
+    let x0 = x.round() as i64;
+    let bottom = baseline.round() as i64;
+    let top = (bottom - (line_h * 0.75).round() as i64).max(0);
+    let right = x0 + bw - 1;
+    let mut put = |px: i64, py: i64| {
+        if px < 0 || py < 0 || px >= w as i64 || py >= h as i64 || !rows.contains(&(py as u32)) {
+            return;
+        }
+        let at = ((py as u32 * w + px as u32) as usize) * 4;
+        blend_px(
+            &mut buf[at..at + 4],
+            [color[0], color[1], color[2]],
+            color[3] as u32,
+        );
+    };
+    for px in x0..=right {
+        put(px, top);
+        put(px, bottom);
+    }
+    for py in top..=bottom {
+        put(x0, py);
+        put(right, py);
+    }
+}
+
 /// Advance width of `s` under the same face-chain rules as `draw_text`, capped
 /// at `max_w`. The layout uses it to decide where a row must break.
 /// Width of `s` with no cap: what a selection's band is measured with.
@@ -813,14 +876,19 @@ pub(crate) fn char_at(font: &crate::font::PanelFont, s: &str, x: f32) -> usize {
 
 pub(crate) fn measure(font: &crate::font::PanelFont, s: &str, max_w: f32) -> f32 {
     let mut cx = 0.0;
+    let space = space_width(font);
     for ch in s.chars() {
-        let Some((_, _, adv)) = font.glyph(ch) else {
-            continue;
+        let advance = if ch == '\t' {
+            space * 4.0
+        } else {
+            // A missing character takes a space's width, exactly as `draw_text`
+            // draws its box, so the caret and a pointer land where the ink is.
+            font.glyph(ch).map_or(space, |(_, _, advance)| advance)
         };
-        if cx + adv > max_w {
+        if cx + advance > max_w {
             break;
         }
-        cx += adv;
+        cx += advance;
     }
     cx
 }
@@ -1071,6 +1139,79 @@ mod tests {
 
     fn has_ink(buf: &[u8], bg: Bgra) -> bool {
         buf.as_chunks::<4>().0.iter().any(|p| *p != bg)
+    }
+
+    #[test]
+    fn a_missing_character_draws_a_box_and_keeps_its_advance() {
+        let font = PanelFont::load(crate::font::SIZE).expect("system font available");
+        let text = format!("a{}b", '\u{10FFFD}');
+        let space = advance(&font, " ");
+        let expected = advance(&font, "a") + space + advance(&font, "b");
+        assert_eq!(
+            advance(&font, &text),
+            expected,
+            "the missing character takes the space's width"
+        );
+        let (w, h) = (400u32, font.row_h);
+        let mut buf = blank(w, h);
+        let pen = paint_text(&mut buf, w, h, &font, &text, Subpixel::Gray);
+        assert_eq!(
+            pen,
+            crate::PAD as f32 + expected,
+            "the pen ends where measure did"
+        );
+        let left = crate::PAD as f32 + advance(&font, "a");
+        let boxed = (left.ceil() as u32)..((left + space).floor() as u32);
+        assert!(
+            boxed
+                .clone()
+                .any(|x| (0..h).any(|y| buf[((y * w + x) * 4) as usize..][..4] != BG_PROMPT)),
+            "a hollow box sits where the character would be"
+        );
+    }
+
+    #[test]
+    fn a_missing_box_is_clipped_to_the_row_range() {
+        let font = PanelFont::load(crate::font::SIZE).expect("system font available");
+        let (w, h) = (100u32, font.row_h);
+        let background = |buf: &mut Vec<u8>| rect(buf, w, h, 0, 0, w, h, BG_PROMPT);
+        let mut control = blank(w, h);
+        background(&mut control);
+        let mut buf = blank(w, h);
+        background(&mut buf);
+        let pen = draw_text(
+            &mut buf,
+            w,
+            h,
+            &font,
+            crate::PAD as f32,
+            row_baseline(&font, 0),
+            "\u{10FFFD}",
+            FG_PROMPT,
+            10_000.0,
+            0..0, // a bar still unfolding upward shows none of its line
+            Subpixel::Gray,
+        );
+        assert!(pen > crate::PAD as f32, "the pen still moves");
+        assert_eq!(buf, control, "no pixel outside the allowed rows");
+    }
+
+    #[test]
+    fn a_tab_advances_four_spaces_and_draws_nothing() {
+        let font = PanelFont::load(crate::font::SIZE).expect("system font available");
+        let space = advance(&font, " ");
+        assert_eq!(advance(&font, "\t"), space * 4.0);
+        let (w, h) = (200u32, font.row_h);
+        let mut control = blank(w, h);
+        paint_text(&mut control, w, h, &font, "", Subpixel::Gray);
+        let mut buf = blank(w, h);
+        let pen = paint_text(&mut buf, w, h, &font, "\t", Subpixel::Gray);
+        assert_eq!(
+            pen,
+            crate::PAD as f32 + space * 4.0,
+            "the tab moves the pen"
+        );
+        assert_eq!(buf, control, "a tab draws no ink");
     }
 
     #[test]

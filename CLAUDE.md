@@ -110,7 +110,10 @@ change.
 
 ## Known limits
 
-- No complex-script shaping: Arabic, Devanagari and Thai render unshaped.
+- No complex-script shaping: Arabic, Devanagari and Thai are not shaped. A script
+  face is added on the first character the chain cannot draw; a character no
+  installed face covers is a hollow box, never a silent hole. A tab is four spaces
+  wide.
 - No `wp_fractional_scale_v1`; scale is whatever integer `wl_output.scale` says.
 - A markdown subset only: task lists, raw HTML, footnotes, strikethrough and
   images' URLs are drawn as the characters the model sent, a code block is not
