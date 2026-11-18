@@ -15,6 +15,12 @@
   fractional preference is in use — verify: the code path is one `sync_viewport`,
   called from `apply_size`, `adopt_scale` and `preferred_scale`; the no-protocol
   headless run exercises the unset branch
+- [x] 1.4 The per-surface scaling objects are made only after `boot` has settled the
+  final layer surface, and are destroyed before a surface is replaced — verify: the
+  first build made them for the compositor's default surface, which `boot` then
+  replaced for the only output, and `set_destination` on the dead surface was a
+  protocol error; after moving the creation into `boot`, headless sway stays up and
+  logs no protocol error both with and without `--output`
 
 ## 2. Adopt the scale once
 

@@ -466,16 +466,6 @@ fn run(options: Options) -> Result<(), String> {
     // surface's output is a create-time argument, and the output list is only known
     // after an event round, which `boot` does before anything is committed.
     let layer = make_layer(&shell, &compositor, &qh, None);
-    // The surface's own scaling add-ons. The fractional object exists only when a
-    // viewport does: its preferred scale is meaningless without one.
-    let wl_surface = layer.wl_surface().clone();
-    let viewport_object = viewporter
-        .as_ref()
-        .map(|viewporter| viewporter.get_viewport(&wl_surface, &qh, ()));
-    let fractional_scale = match (&fractional_manager, &viewport_object) {
-        (Some(manager), Some(_)) => Some(manager.get_fractional_scale(&wl_surface, &qh, ())),
-        _ => None,
-    };
     let pool_size = surface_size((WIDTH, FALLBACK_OUTPUT_H));
     let pool = SlotPool::new((pool_size.0 * pool_size.1 * 4) as usize, &shm)
         .map_err(|e| format!("cannot create the shm pool: {e}"))?;
@@ -491,8 +481,10 @@ fn run(options: Options) -> Result<(), String> {
         width: WIDTH,
         height: panel::bar_height(),
         scale: 1,
-        _fractional_scale: fractional_scale,
-        viewport_object,
+        viewporter,
+        fractional_manager,
+        _fractional_scale: None,
+        viewport_object: None,
         fractional_pref: None,
         size: SIZE_RESET,
         phase: Phase::Idle,
@@ -1587,6 +1579,10 @@ struct State {
     viewport_object: Option<WpViewport>,
     /// The compositor's preferred fractional scale in 120ths, when it sent one.
     fractional_pref: Option<u32>,
+    /// The globals the per-surface scaling objects are made from. They outlive any
+    /// one surface: `boot` may replace the layer it created first.
+    viewporter: Option<WpViewporter>,
+    fractional_manager: Option<WpFractionalScaleManagerV1>,
     /// How much bigger than its design the whole panel is drawn: the glyphs, the
     /// padding, the radius, the shadow and the width, all by this one factor.
     size: f32,
@@ -2020,12 +2016,16 @@ impl State {
                         .is_some_and(|info| info.name.as_deref() == Some(name.as_str()))
                 })
                 .ok_or_else(|| format!("output {name} is gone"))?;
+            // The old surface is about to go: its viewport and fractional object must
+            // not outlive it, or the next destination write is a protocol error.
+            self.detach_scale_objects();
             self.layer = make_layer(shell, compositor, &self.qh, Some(&output));
             // Before the first commit: the gap the panel opens at is this output's, and
             // no other output's size may overwrite it later.
             self.panel_output = Some(output.clone());
             self.note_output(&output);
         }
+        self.attach_scale_objects();
         // Anchored bottom and left: a layer-shell margin only applies to an anchored
         // edge, and the panel is moved on both axes. With no right anchor the surface
         // keeps its own width, and `left_margin` centres it.
@@ -3214,6 +3214,37 @@ impl State {
         }
         self.buffer = None;
         self.dirty = true;
+    }
+
+    /// Make the per-surface scaling objects for the layer that is final after
+    /// `boot`. A surface that is replaced must have its old objects destroyed first.
+    fn attach_scale_objects(&mut self) {
+        if self.viewport_object.is_some() {
+            return;
+        }
+        let surface = self.layer.wl_surface().clone();
+        self.viewport_object = self
+            .viewporter
+            .as_ref()
+            .map(|viewporter| viewporter.get_viewport(&surface, &self.qh, ()));
+        self._fractional_scale = match (&self.fractional_manager, &self.viewport_object) {
+            (Some(manager), Some(_)) => Some(manager.get_fractional_scale(&surface, &self.qh, ())),
+            _ => None,
+        };
+        self.fractional_pref = None;
+        self.layer.wl_surface().set_buffer_scale(self.scale as i32);
+    }
+
+    /// Destroy the scaling objects that belong to a surface being replaced. The
+    /// viewport must go before its `wl_surface`, so no request is sent afterwards.
+    fn detach_scale_objects(&mut self) {
+        if let Some(viewport) = self.viewport_object.take() {
+            viewport.destroy();
+        }
+        if let Some(scale) = self._fractional_scale.take() {
+            scale.destroy();
+        }
+        self.fractional_pref = None;
     }
 
     /// Put the viewport's destination at the surface's logical size while a
