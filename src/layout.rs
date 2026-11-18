@@ -250,6 +250,11 @@ impl Viewport {
     }
 }
 
+/// The most bytes a question may hold. A pasted selection is read up to this
+/// many bytes and no further, so one `Ctrl+V` cannot grow the panel, or the
+/// request body it becomes, without bound.
+pub const INPUT_CAP: usize = 64 * 1024;
+
 /// The input line: one logical line, soft-wrapped by the painter, with a caret
 /// held as a byte index on a character boundary.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -276,10 +281,18 @@ impl Input {
         std::mem::take(&mut self.text)
     }
 
-    pub fn insert(&mut self, s: &str) {
+    /// Insert `s` at the caret, up to `INPUT_CAP` bytes, and report whether all of
+    /// it fit. The clipboard is read with no other bound, so the line is the bound.
+    pub fn insert(&mut self, s: &str) -> bool {
         // Newlines are not a key here, but a pasted question can carry them.
-        self.text.insert_str(self.caret, s);
-        self.caret += s.len();
+        let room = INPUT_CAP.saturating_sub(self.text.len());
+        let mut take = room.min(s.len());
+        while !s.is_char_boundary(take) {
+            take -= 1; // a cut lands between characters, never inside one
+        }
+        self.text.insert_str(self.caret, &s[..take]);
+        self.caret += take;
+        take == s.len()
     }
 
     /// Delete the character before the caret (or the selection, which this
@@ -506,6 +519,26 @@ mod tests {
         i.end();
         i.word_left();
         assert_eq!(&i.text()[i.caret()..], "mean");
+    }
+
+    #[test]
+    fn the_input_stops_at_the_cap_and_keeps_whole_characters() {
+        let mut i = Input::default();
+        // One character past the cap leaves the cut inside '折'.
+        let text = "折".repeat(INPUT_CAP / 3 + 1);
+        assert!(!i.insert(&text), "not all of it fit");
+        assert_eq!(i.text().len(), INPUT_CAP - 1);
+        assert_eq!(i.caret(), i.text().len());
+        assert!(i.text().chars().all(|c| c == '折'));
+        // The room left is one byte, less than any character: nothing more fits.
+        assert!(!i.insert("xy"));
+        assert_eq!(i.text().len(), INPUT_CAP);
+        assert!(!i.insert("z"));
+        assert_eq!(i.text().len(), INPUT_CAP);
+        // A short insert that fits is reported as whole.
+        let mut j = Input::default();
+        assert!(j.insert("hello"));
+        assert_eq!(j.text(), "hello");
     }
 
     #[test]

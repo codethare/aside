@@ -170,6 +170,8 @@ Copy the highlighted line to the clipboard with
 .B Ctrl+V
 Paste the clipboard into the input line with
 .BR wl\-paste (1).
+The question is capped at 64 KiB: a longer selection is pasted up to the cap, on a
+whole character, and the transcript says it was cut.
 .TP
 .B Ctrl+Alt+minus ", " Ctrl+Alt+plus ", " Ctrl+Alt+equal
 Make the panel's box smaller or bigger by 15 per cent, in every mode: its width and

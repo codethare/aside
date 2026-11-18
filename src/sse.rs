@@ -22,11 +22,18 @@ pub enum Outcome {
     Truncated,
 }
 
+/// The most bytes one line may hold. A frame larger than this cannot be one the
+/// panel would draw — the reply itself is capped at 64 KiB — so the reader stops
+/// holding it instead of letting a provider grow the buffer without bound.
+pub const MAX_LINE_BYTES: usize = 256 * 1024;
+
 #[derive(Default)]
 pub struct Reader {
     /// Bytes of a line that has not ended yet: a delta can be split across two
     /// reads, and the last line may come without a newline.
     partial: Vec<u8>,
+    /// The current line passed `MAX_LINE_BYTES`; drop it through its newline.
+    overflowing: bool,
     done: bool,
     received_any: bool,
 }
@@ -37,27 +44,22 @@ impl Reader {
         if !chunk.is_empty() {
             self.received_any = true;
         }
-        self.partial.extend_from_slice(chunk);
         let mut events = Vec::new();
-        while let Some(nl) = self.partial.iter().position(|b| *b == b'\n') {
-            let mut line: Vec<u8> = self.partial.drain(..=nl).collect();
-            line.pop(); // the newline
-            // A CRLF stream is the same stream: strip the carriage return.
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
-            self.line(&line, &mut events);
+        let mut rest = chunk;
+        while let Some(nl) = rest.iter().position(|b| *b == b'\n') {
+            let (head, tail) = rest.split_at(nl);
+            self.append(head);
+            rest = &tail[1..];
+            self.end_line(&mut events);
         }
+        self.append(rest);
         events
     }
 
     /// The stream ended. Anything still buffered was an unterminated last line.
     pub fn finish(&mut self) -> Outcome {
-        if !self.partial.is_empty() {
-            let line = std::mem::take(&mut self.partial);
-            let mut events = Vec::new();
-            self.line(&line, &mut events);
-        }
+        let mut events = Vec::new();
+        self.end_line(&mut events);
         if self.done {
             Outcome::Complete
         } else {
@@ -74,6 +76,32 @@ impl Reader {
     #[cfg(test)]
     pub fn is_done(&self) -> bool {
         self.done
+    }
+
+    /// Add bytes to the line being assembled, stopping at the cap: a line too
+    /// long to be a frame is discarded to its newline, never held.
+    fn append(&mut self, bytes: &[u8]) {
+        if self.overflowing || bytes.is_empty() {
+            return;
+        }
+        if self.partial.len() + bytes.len() > MAX_LINE_BYTES {
+            self.overflowing = true;
+            self.partial = Vec::new();
+        } else {
+            self.partial.extend_from_slice(bytes);
+        }
+    }
+
+    fn end_line(&mut self, out: &mut Vec<Event>) {
+        let mut line = std::mem::take(&mut self.partial);
+        if std::mem::take(&mut self.overflowing) {
+            return; // too long to be a frame; the next line starts clean
+        }
+        // A CRLF stream is the same stream: strip the carriage return.
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        self.line(&line, out);
     }
 
     fn line(&mut self, line: &[u8], out: &mut Vec<Event>) {
@@ -347,5 +375,45 @@ mod tests {
             r.received_any(),
             "bytes arrived, even if they carry no text"
         );
+    }
+
+    #[test]
+    fn a_line_of_exactly_the_cap_is_still_a_frame() {
+        // The cap is on the line, not on what a frame may say: the boundary itself
+        // must not be the point where parsing breaks.
+        let mut line = String::from("data: [DONE]");
+        line.push_str(&" ".repeat(MAX_LINE_BYTES - line.len()));
+        assert_eq!(line.len(), MAX_LINE_BYTES);
+        let mut r = Reader::default();
+        let events = feed(&mut r, &[(line + "\n").as_bytes()]);
+        assert_eq!(events, vec![Event::Done]);
+    }
+
+    #[test]
+    fn a_line_beyond_the_cap_is_dropped_and_the_buffer_stays_bounded() {
+        let mut r = Reader::default();
+        // Fed in chunks, so the overflow is decided by accumulated bytes rather
+        // than by one enormous read the OS happened to hand over.
+        let chunk = vec![b'x'; 8 * 1024];
+        let mut pushed = 0;
+        while pushed <= MAX_LINE_BYTES {
+            assert!(r.push(&chunk).is_empty());
+            pushed += chunk.len();
+            assert!(
+                r.partial.len() <= MAX_LINE_BYTES,
+                "the reader held {} bytes of one line",
+                r.partial.len()
+            );
+        }
+        assert!(r.overflowing, "the line passed the cap");
+        assert!(
+            r.push(b"\n").is_empty(),
+            "a line too long to be a frame is not one"
+        );
+        assert!(
+            !r.overflowing,
+            "the newline ends it, so the next line starts clean"
+        );
+        assert_eq!(r.push(b"data: [DONE]\n"), vec![Event::Done]);
     }
 }

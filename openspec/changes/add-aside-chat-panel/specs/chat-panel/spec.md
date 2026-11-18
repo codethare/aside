@@ -193,6 +193,18 @@ cap MUST NOT discard earlier complete turns.
 - **WHEN** a provider streams more than 64 KiB for one answer
 - **THEN** the panel shows the first 64 KiB and one line saying the reply was truncated at the cap
 
+### Requirement: The question is bounded too
+
+The input line SHALL cap the question at 64 KiB. The process that reads the
+clipboard SHALL stop reading at that bound rather than buffer a selection whole,
+and when any of a selection does not fit, the transcript SHALL say the question
+was cut at the cap rather than shorten it silently.
+
+#### Scenario: A selection larger than the question cap
+
+- **WHEN** the clipboard holds more than 64 KiB and the user presses `Ctrl+V`
+- **THEN** the input line holds the first 64 KiB, ending on a whole character, and the transcript says the question was cut at the cap
+
 ### Requirement: A line can be copied to the clipboard
 
 `Alt+C` SHALL copy the highlighted transcript line, and only that line, to the

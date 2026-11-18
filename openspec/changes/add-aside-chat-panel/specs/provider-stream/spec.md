@@ -104,6 +104,18 @@ closes without `[DONE]` MUST be reported as truncated rather than complete.
 - **WHEN** the connection closes before `[DONE]`
 - **THEN** the partial text stays visible and the entry is marked incomplete
 
+### Requirement: One stream line is bounded
+
+The reader SHALL hold at most 256 KiB of one unfinished line. It MUST discard the
+rest of a line that passes that bound through its newline, produce no text from
+it, and resume with the next line, so a provider that never sends a newline
+cannot grow the reader's buffer without bound.
+
+#### Scenario: A frame with no newline
+
+- **WHEN** the provider streams more than 256 KiB without a newline
+- **THEN** the reader holds no more than 256 KiB of it, that line produces no delta, and a later complete frame is still parsed
+
 ### Requirement: Every failure mode is distinguishable and bounded
 
 `aside` SHALL map outcomes onto distinct, actionable messages: authentication

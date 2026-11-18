@@ -9,9 +9,20 @@
 //! Reading is never watched: `paste` runs `wl-paste` once, when the key is pressed,
 //! and keeps no copy of what came back beyond the input line it was inserted into.
 
-use std::io::Write;
+use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+
+use crate::layout::INPUT_CAP;
+
+/// What one paste brought in, and whether the panel kept all of it: the
+/// selection is read with an upper bound, so a huge clipboard is not buffered
+/// whole before the bound can apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Paste {
+    pub text: String,
+    pub cut: bool,
+}
 
 /// Copy `line` to the clipboard. Returns as soon as the line is handed over.
 pub fn copy(line: &str) -> Result<(), String> {
@@ -21,29 +32,79 @@ pub fn copy(line: &str) -> Result<(), String> {
 /// The clipboard's text, read on the spot. `--no-newline` because the input is one
 /// logical line: a trailing newline pasted into it would be invisible and then
 /// sent to the provider.
-pub fn paste() -> Result<String, String> {
+pub fn paste() -> Result<Paste, String> {
     paste_with(Path::new("wl-paste"))
 }
 
 /// The testable core: any program that writes the selection to stdout.
-pub fn paste_with(program: &Path) -> Result<String, String> {
-    let out = Command::new(program)
+///
+/// At most `INPUT_CAP + 1` bytes are read: enough to fill the line and to know
+/// that there was more, without a `wl-paste` that never ends growing the buffer.
+pub fn paste_with(program: &Path) -> Result<Paste, String> {
+    let mut child = Command::new(program)
         .arg("--no-newline")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .spawn()
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => {
                 "wl-paste is not installed: install wl-clipboard to paste".to_string()
             }
-            _ => format!("could not read the clipboard: {e}"),
+            _ => format!("could not start wl-paste: {e}"),
         })?;
-    if !out.status.success() {
-        return Err(format!("the clipboard could not be read ({})", out.status));
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 8 * 1024];
+    let mut failure = None;
+    loop {
+        match stdout.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let room = INPUT_CAP + 1 - bytes.len();
+                bytes.extend_from_slice(&buf[..n.min(room)]);
+                if bytes.len() > INPUT_CAP {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => {
+                failure = Some(format!("could not read the clipboard: {e}"));
+                break;
+            }
+        }
+    }
+    drop(stdout);
+    let cut = bytes.len() > INPUT_CAP;
+    if cut || failure.is_some() {
+        // The rest of a huge selection is not waited for; neither is a reader
+        // that failed mid-stream.
+        let _ = child.kill();
+    }
+    let status = child.wait();
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    let status = status.map_err(|e| format!("could not read the clipboard: {e}"))?;
+    if !cut && !status.success() {
+        return Err(format!("the clipboard could not be read ({status})"));
     }
     // Newlines inside the selection would break the one logical line the panel has;
     // they become spaces, which is what the question would have been typed as.
-    Ok(String::from_utf8_lossy(&out.stdout).replace(['\r', '\n'], " "))
+    let mut text = String::from_utf8_lossy(&bytes[..bytes.len().min(INPUT_CAP)]).into_owned();
+    if text.len() > INPUT_CAP {
+        // A cut through a character became a replacement character; dropping it
+        // keeps the line at the cap and free of a mark the user never typed.
+        let mut end = INPUT_CAP;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    Ok(Paste {
+        text: text.replace(['\r', '\n'], " "),
+        cut,
+    })
 }
 
 /// The testable core: any program that reads the line on stdin.
@@ -196,9 +257,50 @@ mod tests {
         );
         assert_eq!(
             paste_with(&path).expect("reads"),
-            "one two",
+            Paste {
+                text: "one two".to_string(),
+                cut: false,
+            },
             "the flag is passed and the newlines do not escape the one line"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The read has one bound: a selection past it is not buffered whole before
+    /// the panel can refuse it.
+    #[test]
+    fn a_selection_longer_than_the_cap_is_cut_to_it() {
+        let dir = scratch("paste-cap");
+        let path = stub(
+            &dir,
+            "wl-paste",
+            &format!(
+                "#!/bin/sh\nhead -c {} /dev/zero | tr '\\0' x\n",
+                INPUT_CAP + 4096
+            ),
+        );
+        let pasted = paste_with(&path).expect("reads");
+        assert!(pasted.cut, "the rest of the selection was not kept");
+        assert_eq!(pasted.text.len(), INPUT_CAP);
+        assert!(pasted.text.bytes().all(|b| b == b'x'));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cut_through_a_character_never_leaves_half_of_one() {
+        let dir = scratch("paste-char");
+        // The cap falls one byte into the final three-byte character.
+        let path = stub(
+            &dir,
+            "wl-paste",
+            &format!(
+                "#!/bin/sh\nhead -c {} /dev/zero | tr '\\0' a\nprintf '折'\n",
+                INPUT_CAP - 1
+            ),
+        );
+        let pasted = paste_with(&path).expect("reads");
+        assert!(pasted.cut);
+        assert_eq!(pasted.text, "a".repeat(INPUT_CAP - 1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

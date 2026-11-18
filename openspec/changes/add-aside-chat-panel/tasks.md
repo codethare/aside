@@ -121,3 +121,9 @@
 ## 17. Blink the input caret
 
 - [x] 17.1 Blink the caret with a 530 ms lit and 530 ms dark half-period, awake only while the panel holds the keyboard and the bar is the input line — verify: unit tests pin the phase across the half-period boundaries and the next-flip deadline; the idle loop wakes at a flip, not every idle tick
+
+## 18. Bound the clipboard and the stream's lines
+
+- [x] 18.1 Cap the input line at `layout::INPUT_CAP` (64 KiB), read `wl-paste` only up to that many bytes and kill it once past, and tell the transcript when a selection was cut — verify: a test feeds the input more bytes than the cap and gets whole characters, a test with a selection past the cap gets exactly 64 KiB and `cut`, and a cut through a three-byte character leaves no half character
+- [x] 18.2 Cap the SSE reader's unfinished line at `sse::MAX_LINE_BYTES` (256 KiB), dropping the line through its newline — verify: a test streams more than the cap without a newline and asserts the buffer never passes it, the line yields no delta, and the next frame still parses
+- [x] 18.3 Spec the two bounds and keep the gate — verify: `provider-stream` and `chat-panel` name the limits and the cut is reported, `cargo test` shows only the four pre-existing font-environment failures, and `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are clean

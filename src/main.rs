@@ -2563,11 +2563,32 @@ impl State {
     /// input line. A failure is shown in the transcript, not swallowed.
     fn paste_clipboard(&mut self) {
         match clipboard::paste() {
-            Ok(text) if !text.is_empty() => {
-                self.input.insert(&text);
+            Ok(pasted) => {
+                let fit = self.input.insert(&pasted.text);
+                if pasted.text.is_empty() {
+                    return;
+                }
                 self.after_typing();
+                if pasted.cut || !fit {
+                    // The line and the clipboard read are both capped, so a long
+                    // selection is reported rather than silently shortened.
+                    let max_w = self.text_width();
+                    let State {
+                        transcript, font, ..
+                    } = self;
+                    if let Some(font) = font.as_ref() {
+                        transcript.add_note(
+                            &format!(
+                                "the question is capped at {} KiB and the clipboard text was cut",
+                                layout::INPUT_CAP / 1024
+                            ),
+                            font,
+                            max_w,
+                        );
+                    }
+                    self.dirty = true;
+                }
             }
-            Ok(_) => {}
             Err(e) => {
                 let max_w = self.text_width();
                 let State {

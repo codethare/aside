@@ -184,6 +184,9 @@ edge of their card rather than being cut off mid-line.
 | `Alt+C` / `Ctrl+C` | typing, copy | copy the selection, or the highlighted line |
 | `Ctrl+V` | typing | paste the clipboard into the input line |
 
+The question is capped at 64 KiB: a longer selection is pasted up to the cap, on a
+whole character, and the transcript says it was cut.
+
 Two sizes, deliberately separate. `Ctrl+T` then `+`/`-` changes the **text** by two
 points. `Ctrl+Alt` `+`/`-` — or `Ctrl` with the wheel, or a pinch — changes the
 **panel's box**: the width and the room the replies get, between 75 % and 200 % of the
