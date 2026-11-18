@@ -41,6 +41,8 @@ pub struct Request {
     failed: Option<String>,
     /// Whether any answer text has arrived (a complete stream with none is empty).
     text_seen: bool,
+    /// Whether the child has been reaped, so `Drop` never signals a reused pid.
+    reaped: bool,
     /// Whether the request went through a proxy, which is what decides which hop
     /// a connect-phase timeout belongs to.
     via_proxy: bool,
@@ -68,6 +70,7 @@ impl Request {
             head: Vec::new(),
             failed: None,
             text_seen: false,
+            reaped: false,
             via_proxy: config.proxy.is_some(),
         })
     }
@@ -124,7 +127,15 @@ impl Request {
 
     /// True while the child runs.
     pub fn running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        match self.child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) | Err(_) => {
+                // `try_wait` reaped it (or it cannot be reaped again); `Drop` must
+                // not send a signal to whatever process now owns the pid.
+                self.reaped = true;
+                false
+            }
+        }
     }
 
     /// Stop the request: the child dies, so there is nothing left delivering an
@@ -132,6 +143,7 @@ impl Request {
     pub fn cancel(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        self.reaped = true;
         self.feed.close();
         self.feed.join();
     }
@@ -146,6 +158,7 @@ impl Request {
         let tail = self.feed.take();
         self.handle(&tail, transcript, font, max_w);
         let status = self.child.wait().ok().and_then(|s| s.code());
+        self.reaped = true;
         let mut stderr = String::new();
         if let Some(mut e) = self.child.stderr.take() {
             let _ = e.read_to_string(&mut stderr);
@@ -180,8 +193,10 @@ impl Request {
 
 impl Drop for Request {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if !self.reaped {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
         self.feed.close();
         self.feed.join();
     }
@@ -743,6 +758,7 @@ mod tests {
             head: Vec::new(),
             failed: None,
             text_seen: false,
+            reaped: false,
             via_proxy: false,
         }
     }
