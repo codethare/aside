@@ -105,7 +105,9 @@ it was asked from -- the panel does not shrink and grow again -- and the light r
 on its bar's rim until the new answer starts.  Closing is the opening run backwards in 200 milliseconds, and the process
 exits when it has finished.  Replies dissolve into the bottom edge of their card
 rather than being cut off mid-line.  The expanded panel never exceeds the output height less 64 pixels, and
-scrolls inside that limit.
+scrolls inside that limit.  On a compositor that offers fractional scaling, the
+panel draws at the next whole scale and a viewport shrinks the buffer to the
+preferred size, so 1.5x is not an upscaled 1x.
 .PP
 The provider request is made by one
 .BR curl (1)

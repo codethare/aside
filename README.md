@@ -5,10 +5,10 @@ the answer stream in, ask a follow-up, take a line out to the clipboard. The
 transcript lives in this process's memory and dies with it: no history, no cache,
 no log file.
 
-Behaviour is specified in `openspec/changes/add-aside-chat-panel/` and
-`openspec/changes/add-panel-states/`. Those directories
-is the source of truth for what the tool does; this file only says how to run it
-and why it is built the way it is.
+Behaviour is specified by the deltas under `openspec/changes/`; `openspec list`
+shows what is open and `openspec show <change>` reads one. Deltas in different
+changes compose in the order they were written; `README` only says how to run the
+program and why it is built the way it is.
 
 ## Run
 
@@ -132,7 +132,10 @@ counts one gesture as one step, so a single slide moves exactly with the fingers
 it is repeated quick flicks that grow.
 
 The sizes are the panel's own; the layer surface adds the shadow margin on every
-side and sits that margin inside the visible gap. The answering panel is a
+side and sits that margin inside the visible gap. On a compositor offering
+`wp_fractional_scale_v1` and `wp_viewporter`, the panel draws at the next integer
+scale and lets the viewport shrink that buffer to the preferred size, so a 1.5×
+output is not an upscaled 1×. The answering panel is a
 **fixed** size: the bar, the 16 px between the cards, and a box as tall as the
 bar's own gap above the screen's bottom edge (38 % of the output, clamped by the
 room left above it). It does not grow as the answer does — a longer answer scrolls
@@ -231,11 +234,11 @@ digits working after the input method is switched off.
 
 ## What it depends on
 
-Six crates, 125 in the whole tree including transitive ones — the same shape as
+Seven crates, 59 in the whole tree including transitive ones — the same shape as
 `wlmenu`, whose rendering core this borrows: `smithay-client-toolkit`,
 `wayland-client`, `wayland-protocols`, `skrifa`, `ab_glyph_rasterizer`,
-`fontdb`, and nothing else. No HTTP or TLS crate: the provider request is one
-`curl` process.
+`fontdb`, `pulldown-cmark`, and nothing else. No HTTP or TLS crate: the provider
+request is one `curl` process.
 
 ## Why it is built this way
 

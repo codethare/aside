@@ -15,8 +15,9 @@ change.
 
 ## Product rules
 
-1. **Nothing on disk.** No history, no cache, no state directory, no log file.
-   The only file ever read is the config, and it is never written. See
+   **Nothing on disk.** No history, no cache, no state directory, no log file.
+   Apart from the configuration (never written) and the system fonts it draws
+   with, the panel opens no file. See
    `specs/ephemeral-conversation`.
 2. **The provider request runs sandboxed.** One `curl` inside one `bwrap`, with
    the network and nothing else, and the credential on stdin rather than in
@@ -114,7 +115,10 @@ change.
   face is added on the first character the chain cannot draw; a character no
   installed face covers is a hollow box, never a silent hole. A tab is four spaces
   wide.
-- No `wp_fractional_scale_v1`; scale is whatever integer `wl_output.scale` says.
+- Fractional scaling uses `wp_fractional_scale_v1` and `wp_viewporter` when the
+  compositor offers both: the panel draws at the next integer and the viewport
+  scales it to the preferred size. Without them the scale is whatever integer
+  `wl_output.scale` says, and a fractional output is upscaled by the compositor.
 - A markdown subset only: task lists, raw HTML, footnotes, strikethrough and
   images' URLs are drawn as the characters the model sent, a code block is not
   syntax highlighted, and emphasis has no slanted face of its own. A table is drawn

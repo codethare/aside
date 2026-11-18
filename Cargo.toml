@@ -16,7 +16,7 @@ pulldown-cmark = { version = "= 0.13.6", default-features = false }
 skrifa = "0.48.0"
 smithay-client-toolkit = "0.21.1"
 wayland-client = "0.31.14"
-wayland-protocols = { version = "0.32.13", features = ["unstable"] }
+wayland-protocols = { version = "0.32.13", features = ["unstable", "staging"] }
 
 [profile.release]
 opt-level = "z"

@@ -43,6 +43,10 @@ use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
+use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
+use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::{
+    self as fractional, WpFractionalScaleV1,
+};
 use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gesture_pinch_v1::{
     self as pinch, ZwpPointerGesturePinchV1,
 };
@@ -50,6 +54,8 @@ use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gestures_v
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
     ContentHint, ContentPurpose, Event as TextInputEvent, ZwpTextInputV3,
 };
+use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
+use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
 use chat::{Close, Request};
 use font::PanelFont;
@@ -449,11 +455,27 @@ fn run(options: Options) -> Result<(), String> {
     let gestures = globals
         .bind::<ZwpPointerGesturesV1, State, ()>(&qh, 1..=3, ())
         .ok();
+    // Optional: without both, the integer output scale is the whole story and no
+    // viewport is created.
+    let viewporter = globals.bind::<WpViewporter, State, ()>(&qh, 1..=1, ()).ok();
+    let fractional_manager = globals
+        .bind::<WpFractionalScaleManagerV1, State, ()>(&qh, 1..=1, ())
+        .ok();
 
     // The surface the panel will use, unless `--output` names another one: a layer
     // surface's output is a create-time argument, and the output list is only known
     // after an event round, which `boot` does before anything is committed.
     let layer = make_layer(&shell, &compositor, &qh, None);
+    // The surface's own scaling add-ons. The fractional object exists only when a
+    // viewport does: its preferred scale is meaningless without one.
+    let wl_surface = layer.wl_surface().clone();
+    let viewport_object = viewporter
+        .as_ref()
+        .map(|viewporter| viewporter.get_viewport(&wl_surface, &qh, ()));
+    let fractional_scale = match (&fractional_manager, &viewport_object) {
+        (Some(manager), Some(_)) => Some(manager.get_fractional_scale(&wl_surface, &qh, ())),
+        _ => None,
+    };
     let pool_size = surface_size((WIDTH, FALLBACK_OUTPUT_H));
     let pool = SlotPool::new((pool_size.0 * pool_size.1 * 4) as usize, &shm)
         .map_err(|e| format!("cannot create the shm pool: {e}"))?;
@@ -469,6 +491,9 @@ fn run(options: Options) -> Result<(), String> {
         width: WIDTH,
         height: panel::bar_height(),
         scale: 1,
+        _fractional_scale: fractional_scale,
+        viewport_object,
+        fractional_pref: None,
         size: SIZE_RESET,
         phase: Phase::Idle,
         shape: panel::State::Bar,
@@ -681,6 +706,12 @@ fn layout_width(width: u32, scale: u32) -> f32 {
 /// The layer surface carries the panel plus its shadow margin on both sides.
 fn surface_size(panel: (u32, u32)) -> (u32, u32) {
     (panel.0 + 2 * render::SHADOW, panel.1 + 2 * render::SHADOW)
+}
+
+/// Buffer pixels per logical pixel for a preferred scale in 120ths: the next
+/// integer up, which the viewport scales back to the logical surface size.
+fn fractional_buffer_scale(preferred: u32) -> u32 {
+    preferred.div_ceil(120).max(1)
 }
 
 /// What the panel says when a request had to drop older turns to stay bounded.
@@ -1550,6 +1581,12 @@ struct State {
     width: u32,
     height: u32,
     scale: u32,
+    /// Kept alive for the surface's lifetime; it has no request of its own.
+    _fractional_scale: Option<WpFractionalScaleV1>,
+    /// The viewport that scales a fractional buffer down to the surface size.
+    viewport_object: Option<WpViewport>,
+    /// The compositor's preferred fractional scale in 120ths, when it sent one.
+    fractional_pref: Option<u32>,
     /// How much bigger than its design the whole panel is drawn: the glyphs, the
     /// padding, the radius, the shadow and the width, all by this one factor.
     size: f32,
@@ -1832,6 +1869,8 @@ impl State {
         let (left, bottom) = self.margins(sw, sh);
         self.layer.set_margin(0, 0, bottom, left);
         self.layer.set_size(sw, sh);
+        // A fractional buffer is scaled down to this logical size.
+        self.sync_viewport();
         let width_changed = w != self.width;
         if width_changed || h != self.height {
             self.width = w;
@@ -3131,20 +3170,31 @@ fn viewport_follow(viewport: &mut Viewport, total: u32) {
     viewport.follow(total);
 }
 
-impl CompositorHandler for State {
-    fn scale_factor_changed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        new_factor: i32,
-    ) {
-        let scale = new_factor.max(1) as u32;
+impl State {
+    /// The compositor's preferred scale for this surface, in 120ths. Draw at the
+    /// next integer and let the viewport scale it to the logical size, as the
+    /// protocol asks, so 1.5x is not an upscaled 1x.
+    fn preferred_scale(&mut self, preferred: u32) {
+        let preferred = preferred.max(1);
+        self.fractional_pref = Some(preferred);
+        self.layer.wl_surface().set_buffer_scale(1);
+        let scale = fractional_buffer_scale(preferred);
+        self.adopt_scale(scale);
+        // The buffer scale and the viewport destination apply on the next commit,
+        // even when the integer scale did not change.
+        self.dirty = true;
+    }
+
+    /// Rebuild the font, rows and buffer for a new buffer density. Shared by the
+    /// integer and the fractional paths so both re-wrap once.
+    fn adopt_scale(&mut self, scale: u32) {
+        let scale = scale.max(1);
         if scale == self.scale {
+            self.sync_viewport();
             return;
         }
         self.scale = scale;
-        self.layer.wl_surface().set_buffer_scale(scale as i32);
+        self.sync_viewport();
         // A different density means different glyphs and different wrapping.
         if let Ok(font) = PanelFont::load(self.face_size()) {
             self.font = Some(font);
@@ -3164,6 +3214,40 @@ impl CompositorHandler for State {
         }
         self.buffer = None;
         self.dirty = true;
+    }
+
+    /// Put the viewport's destination at the surface's logical size while a
+    /// fractional scale is in use, and unset it otherwise: with a destination the
+    /// larger fractional buffer is scaled down to the size the layout uses.
+    fn sync_viewport(&self) {
+        let Some(viewport) = self.viewport_object.as_ref() else {
+            return;
+        };
+        if self.fractional_pref.is_some() {
+            let (w, h) = surface_size((self.width, self.height));
+            viewport.set_destination(w as i32, h as i32);
+        } else {
+            viewport.set_destination(-1, -1);
+        }
+    }
+}
+
+impl CompositorHandler for State {
+    fn scale_factor_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        new_factor: i32,
+    ) {
+        // A fractional preference is the compositor's answer for this surface; an
+        // integer event must not pull it back while that preference stands.
+        if self.fractional_pref.is_some() {
+            return;
+        }
+        let scale = new_factor.max(1) as u32;
+        self.layer.wl_surface().set_buffer_scale(scale as i32);
+        self.adopt_scale(scale);
     }
 
     fn transform_changed(
@@ -3519,6 +3603,60 @@ impl Dispatch<ZwpPointerGesturesV1, ()> for State {
     }
 }
 
+impl Dispatch<WpViewporter, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpViewporter,
+        _event: <WpViewporter as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // The viewporter has no events.
+    }
+}
+
+impl Dispatch<WpViewport, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpViewport,
+        _event: <WpViewport as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // The viewport has no events.
+    }
+}
+
+impl Dispatch<WpFractionalScaleManagerV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpFractionalScaleManagerV1,
+        _event: <WpFractionalScaleManagerV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // The manager has no events.
+    }
+}
+
+impl Dispatch<WpFractionalScaleV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _proxy: &WpFractionalScaleV1,
+        event: fractional::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let fractional::Event::PreferredScale { scale } = event {
+            state.preferred_scale(scale);
+        }
+    }
+}
+
 smithay_client_toolkit::delegate_dispatch2!(State);
 
 impl PointerHandler for State {
@@ -3797,6 +3935,16 @@ mod tests {
         );
         // The bar and the rows are derived from it: a bigger size is a bigger bar.
         assert!(font::row_h_for(font_step(20.0, true)) > font::row_h_for(20.0));
+    }
+
+    #[test]
+    fn a_fractional_scale_rounds_up_to_the_next_buffer() {
+        assert_eq!(fractional_buffer_scale(120), 1, "1x");
+        assert_eq!(fractional_buffer_scale(90), 1, "below 1x");
+        assert_eq!(fractional_buffer_scale(150), 2, "1.25x draws at 2x");
+        assert_eq!(fractional_buffer_scale(180), 2, "1.5x");
+        assert_eq!(fractional_buffer_scale(240), 2, "2x");
+        assert_eq!(fractional_buffer_scale(300), 3, "2.5x");
     }
 
     /// The copy-mode table, key by key: what moves, what selects, what leaves.
