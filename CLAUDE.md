@@ -51,7 +51,8 @@ change.
    shows while the view is moving and fades rather than staying on the chrome.
    Row height stays `size + 2 * round(size * 0.25)`. A fenced block's tint takes
    that same radius, so a code block reads as the card's own shape rather than as a
-   rectangle dropped on it. No accent rail: `plush` and
+   rectangle dropped on it. The surface's input region is the two cards alone: the
+   shadow margin and the gap between them are click-through. No accent rail: `plush` and
    `wlmenu` draw one only for a prompt label. The panel is a bottom-
    anchored `wlr-layer-shell` surface in three states — the bar, the bar with its
    working light running round the rim, and the replies — with

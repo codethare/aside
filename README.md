@@ -132,7 +132,9 @@ counts one gesture as one step, so a single slide moves exactly with the fingers
 it is repeated quick flicks that grow.
 
 The sizes are the panel's own; the layer surface adds the shadow margin on every
-side and sits that margin inside the visible gap. On a compositor offering
+side and sits that margin inside the visible gap. Only the two cards take pointer
+input: the shadow margin and the 16 px between them are click-through, so a window
+seen there can be clicked and typed into while the panel is up. On a compositor offering
 `wp_fractional_scale_v1` and `wp_viewporter`, the panel draws at the next integer
 scale and lets the viewport shrink that buffer to the preferred size, so a 1.5×
 output is not an upscaled 1×. The answering panel is a

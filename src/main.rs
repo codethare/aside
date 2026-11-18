@@ -476,6 +476,7 @@ fn run(options: Options) -> Result<(), String> {
         output_state: OutputState::new(&globals, &qh),
         shm,
         qh,
+        compositor: compositor.clone(),
         pool,
         buffer: None,
         width: WIDTH,
@@ -704,6 +705,20 @@ fn surface_size(panel: (u32, u32)) -> (u32, u32) {
 /// integer up, which the viewport scales back to the logical surface size.
 fn fractional_buffer_scale(preferred: u32) -> u32 {
     preferred.div_ceil(120).max(1)
+}
+
+/// The two card rectangles in surface coordinates. Wayland's default input region is
+/// the whole surface; this keeps the shadow margin and the gap between the cards from
+/// swallowing clicks meant for a window seen through them.
+fn card_input_rects(width: u32, height: u32) -> [(i32, i32, i32, i32); 2] {
+    let shadow = render::SHADOW as i32;
+    let bar = panel::bar_height();
+    let replies_h = height.saturating_sub(bar + render::SEPARATION);
+    let bar_y = shadow + height as i32 - bar as i32;
+    [
+        (shadow, shadow, width as i32, replies_h as i32),
+        (shadow, bar_y, width as i32, bar as i32),
+    ]
 }
 
 /// What the panel says when a request had to drop older turns to stay bounded.
@@ -1580,6 +1595,8 @@ struct State {
     output_state: OutputState,
     shm: Shm,
     qh: QueueHandle<State>,
+    /// Kept for the input region: the surface is larger than the cards.
+    compositor: CompositorState,
     pool: SlotPool,
     buffer: Option<Buffer>,
     /// Logical size, as the compositor configured it.
@@ -1880,6 +1897,9 @@ impl State {
         self.layer.set_size(sw, sh);
         // A fractional buffer is scaled down to this logical size.
         self.sync_viewport();
+        // Only the cards take pointer input; the shadow margin and the gap pass a
+        // click through to the window under them.
+        self.set_input_region();
         let width_changed = w != self.width;
         if width_changed || h != self.height {
             self.width = w;
@@ -3290,6 +3310,19 @@ impl State {
         self.fractional_pref = None;
     }
 
+    /// Put the surface's input region on the cards it draws, and nowhere else: the
+    /// shadow margin and the gap are not part of the panel a click can land on.
+    fn set_input_region(&self) {
+        let region = self.compositor.wl_compositor().create_region(&self.qh, ());
+        for (x, y, w, h) in card_input_rects(self.width, self.height) {
+            if w > 0 && h > 0 {
+                region.add(x, y, w, h);
+            }
+        }
+        self.layer.set_input_region(Some(&region));
+        region.destroy();
+    }
+
     /// Put the viewport's destination at the surface's logical size while a
     /// fractional scale is in use, and unset it otherwise: with a destination the
     /// larger fractional buffer is scaled down to the size the layout uses.
@@ -3674,6 +3707,19 @@ impl Dispatch<ZwpPointerGesturesV1, ()> for State {
         _qh: &QueueHandle<Self>,
     ) {
         // The manager has no events.
+    }
+}
+
+impl Dispatch<wayland_client::protocol::wl_region::WlRegion, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wayland_client::protocol::wl_region::WlRegion,
+        _event: <wayland_client::protocol::wl_region::WlRegion as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // A region has no events; it is filled with rectangles and handed to the surface.
     }
 }
 
@@ -4621,6 +4667,36 @@ mod tests {
             reply_cap(Some(1080), edge_gap(Some(1080), 100), SIZE_RESET)
                 > reply_cap(Some(1080), edge_gap(Some(1080), -100), SIZE_RESET)
         );
+    }
+
+    #[test]
+    fn only_the_cards_take_pointer_input() {
+        let width = 640u32;
+        let bar_height = panel::bar_height();
+        let height = bar_height + render::SEPARATION + 400;
+        let [replies, bar] = card_input_rects(width, height);
+        let shadow = render::SHADOW as i32;
+        assert_eq!(
+            replies,
+            (shadow, shadow, width as i32, 400),
+            "the replies card, shadow excluded"
+        );
+        assert_eq!(
+            bar.1,
+            replies.1 + replies.3 + render::SEPARATION as i32,
+            "the gap between the cards is not in the region"
+        );
+        assert_eq!(bar.3, bar_height as i32);
+        assert_eq!(replies.0, shadow, "the shadow margin is outside the region");
+        assert_eq!(
+            bar.0 + bar.2,
+            shadow + width as i32,
+            "the region ends at the card's right edge"
+        );
+        // Idle: the bar is the whole card.
+        let [replies, bar] = card_input_rects(width, bar_height);
+        assert_eq!(replies.3, 0, "there is no replies card yet");
+        assert_eq!(bar.1, shadow, "the bar is at the top of the panel");
     }
 
     #[test]
