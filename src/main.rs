@@ -3563,6 +3563,7 @@ impl KeyboardHandler for State {
         _keysyms: &[Keysym],
     ) {
         if self.layer.wl_surface() == surface {
+            trace("keyboard enter");
             // The caret follows the keyboard, so gaining it is a change to draw: on an
             // idle panel nothing else would repaint this frame.
             if self.keys.held_from(std::time::Instant::now()) {
@@ -3586,6 +3587,7 @@ impl KeyboardHandler for State {
         _serial: u32,
     ) {
         if self.layer.wl_surface() == surface {
+            trace("keyboard leave");
             // Losing it takes the caret with it, and clears a pre-edit that is still on
             // screen: both are pixels, so the frame is stale.
             if self.keys.lost_at(std::time::Instant::now()) {
@@ -3815,6 +3817,7 @@ impl PointerHandler for State {
                 // ends it still arrives, because the press took an implicit grab.
                 // The same grip carries the indicator's drag.
                 PointerEventKind::Leave { .. } => {
+                    trace("pointer leave");
                     self.press = None;
                     self.selecting = false;
                 }
