@@ -820,15 +820,28 @@ fn transcript_y(pointer_y: f64, scale: u32, viewport_top: u32) -> u32 {
     y.round() as u32 + viewport_top
 }
 
+/// A pointer's logical x turned into an offset from the row's text, in buffer
+/// pixels: the card's inset, the row's own indent and the keyboard's two-pixel
+/// nudge all move the text, so all three are taken off the pointer.
+fn reply_text_x(pointer_x: f64, scale: u32, indent: u32, inked: bool) -> f32 {
+    let s = scale.max(1) as f64;
+    let inset = (render::SHADOW as f64 + crate::PAD as f64) * s
+        + indent as f64
+        + if inked { 2.0 * s } else { 0.0 };
+    (pointer_x * s - inset) as f32
+}
+
 /// Whether a pointer at `y` in surface coordinates is over the replies card rather
 /// than the gap below it or the bar: the wheel scrolls there, and does nothing over
-/// the field. The bar hangs from the panel's own bottom edge, which is `SHADOW`
-/// inside the surface's, and the card ends where the bar's gap begins — the whole
-/// bar, not an estimate of where it starts, which is what let the wheel scroll it.
+/// the field. `panel_h` is the panel's own height, with the shadow margin excluded;
+/// the bar hangs from its bottom edge, which is `SHADOW` inside the surface's, and
+/// the card ends where the bar's gap begins — the whole bar, not an estimate of
+/// where it starts, which is what let the wheel scroll it.
 fn over_replies(panel_h: u32, y: f64) -> bool {
     let top = render::SHADOW as f64;
-    let bottom = panel_h.saturating_sub(render::SHADOW + panel::bar_height() + render::SEPARATION);
-    y >= top && y < bottom as f64
+    let bar_top = (render::SHADOW + panel_h).saturating_sub(panel::bar_height()) as f64;
+    let bottom = bar_top - render::SEPARATION as f64;
+    y >= top && y < bottom
 }
 
 /// The tallest the replies may get: the gap below the bar, or the room left above
@@ -1980,9 +1993,12 @@ impl State {
     }
 
     /// Lay the transcript out again after a width or scale change: once per
-    /// resize, never per frame.
+    /// resize, never per frame. Row and character indices move, so a pointer
+    /// selection cannot name the same text any more.
     fn rewrap(&mut self) {
         let max_w = self.text_width();
+        self.selection = None;
+        self.selecting = false;
         let State {
             transcript, font, ..
         } = self;
@@ -2288,16 +2304,17 @@ impl State {
         let row_index = self.reply_row(position)?;
         let font = self.font.as_ref()?;
         let blocks = layout::Blocks::new(font);
-        let row = self
-            .transcript
-            .rows(blocks)
-            .get(row_index)?
-            .text
-            .to_string();
-        // The pointer's x, less the card's inset, is the text it is over.
-        let inset = (render::SHADOW + crate::PAD) as f64;
-        let x = position.0 - inset;
-        Some((row_index, render::char_at(font, &row, x as f32)))
+        let rows = self.transcript.rows(blocks);
+        let row = rows.get(row_index)?;
+        // The painter gives the keyboard's line a two-pixel nudge, but a row the
+        // pointer's own selection covers is a band and stays put; the mapping has to
+        // agree with whichever mark that row is drawn with.
+        let inked = self.highlight == row_index
+            && !self
+                .selection
+                .is_some_and(|sel| sel.columns(row_index, row.text.chars().count()).is_some());
+        let x = reply_text_x(position.0, self.s(), row.indent, inked);
+        Some((row_index, render::char_at(font, row.text, x)))
     }
 
     /// Which reply line a pointer position is on, if any: the same walk the
@@ -2477,8 +2494,9 @@ impl State {
                     Some(sel) => copied_lines(&sel, &rows),
                     None => 1,
                 };
-                self.copy_highlight();
-                self.copied = Some((std::time::Instant::now(), lines));
+                if self.copy_highlight() {
+                    self.copied = Some((std::time::Instant::now(), lines));
+                }
                 self.leave_copy();
                 return;
             }
@@ -2667,10 +2685,11 @@ impl State {
 
     /// Copy the marked lines, one per line. The selection is what a pointer chose;
     /// without one it is the highlighted line, which is what `Alt+C` has always
-    /// meant.
-    fn copy_highlight(&mut self) {
+    /// meant. Returns whether anything reached `wl-copy`, so the bar does not claim
+    /// a copy that selected no characters.
+    fn copy_highlight(&mut self) -> bool {
         let Some(font) = self.font.as_ref() else {
-            return;
+            return false;
         };
         let rows = self.transcript.rows(layout::Blocks::new(font));
         // What the pointer chose, character for character; without a selection the
@@ -2689,11 +2708,11 @@ impl State {
             }
             None => match rows.get(self.highlight) {
                 Some(row) => row.text.to_string(),
-                None => return,
+                None => return false,
             },
         };
         if text.is_empty() {
-            return;
+            return false;
         }
         if let Err(e) = clipboard::copy(&text) {
             let max_w = self.text_width();
@@ -2704,7 +2723,9 @@ impl State {
                 transcript.fail(&e, font, max_w);
             }
             self.dirty = true;
+            return false;
         }
+        true
     }
 
     /// Drain whatever the request has produced and finish it when the child
@@ -3001,7 +3022,25 @@ impl State {
                 self.move_highlight(self.page_rows());
                 self.thumb_at = Some(std::time::Instant::now());
             }
-            Key::Copy => self.copy_highlight(),
+            Key::Copy => {
+                // The same count the copy-mode path reports, so a pointer selection
+                // copied with Ctrl+C says how many lines it took.
+                let lines = self
+                    .font
+                    .as_ref()
+                    .map(|font| {
+                        let rows = self.transcript.rows(layout::Blocks::new(font));
+                        match self.selection {
+                            Some(sel) => copied_lines(&sel, &rows),
+                            None => 1,
+                        }
+                    })
+                    .unwrap_or(1);
+                if self.copy_highlight() {
+                    self.copied = Some((std::time::Instant::now(), lines));
+                    self.dirty = true;
+                }
+            }
             Key::Paste => self.paste_clipboard(),
             Key::Window => {
                 if let Some((dx, dy)) = window_move(event.keysym, self.modifiers.ctrl) {
@@ -3201,6 +3240,10 @@ impl State {
         }
         let max_w = self.text_width();
         let buffer_h = self.height * self.scale;
+        // The rows are wrapped anew at the new density; a selection anchored to
+        // their indices would copy different characters.
+        self.selection = None;
+        self.selecting = false;
         let State {
             transcript,
             font,
@@ -4580,16 +4623,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_pointer_x_is_scaled_and_offset_like_the_text() {
+        // The card's inset is shadow plus padding, and both scale with the buffer.
+        assert_eq!(reply_text_x(100.0, 1, 0, false), 100.0 - 42.0);
+        assert_eq!(
+            reply_text_x(100.0, 2, 10, false),
+            200.0 - 84.0 - 10.0,
+            "a 2x buffer and a row indented by 10 buffer px"
+        );
+        assert_eq!(
+            reply_text_x(100.0, 2, 0, true),
+            200.0 - 84.0 - 4.0,
+            "the keyboard's line is nudged two logical pixels"
+        );
+    }
+
     /// The wheel scrolls over the replies card and nowhere else. The reported failure:
     /// the bar took a scroll, so a pointer resting on the bar stopped an answer from
     /// following while it streamed, and the view stayed above the last line.
     #[test]
     fn the_wheel_only_counts_over_the_replies() {
-        let panel_h = 400; // shadow 26 + replies + gap 16 + bar 30 = 400
+        // The panel's own height: replies + gap + bar, the shadow margin outside it.
+        let panel_h = 400 - 2 * render::SHADOW;
         let top = render::SHADOW as f64;
-        // The bar hangs from the panel's own bottom edge, which is `SHADOW` inside
-        // the surface's; the card ends where the bar's gap begins.
-        let bar_top = (panel_h - render::SHADOW - panel::bar_height()) as f64;
+        // The bar hangs from the panel's own bottom edge, which is `SHADOW` inside the
+        // surface's; the card ends where the bar's gap begins.
+        let bar_top = (render::SHADOW + panel_h - panel::bar_height()) as f64;
         let card_bottom = bar_top - render::SEPARATION as f64;
         assert!(!over_replies(panel_h, top - 1.0), "the shadow margin");
         assert!(over_replies(panel_h, top + 1.0), "the replies card");
@@ -4604,7 +4664,7 @@ mod tests {
             "nor any row of the bar"
         );
         assert!(
-            !over_replies(panel_h, (panel_h - 1) as f64),
+            !over_replies(panel_h, (2 * render::SHADOW + panel_h - 1) as f64),
             "nor the margin below it"
         );
     }
@@ -5097,6 +5157,17 @@ mod tests {
             cursor: (2, 3),
         };
         assert_eq!(click.columns(2, 10), None);
+        // A selection counts characters; the slice that copies it counts bytes. A
+        // CJK row therefore copies `文a`, not a half of the bytes before them.
+        let text = "中文abc";
+        let sel = panel::Selection {
+            anchor: (0, 1),
+            cursor: (0, 3),
+        };
+        let (from, to) = sel
+            .columns(0, text.chars().count())
+            .expect("a two-character selection");
+        assert_eq!(&text[byte_index(text, from)..byte_index(text, to)], "文a");
     }
 
     /// A configured size reaches the panel's own geometry: the bar, the box under it

@@ -851,27 +851,34 @@ pub(crate) fn advance(font: &crate::font::PanelFont, s: &str) -> f32 {
     measure(font, s, f32::MAX)
 }
 
-/// How many bytes of `s` are to the left of `x` — the character a pointer is over,
-/// for a selection that is finer than a line.
+/// How many characters of `s` are to the left of `x` — the character a pointer is
+/// over. The count is in characters, the unit `Selection` and a copy use, and it
+/// advances by the same rules as `draw_text`, including a missing glyph's box and a
+/// tab's four spaces.
 pub(crate) fn char_at(font: &crate::font::PanelFont, s: &str, x: f32) -> usize {
     if x <= 0.0 {
         return 0;
     }
+    let space = space_width(font);
     let mut width = 0.0;
-    for (i, ch) in s.char_indices() {
-        let Some((_, _, adv)) = font.glyph(ch) else {
-            continue;
+    let mut index = 0;
+    for ch in s.chars() {
+        let advance = if ch == '\t' {
+            space * 4.0
+        } else {
+            font.glyph(ch).map_or(space, |(_, _, advance)| advance)
         };
         // The nearer half of a character counts as that character.
-        if x < width + adv / 2.0 {
-            return i;
+        if x < width + advance / 2.0 {
+            return index;
         }
-        width += adv;
+        width += advance;
+        index += 1;
         if x < width {
-            return i + ch.len_utf8();
+            return index;
         }
     }
-    s.len()
+    index
 }
 
 pub(crate) fn measure(font: &crate::font::PanelFont, s: &str, max_w: f32) -> f32 {
@@ -1392,15 +1399,22 @@ mod tests {
         let text = "abc";
         assert_eq!(char_at(&font, text, -10.0), 0, "left of the line");
         assert_eq!(char_at(&font, text, 0.0), 0, "the first character");
-        assert_eq!(char_at(&font, text, 1000.0), text.len(), "past the line");
-        // Every boundary names a character boundary, never the middle of one.
-        for step in 0..40 {
-            let at = char_at(&font, text, step as f32 * 2.0);
-            assert!(text.is_char_boundary(at), "{at} splits a character");
-        }
-        // A wide character is named by the pointer over it.
-        let first = font.glyph('\u{4e2d}').expect("CJK glyph").2;
-        assert_eq!(char_at(&font, "\u{4e2d}\u{6587}", first * 0.75), 3);
+        assert_eq!(
+            char_at(&font, text, 1000.0),
+            text.chars().count(),
+            "past the line"
+        );
+        // The answer is a character count, not a byte offset: a two-byte character
+        // is one index, which is what a selection and a copy slice by.
+        let wide = "\u{00e9}x";
+        let first = advance(&font, "\u{00e9}");
+        let middle = char_at(&font, wide, first * 0.75);
+        assert_eq!(middle, 1, "inside the first char");
+        assert_eq!(
+            char_at(&font, wide, 1000.0),
+            2,
+            "two characters, not three bytes"
+        );
     }
 
     #[test]
