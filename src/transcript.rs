@@ -372,16 +372,42 @@ impl Transcript {
     /// half an answer back would present it as something the model said.
     pub fn request_turns(&self) -> Vec<Turn> {
         let mut turns = Vec::new();
+        // A question is sent only with the answer that completed it; one whose
+        // answer never finished is dropped when the next question arrives, rather
+        // than going back to the provider as if it had been answered.
+        let mut pending: Option<String> = None;
         for entry in &self.entries {
-            let role = match entry.kind {
-                Kind::Question => Role::User,
-                Kind::Answer if entry.complete => Role::Assistant,
-                _ => continue,
-            };
-            let text = entry.text.clone();
-            if !text.trim().is_empty() {
-                turns.push(Turn { role, text });
+            match entry.kind {
+                Kind::Question => pending = Some(entry.text.clone()),
+                Kind::Answer if entry.complete => {
+                    let answer = entry.text.as_str();
+                    if answer.trim().is_empty() {
+                        continue; // an empty answer completes nothing
+                    }
+                    if let Some(question) = pending.take()
+                        && !question.trim().is_empty()
+                    {
+                        turns.push(Turn {
+                            role: Role::User,
+                            text: question,
+                        });
+                        turns.push(Turn {
+                            role: Role::Assistant,
+                            text: answer.to_string(),
+                        });
+                    }
+                }
+                _ => {}
             }
+        }
+        // The newest question has no answer yet: it is what this request asks.
+        if let Some(question) = pending
+            && !question.trim().is_empty()
+        {
+            turns.push(Turn {
+                role: Role::User,
+                text: question,
+            });
         }
         turns
     }
@@ -522,7 +548,15 @@ mod tests {
                 .all(|t| t.role != Role::Assistant || t.text == "full answer"),
             "no incomplete answer is sent: {turns:?}"
         );
-        assert_eq!(turns.len(), 3, "first, second, and the finished answer");
+        assert_eq!(
+            turns.len(),
+            2,
+            "the cancelled question goes with its answer"
+        );
+        assert!(
+            turns.iter().all(|t| t.text != "first"),
+            "the cancelled turn is not carried: {turns:?}"
+        );
     }
 
     #[test]
@@ -536,6 +570,35 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].text, "q");
         assert!(text_of(&t, &f).iter().any(|r| r == "connection lost"));
+    }
+
+    #[test]
+    fn a_failed_turn_is_dropped_when_the_next_question_arrives() {
+        let f = font();
+        let mut t = Transcript::default();
+        t.ask("failed question", &f);
+        t.delta("half an ans", &f, 400.0);
+        t.fail("connection lost", &f, 400.0);
+        t.ask("second", &f);
+        let turns = t.request_turns();
+        assert_eq!(
+            turns.len(),
+            1,
+            "only the newest question is in the request: {turns:?}"
+        );
+        assert_eq!(turns[0].text, "second");
+    }
+
+    #[test]
+    fn an_empty_complete_answer_completes_no_turn() {
+        let f = font();
+        let mut t = Transcript::default();
+        t.ask("empty answer", &f);
+        t.finish_answer(&f); // [DONE] with no text
+        t.ask("second", &f);
+        let turns = t.request_turns();
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        assert_eq!(turns[0].text, "second");
     }
 
     #[test]

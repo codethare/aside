@@ -114,7 +114,9 @@ while it is out — no caret on a line nobody can type into. When the request en
 it is drawn out of the bar: it keeps the heading it had, accelerates and fades, and
 leaves by the edge it was moving towards, so the bar is an empty, typable line again
 with the line leaving rather than blinking out. A key pressed in that moment drops
-it at once.
+it at once. If the request fails instead of ending, the question goes back into the
+input line, caret at its end, ready for `Enter` — unless you have started typing
+something else, in which case your text wins.
 `Up`/`Down` mark the highlighted line with brighter ink two pixels in from its
 neighbours, so there is no mark in the margin at all. The replies arrive with the
 panel's own growth and are not animated a second time; a follow-up's answer simply

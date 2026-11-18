@@ -204,5 +204,10 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 
 16. Ask a question with `ASIDE_MODEL=nonsense/model`: the transcript shows a
     provider error naming the status, and the panel stays usable.
+16b. Make the request fail before any text (`ASIDE_BASE_URL=http://127.0.0.1:1/v1`
+    rebinds the endpoint) and send a question: the failure is shown, the question is
+    back in the input line at its caret, and `Enter` retries it. Repeat, but type
+    something else before the failure arrives: the typed text stays and the old
+    question is not inserted.
 17. Unset the key and run `aside` from a terminal: one line on standard error
     naming `OPENCODE_API_KEY`, non-zero exit, and no window.

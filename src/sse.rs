@@ -11,6 +11,8 @@
 pub enum Event {
     /// Text to append to the answer.
     Delta(String),
+    /// The provider reported an error inside the stream.
+    Error(String),
     /// The provider said the answer is over.
     Done,
 }
@@ -119,12 +121,33 @@ impl Reader {
             out.push(Event::Done);
             return;
         }
+        // A provider that reports a failure after a 200 sends its error object in
+        // a `data:` frame; without this it would read as a frame with no text.
+        if let Some(error) = error_message(payload) {
+            out.push(Event::Error(error));
+            return;
+        }
         if let Some(content) = content_field(payload)
             && !content.is_empty()
         {
             out.push(Event::Delta(content));
         }
     }
+}
+
+/// The provider's in-stream error, when `payload` is its error object.
+///
+/// Only a payload that *is* the error object counts: a content string may mention
+/// `error` without the stream failing.
+fn error_message(payload: &str) -> Option<String> {
+    if !payload.trim_start().starts_with("{\"error\"") {
+        return None;
+    }
+    Some(
+        string_field(payload, "message")
+            .or_else(|| string_field(payload, "error"))
+            .unwrap_or_else(|| "the provider reported an error".to_string()),
+    )
 }
 
 /// The `content` of the first choice's delta, if the frame carries one.
@@ -415,5 +438,42 @@ mod tests {
             "the newline ends it, so the next line starts clean"
         );
         assert_eq!(r.push(b"data: [DONE]\n"), vec![Event::Done]);
+    }
+
+    #[test]
+    fn an_error_frame_is_a_failure_not_silence() {
+        let mut r = Reader::default();
+        let events = feed(
+            &mut r,
+            &[b"data: {\"error\":{\"code\":429,\"message\":\"rate limited\"}}\n"],
+        );
+        assert_eq!(events, vec![Event::Error("rate limited".to_string())]);
+        assert_eq!(
+            r.finish(),
+            Outcome::Truncated,
+            "no [DONE] arrived, so the stream is also unfinished"
+        );
+    }
+
+    #[test]
+    fn an_error_without_a_message_still_says_the_provider_failed() {
+        let mut r = Reader::default();
+        let events = feed(&mut r, &[b"data: {\"error\":{}}\n"]);
+        assert_eq!(
+            events,
+            vec![Event::Error("the provider reported an error".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_content_string_that_mentions_error_is_still_content() {
+        // Only a payload that *is* the error object counts; the word inside the
+        // model's own words must not turn the answer into a failure.
+        let mut r = Reader::default();
+        let events = feed(
+            &mut r,
+            &[b"data: {\"choices\":[{\"delta\":{\"content\":\"an error happened\"}}]}\n"],
+        );
+        assert_eq!(events, vec![Event::Delta("an error happened".to_string())]);
     }
 }

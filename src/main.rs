@@ -2699,6 +2699,7 @@ impl State {
         }
         let max_w = self.text_width();
         let mut text_arrived = false;
+        let mut restore_question = false;
         if let Some(open) = self.request.as_mut() {
             let State {
                 transcript,
@@ -2717,13 +2718,17 @@ impl State {
                 if !open.running() {
                     let close = open.finish();
                     self.request = None;
-                    // The request is over, so its question is drawn out of the bar: it
-                    // keeps its heading and leaves the edge it was moving towards.
-                    if let Some(q) = self.question.as_mut() {
+                    // A failure gives the question back to the line instead of
+                    // drawing it out of the bar; every other ending lets it go.
+                    restore_question = matches!(close, Close::Failed(_));
+                    if !restore_question && let Some(q) = self.question.as_mut() {
                         q.leaving = Some(std::time::Instant::now());
                     }
                     match close {
                         Close::Complete => transcript.finish_answer(font),
+                        Close::Empty => {
+                            transcript.cancel("the provider sent no answer text", font, max_w);
+                        }
                         Close::Truncated(note) => transcript.cancel(&note, font, max_w),
                         Close::Failed(message) => transcript.fail(&message, font, max_w),
                     }
@@ -2732,6 +2737,9 @@ impl State {
                     text_arrived = true;
                 }
             }
+        }
+        if restore_question {
+            self.restore_question();
         }
         if text_arrived {
             // The first text ends the wait: the bar grows into the panel, and that
@@ -2974,6 +2982,24 @@ impl State {
         self.question = None;
         self.dirty = true;
         self.report_cursor();
+    }
+
+    /// A failed request hands its question back: sending cleared the line, and
+    /// retyping the same text is the panel's job. Text the reader has typed since
+    /// outranks it, so nothing they wrote is replaced.
+    fn restore_question(&mut self) {
+        let Some(question) = self.question.take() else {
+            return;
+        };
+        if self.input.is_blank() {
+            self.input.insert(&question.text);
+            self.after_typing();
+        } else {
+            let mut question = question;
+            question.leaving = Some(std::time::Instant::now());
+            self.question = Some(question);
+            self.dirty = true;
+        }
     }
 
     /// Tell the input method where the caret is, and what text surrounds it, so

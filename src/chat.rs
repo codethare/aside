@@ -23,6 +23,8 @@ const ERROR_BODY_KEEP: usize = 8 * 1024;
 pub enum Close {
     /// The provider sent its terminator.
     Complete,
+    /// The provider ended the stream without any answer text.
+    Empty,
     /// The connection closed with the answer unfinished.
     Truncated(String),
     /// The request failed; the message is what the transcript shows.
@@ -35,6 +37,10 @@ pub struct Request {
     reader: Reader,
     /// The first bytes of the response, kept for the error path only.
     head: Vec<u8>,
+    /// The first failure the provider reported inside the stream.
+    failed: Option<String>,
+    /// Whether any answer text has arrived (a complete stream with none is empty).
+    text_seen: bool,
     /// Whether the request went through a proxy, which is what decides which hop
     /// a connect-phase timeout belongs to.
     via_proxy: bool,
@@ -60,6 +66,8 @@ impl Request {
             feed,
             reader: Reader::default(),
             head: Vec::new(),
+            failed: None,
+            text_seen: false,
             via_proxy: config.proxy.is_some(),
         })
     }
@@ -75,17 +83,30 @@ impl Request {
             let room = ERROR_BODY_KEEP - self.head.len();
             self.head.extend_from_slice(&bytes[..bytes.len().min(room)]);
         }
-        let mut changed = false;
+        // One append per tick: a burst of frames must not re-lay out the answer
+        // once per frame it carried.
+        let mut text = String::new();
+        let mut failed = false;
         for event in self.reader.push(&bytes) {
             match event {
-                sse::Event::Delta(text) => {
-                    transcript.delta(&text, font, max_w);
-                    changed = true;
+                sse::Event::Delta(delta) => {
+                    // A blank answer is still an empty card; only ink counts.
+                    self.text_seen |= delta.chars().any(|c| !c.is_whitespace());
+                    text.push_str(&delta);
+                }
+                sse::Event::Error(message) => {
+                    // The first error is the one that explains the stream; a later
+                    // one is a consequence and would only bury it.
+                    self.failed.get_or_insert(message);
+                    failed = true;
                 }
                 sse::Event::Done => {}
             }
         }
-        changed
+        if !text.is_empty() {
+            transcript.delta(&text, font, max_w);
+        }
+        failed || !text.is_empty()
     }
 
     /// True while the child runs.
@@ -111,8 +132,14 @@ impl Request {
         // Anything still buffered in the reader is an unterminated last frame.
         let outcome = self.reader.finish();
         let received_any = self.reader.received_any();
+        // An error the provider sent inside the stream outranks its exit status and
+        // a later `[DONE]`: that is the thing the reader can act on.
+        if let Some(message) = self.failed.take() {
+            return Close::Failed(format!("the provider reported an error: {message}"));
+        }
         match status {
-            Some(0) if outcome == sse::Outcome::Complete => Close::Complete,
+            Some(0) if outcome == sse::Outcome::Complete && self.text_seen => Close::Complete,
+            Some(0) if outcome == sse::Outcome::Complete => Close::Empty,
             Some(0) => Close::Truncated(if received_any {
                 "the connection closed before the answer finished".to_string()
             } else {
@@ -666,5 +693,83 @@ mod tests {
         assert_eq!(answer_width(900, 1), 900.0 - inner);
         assert_eq!(answer_width(1800, 2), 1800.0 - 2.0 * inner);
         assert_eq!(answer_width(10, 1), 0.0, "a tiny window still lays out");
+    }
+
+    /// A request whose child writes `body` to stdout, with no sandbox: these tests
+    /// are about the stream's ending, not about containment.
+    fn scripted(body: &str) -> Request {
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(body)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the stub starts");
+        let stdout = child.stdout.take().expect("stdout is piped");
+        Request {
+            child,
+            feed: Feed::spawn(stdout),
+            reader: Reader::default(),
+            head: Vec::new(),
+            failed: None,
+            text_seen: false,
+            via_proxy: false,
+        }
+    }
+
+    fn drain(request: &mut Request, transcript: &mut Transcript, font: &PanelFont) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            request.poll(transcript, font, 400.0);
+            if request.feed.eof() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the stub's stream ended"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        request.poll(transcript, font, 400.0);
+    }
+
+    #[test]
+    fn an_error_inside_the_stream_fails_the_exchange_and_keeps_the_text() {
+        let font = PanelFont::load(crate::font::SIZE).expect("system font available");
+        let mut transcript = Transcript::default();
+        transcript.ask("why", &font);
+        let mut request = scripted(
+            r#"printf 'data: {"choices":[{"delta":{"content":"hello"}}]}\ndata: {"error":{"message":"rate limited"}}\ndata: [DONE]\n'"#,
+        );
+        drain(&mut request, &mut transcript, &font);
+        let close = request.finish();
+        match close {
+            Close::Failed(message) => {
+                assert!(message.contains("rate limited"), "{message}");
+            }
+            other => panic!("the stream's error must fail the exchange, got {other:?}"),
+        }
+        let rows: String = transcript
+            .rows(crate::layout::Blocks::new(&font))
+            .iter()
+            .map(|r| r.text)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            rows.contains("hello"),
+            "the text before the error stays: {rows}"
+        );
+    }
+
+    #[test]
+    fn a_complete_stream_with_no_text_is_empty() {
+        let font = PanelFont::load(crate::font::SIZE).expect("system font available");
+        let mut transcript = Transcript::default();
+        transcript.ask("why", &font);
+        let mut request = scripted(
+            r#"printf 'data: {"choices":[{"delta":{"role":"assistant"}}]}\ndata: [DONE]\n'"#,
+        );
+        drain(&mut request, &mut transcript, &font);
+        assert_eq!(request.finish(), Close::Empty);
     }
 }
