@@ -116,7 +116,9 @@ leaves by the edge it was moving towards, so the bar is an empty, typable line a
 with the line leaving rather than blinking out. A key pressed in that moment drops
 it at once. If the request fails instead of ending, the question goes back into the
 input line, caret at its end, ready for `Enter` — unless you have started typing
-something else, in which case your text wins.
+something else, in which case your text wins. The request carries at most 512 KiB
+of turn text; older turns are dropped from it and their text is freed, and the
+transcript says when that happened.
 `Up`/`Down` mark the highlighted line with brighter ink two pixels in from its
 neighbours, so there is no mark in the margin at all. The replies arrive with the
 panel's own growth and are not animated a second time; a follow-up's answer simply

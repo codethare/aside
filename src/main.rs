@@ -472,6 +472,7 @@ fn run(options: Options) -> Result<(), String> {
         size: SIZE_RESET,
         phase: Phase::Idle,
         shape: panel::State::Bar,
+        context_cut: false,
         animate,
         mode: Mode::Typing,
         drag: Drag::default(),
@@ -680,6 +681,14 @@ fn layout_width(width: u32, scale: u32) -> f32 {
 /// The layer surface carries the panel plus its shadow margin on both sides.
 fn surface_size(panel: (u32, u32)) -> (u32, u32) {
     (panel.0 + 2 * render::SHADOW, panel.1 + 2 * render::SHADOW)
+}
+
+/// What the panel says when a request had to drop older turns to stay bounded.
+fn context_cut_note() -> String {
+    format!(
+        "earlier turns were left out of this request: its context is capped at {} KiB",
+        transcript::CONTEXT_CAP / 1024
+    )
 }
 
 /// How wide the panel's box is at a size: the design width, or what the size keys
@@ -1570,6 +1579,8 @@ struct State {
     phase: Phase,
     /// The question that is out, while it is: the bar's line until the answer is in.
     question: Option<Question>,
+    /// Whether old turns were dropped from the request this turn; shown once it ends.
+    context_cut: bool,
     /// Whether the transitions are drawn, or each one is over in the frame it starts.
     animate: bool,
     /// The shape it is drawn as, which is not always the phase's own: a request
@@ -2100,6 +2111,9 @@ impl State {
         } = self;
         let Some(font) = font.as_ref() else { return };
         transcript.ask(&question, font);
+        // Old turns are dropped before the body is built: a long session must not
+        // grow the request or the text kept for it without bound.
+        let cut = transcript.enforce_context_cap(transcript::CONTEXT_CAP);
         let outcome = Request::start(config, key, &transcript.request_turns());
         let started = match outcome {
             Ok(started) => {
@@ -2108,11 +2122,15 @@ impl State {
             }
             Err(e) => {
                 transcript.fail(&e, font, max_w);
+                if cut {
+                    transcript.add_note(&context_cut_note(), font, max_w);
+                }
                 // Nothing is in flight, so the bar goes back to being a line.
                 self.question = None;
                 false
             }
         };
+        self.context_cut = started && cut;
         let rows = transcript.total_rows();
         viewport.follow(transcript.total_height());
         *highlight = rows.saturating_sub(1);
@@ -2137,10 +2155,16 @@ impl State {
             }
             let max_w = self.text_width();
             let State {
-                transcript, font, ..
+                transcript,
+                font,
+                context_cut,
+                ..
             } = self;
             if let Some(font) = font.as_ref() {
                 transcript.cancel("cancelled", font, max_w);
+                if std::mem::take(context_cut) {
+                    transcript.add_note(&context_cut_note(), font, max_w);
+                }
             }
             viewport_follow(&mut self.viewport, transcript.total_height());
             // Cancelling settles the panel now: no one waits for a morph to watch a
@@ -2705,6 +2729,7 @@ impl State {
                 transcript,
                 font,
                 viewport,
+                context_cut,
                 ..
             } = self;
             if let Some(font) = font.as_ref() {
@@ -2716,7 +2741,7 @@ impl State {
                     self.dirty = true;
                 }
                 if !open.running() {
-                    let close = open.finish();
+                    let close = open.finish(transcript, font, max_w);
                     self.request = None;
                     // A failure gives the question back to the line instead of
                     // drawing it out of the bar; every other ending lets it go.
@@ -2731,6 +2756,9 @@ impl State {
                         }
                         Close::Truncated(note) => transcript.cancel(&note, font, max_w),
                         Close::Failed(message) => transcript.fail(&message, font, max_w),
+                    }
+                    if std::mem::take(context_cut) {
+                        transcript.add_note(&context_cut_note(), font, max_w);
                     }
                     viewport.follow(transcript.total_height());
                     self.dirty = true;

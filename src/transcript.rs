@@ -10,6 +10,12 @@ use crate::provider::{Role, Turn};
 /// panel can show, and the whole thing is laid out in memory.
 pub const REPLY_CAP: usize = 64 * 1024;
 
+/// How much turn text may be carried in one request. Old turns are dropped from
+/// the oldest end, and their text is freed, so a long session cannot grow the
+/// request body and the transcript without bound. The newest question is always
+/// kept, and is smaller than this by its own cap.
+pub const CONTEXT_CAP: usize = 512 * 1024;
+
 /// What an entry is, which decides how it is drawn and whether it can be sent
 /// back to the provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,13 +203,14 @@ impl Transcript {
         self.open = Some(self.push(Kind::Answer, false, blocks));
     }
 
-    /// Append streamed text to the open answer.
-    pub fn delta(&mut self, text: &str, font: &PanelFont, max_w: f32) {
-        let Some(i) = self.open else { return };
+    /// Append streamed text to the open answer. Returns whether anything changed
+    /// on screen: once the cap is reached, the rest of the stream costs no layout.
+    pub fn delta(&mut self, text: &str, font: &PanelFont, max_w: f32) -> bool {
+        let Some(i) = self.open else { return false };
         let blocks = Blocks::new(font);
         let entry = &mut self.entries[i];
         if entry.truncated {
-            return; // the cap is reached and already marked
+            return false; // the cap is reached and already marked
         }
         let room = REPLY_CAP.saturating_sub(entry.lines_text_len());
         let (take, cut) = split_at_char_boundary(text, room);
@@ -217,6 +224,36 @@ impl Transcript {
             entry.lines.mark("\u{2026}", font, max_w);
         }
         self.settle(blocks);
+        !take.is_empty() || cut
+    }
+
+    /// Free the oldest turns until the text this run would send fits `cap`.
+    /// Returns whether anything was dropped. The newest question and everything
+    /// after it (the answer being opened, its notes) are never touched: they are
+    /// what the current request is for.
+    pub fn enforce_context_cap(&mut self, cap: usize) -> bool {
+        let mut total: usize = self.entries.iter().map(|e| e.text.len()).sum();
+        if total <= cap {
+            return false;
+        }
+        // Index of the newest question; entries before it belong to retired turns.
+        let Some(newest) = self.entries.iter().rposition(|e| e.kind == Kind::Question) else {
+            return false;
+        };
+        let mut dropped = false;
+        for entry in &mut self.entries[..newest] {
+            if total <= cap {
+                break;
+            }
+            if entry.text.is_empty() {
+                continue;
+            }
+            total -= entry.text.len();
+            entry.text = String::new();
+            entry.lines = Layout::default();
+            dropped = true;
+        }
+        dropped
     }
 
     /// The answer ended normally.
@@ -856,6 +893,10 @@ mod tests {
         for _ in 0..100 {
             t.delta(&chunk, &f, 400.0);
         }
+        assert!(
+            !t.delta("more", &f, 400.0),
+            "a capped answer costs no more layout"
+        );
         t.finish_answer(&f);
         let kept: usize = t.rows(Blocks::new(&f)).iter().map(|r| r.text.len()).sum();
         assert!(kept <= REPLY_CAP + 8, "the cap held: {kept} bytes");
@@ -864,6 +905,42 @@ mod tests {
             "the cut is visible"
         );
         assert!(t.entries()[1].truncated);
+    }
+
+    #[test]
+    fn the_context_is_capped_from_the_oldest_turn() {
+        let f = font();
+        let mut t = Transcript::default();
+        for i in 0..6 {
+            t.ask(&format!("question {i}"), &f);
+            t.delta(&"x".repeat(100), &f, 400.0);
+            t.finish_answer(&f);
+        }
+        t.ask("newest", &f);
+        let before: usize = t.request_turns().iter().map(|x| x.text.len()).sum();
+        assert!(before > 250, "{before}");
+        assert!(t.enforce_context_cap(250), "something was dropped");
+        let turns = t.request_turns();
+        let after: usize = turns.iter().map(|x| x.text.len()).sum();
+        assert!(after <= 250, "the request is bounded: {after}");
+        assert_eq!(turns.last().expect("the newest question").text, "newest");
+        assert!(
+            turns.iter().all(|x| x.text != "question 0"),
+            "the oldest turn is gone: {turns:?}"
+        );
+        assert!(
+            t.entries()[0].text.is_empty(),
+            "its text is freed, not just skipped"
+        );
+    }
+
+    #[test]
+    fn the_newest_question_is_never_dropped_by_the_cap() {
+        let f = font();
+        let mut t = Transcript::default();
+        t.ask("keep me", &f);
+        assert!(!t.enforce_context_cap(0), "there is no older turn to drop");
+        assert_eq!(t.request_turns()[0].text, "keep me");
     }
 
     #[test]

@@ -76,6 +76,17 @@ impl Request {
     /// whether anything changed on screen.
     pub fn poll(&mut self, transcript: &mut Transcript, font: &PanelFont, max_w: f32) -> bool {
         let bytes = self.feed.take();
+        self.handle(&bytes, transcript, font, max_w)
+    }
+
+    /// Decode one batch of bytes into the transcript, once per call.
+    fn handle(
+        &mut self,
+        bytes: &[u8],
+        transcript: &mut Transcript,
+        font: &PanelFont,
+        max_w: f32,
+    ) -> bool {
         if bytes.is_empty() {
             return false;
         }
@@ -87,7 +98,7 @@ impl Request {
         // once per frame it carried.
         let mut text = String::new();
         let mut failed = false;
-        for event in self.reader.push(&bytes) {
+        for event in self.reader.push(bytes) {
             match event {
                 sse::Event::Delta(delta) => {
                     // A blank answer is still an empty card; only ink counts.
@@ -103,10 +114,12 @@ impl Request {
                 sse::Event::Done => {}
             }
         }
-        if !text.is_empty() {
-            transcript.delta(&text, font, max_w);
-        }
-        failed || !text.is_empty()
+        let changed = if text.is_empty() {
+            false
+        } else {
+            transcript.delta(&text, font, max_w)
+        };
+        failed || changed
     }
 
     /// True while the child runs.
@@ -119,11 +132,19 @@ impl Request {
     pub fn cancel(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        self.feed.close();
+        self.feed.join();
     }
 
     /// Reap the child and say how the exchange ended. The completed text has
     /// already been handed to the transcript by `poll`.
-    pub fn finish(&mut self) -> Close {
+    pub fn finish(&mut self, transcript: &mut Transcript, font: &PanelFont, max_w: f32) -> Close {
+        // Stop the reader and let it finish, then take whatever it queued after
+        // the last poll: the child may have exited between the two.
+        self.feed.close();
+        self.feed.join();
+        let tail = self.feed.take();
+        self.handle(&tail, transcript, font, max_w);
         let status = self.child.wait().ok().and_then(|s| s.code());
         let mut stderr = String::new();
         if let Some(mut e) = self.child.stderr.take() {
@@ -154,6 +175,15 @@ impl Request {
             )),
             None => Close::Failed("the request ended without a status".to_string()),
         }
+    }
+}
+
+impl Drop for Request {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.feed.close();
+        self.feed.join();
     }
 }
 
@@ -332,7 +362,7 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let close = request.finish();
+        let close = request.finish(&mut transcript, &font, 400.0);
         assert_eq!(close, Close::Complete, "the answer must end with [DONE]");
         let answer: String = transcript
             .rows(crate::layout::Blocks::new(&font))
@@ -367,7 +397,7 @@ mod tests {
             request.poll(&mut transcript, &font, 600.0);
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let close = request.finish();
+        let close = request.finish(&mut transcript, &font, 400.0);
         match close {
             Close::Failed(message) => {
                 assert!(message.contains("401"), "{message}");
@@ -742,7 +772,7 @@ mod tests {
             r#"printf 'data: {"choices":[{"delta":{"content":"hello"}}]}\ndata: {"error":{"message":"rate limited"}}\ndata: [DONE]\n'"#,
         );
         drain(&mut request, &mut transcript, &font);
-        let close = request.finish();
+        let close = request.finish(&mut transcript, &font, 400.0);
         match close {
             Close::Failed(message) => {
                 assert!(message.contains("rate limited"), "{message}");
@@ -770,6 +800,6 @@ mod tests {
             r#"printf 'data: {"choices":[{"delta":{"role":"assistant"}}]}\ndata: [DONE]\n'"#,
         );
         drain(&mut request, &mut transcript, &font);
-        assert_eq!(request.finish(), Close::Empty);
+        assert_eq!(request.finish(&mut transcript, &font, 400.0), Close::Empty);
     }
 }
