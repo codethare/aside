@@ -2259,7 +2259,7 @@ impl State {
             [
                 moving.then_some(FRAME_WAKE),
                 self.request.is_some().then_some(FRAME_WAKE),
-                self.copy_note_up().then_some(COPY_NOTE_WAKE),
+                self.toast_up().then_some(TOAST_WAKE),
                 self.returned_at.is_some().then_some(FRAME_WAKE),
                 self.light_in(),
                 self.thumb_in(),
@@ -2376,7 +2376,10 @@ impl State {
                     transcript.add_note(&context_cut_note(), font, max_w);
                 }
             }
-            viewport_follow(&mut self.viewport, transcript.total_height());
+            // Cancelling is an ending too: a reader who scrolled up keeps their place.
+            if follow_stream(&mut self.viewport, transcript.total_height()) {
+                self.new_content = true;
+            }
             // Cancelling settles the panel now: no one waits for a morph to watch a
             // stream that has already stopped.
             self.morph = None;
@@ -2650,7 +2653,7 @@ impl State {
                     None => 1,
                 };
                 if self.copy_highlight() {
-                    self.copied = Some((std::time::Instant::now(), lines));
+                    self.note_copied(lines);
                 }
                 self.leave_copy();
                 return;
@@ -3229,8 +3232,7 @@ impl State {
                     })
                     .unwrap_or(1);
                 if self.copy_highlight() {
-                    self.copied = Some((std::time::Instant::now(), lines));
-                    self.dirty = true;
+                    self.note_copied(lines);
                 }
             }
             Key::Paste => self.paste_clipboard(),
@@ -4609,11 +4611,11 @@ mod tests {
         );
         // A request's frames beat a longer cue, so the working light never stutters.
         assert_eq!(
-            soonest(idle, [Some(FRAME_WAKE), Some(COPY_NOTE_WAKE)]),
+            soonest(idle, [Some(FRAME_WAKE), Some(TOAST_WAKE)]),
             FRAME_WAKE
         );
         assert_eq!(
-            soonest(idle, [Some(COPY_NOTE_WAKE), Some(Duration::from_millis(7))]),
+            soonest(idle, [Some(TOAST_WAKE), Some(Duration::from_millis(7))]),
             Duration::from_millis(7)
         );
         assert_eq!(
