@@ -13,8 +13,8 @@
 
 ## 2. Particles
 
-- [x] 2.1 Seeds: for each visible glyph, 3 particles with a deterministic offset from
-  `(byte index, particle index)`; a hard cap of 240; no allocation per frame — verify:
+- [x] 2.1 Seeds: for each visible glyph, 8 particles with a deterministic offset from
+  `(byte index, particle index)`; a hard cap of 480; no allocation per frame — verify:
   a test on the seed helper is stable across calls and another asserts the count is
   capped for a long line
 - [x] 2.2 Decompose: glyph alpha falls from 1 to 0 over `DECOMPOSE` while particle

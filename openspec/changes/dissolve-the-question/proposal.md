@@ -26,10 +26,10 @@ right; a short question, which never moved, decomposes and leaves to the left.
   those values. The current code re-reads the marquee while leaving, so a line that
   turns round during the exit can change edge mid-flight; after this change it cannot.
 - **Particles come from the visible line only.** For each visible glyph the bar emits
-  a fixed number of particles (3), seeded from the glyph's byte index and the particle
-  index, with a hard cap of 240 particles. Their start is the glyph's advance box at
+  a fixed number of particles (8), seeded from the glyph's byte index and the particle
+  index, with a hard cap of 480 particles. Their start is the glyph's advance box at
   the frozen scroll; their exit is the frozen direction's edge, through the same
-  travel/limit arithmetic `leaving_offset` uses today. Particles are 1–2 logical-pixel
+  travel/limit arithmetic `leaving_offset` uses today. Particles are one logical-pixel
   squares in the prompt ink and are clipped to the bar's row and width.
 - **Nothing else moves.** Layout, the bar's size, the caret and the input line are
   unchanged; typing still drops the leaving question at once; the transcript still

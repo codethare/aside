@@ -31,8 +31,8 @@ pub struct Pending<'a> {
 
 /// The line comes apart into this many particles per visible glyph, up to a hard cap:
 /// the bar is one row, and a longer question must not turn a frame into a field.
-const PARTICLES_PER_GLYPH: usize = 3;
-const MAX_PARTICLES: usize = 240;
+const PARTICLES_PER_GLYPH: usize = 8;
+const MAX_PARTICLES: usize = 480;
 
 /// The most of the extract a particle can spend waiting for its seed's turn. The
 /// stagger is what makes the pull read as a cloud rather than one rigid block.
@@ -1061,7 +1061,7 @@ fn draw_particles(
         leaving.start,
         limit,
         |_, _, x, advance, seed| {
-            let side = ((1 + (seed & 1)) * s) as f32;
+            let side = s as f32;
             let jitter = (fraction(seed, 3) - 0.5) * 2.0 * scale * mix;
             let rise = (fraction(seed, 4) - 0.5) * 2.0 * scale * mix;
             let start_x = text_x + x + fraction(seed, 1) * advance + jitter;
