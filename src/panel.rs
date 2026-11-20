@@ -530,6 +530,78 @@ pub fn draw(
     }
 }
 
+/// A one-pixel rounded rim `inset` logical pixels inside `panel`, in `color`.
+fn draw_rim(buf: &mut [u8], w: u32, h: u32, panel: &render::Panel, s: u32, color: Bgra) {
+    let inset = 2 * s;
+    if panel.w <= 2 * inset || panel.h <= 2 * inset {
+        return;
+    }
+    let rim = render::Panel {
+        x: panel.x + inset,
+        y: panel.y + inset,
+        w: panel.w - 2 * inset,
+        h: panel.h - 2 * inset,
+        r: panel.r.saturating_sub(inset),
+    };
+    for rel in 0..rim.h {
+        let (x0, x1) = rim.span(rel);
+        if x1 <= x0 {
+            continue;
+        }
+        let y = rim.y + rel;
+        if rel == 0 || rel + 1 == rim.h {
+            render::rect(buf, w, h, x0, y, x1 - x0, 1, color);
+        } else {
+            render::rect(buf, w, h, x0, y, 1, 1, color);
+            render::rect(buf, w, h, x1 - 1, y, 1, 1, color);
+        }
+    }
+}
+
+/// A small pill at the replies' bottom-left: text arrived below the view the reader
+/// scrolled up to, and going back to the tail is what clears it.
+fn draw_new_content(
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    font: &PanelFont,
+    card: &render::Panel,
+    aa: Subpixel,
+    s: u32,
+) {
+    let text = "new content";
+    let tw = render::measure(font, text, f32::MAX).ceil() as u32;
+    let pad = 8 * s;
+    let pill_w = tw + 2 * pad;
+    let pill_h = font.row_h;
+    if card.w < pill_w + 2 * pad || card.h < pill_h + 2 * pad {
+        return;
+    }
+    let x = card.x + pad;
+    let y = card.y + card.h - pill_h - pad;
+    let pill = render::Panel {
+        x,
+        y,
+        w: pill_w,
+        h: pill_h,
+        r: 6 * s,
+    };
+    render::fill(buf, w, &pill, render::BG_CODE, y..y + pill_h);
+    render::draw_text(
+        buf,
+        w,
+        h,
+        font,
+        (x + pad) as f32,
+        render::row_baseline(font, y),
+        text,
+        render::FG_NORMAL,
+        tw as f32,
+        y..y + pill_h,
+        aa,
+    );
+}
+
 /// The panel inside the shadow margin, or `None` when the buffer is too small
 /// to hold one.
 fn panel_of(w: u32, h: u32, radius: u32, scale: u32) -> Option<render::Panel> {
