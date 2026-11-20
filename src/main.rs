@@ -73,8 +73,13 @@ const EDGE_SHARE: i32 = 38;
 /// How tall the replies may be, as a multiple of that same gap: the field's own
 /// distance to the screen's bottom is the yardstick the panel grows by.
 const REPLY_SHARE: u32 = 1;
-/// How long `copied N lines` stays in the bar.
-const COPY_NOTE_MS: u64 = 1_200;
+/// How long a copy, paste or returned-question toast stays in the bar.
+const TOAST_MS: u64 = 1_800;
+/// How long the bar's returned-question rim stays lit.
+const RETURN_HIGHLIGHT_MS: u64 = 700;
+/// How long a request may run before the bar adds the elapsed seconds to its
+/// cancel hint.
+const WAIT_HINT_AFTER_MS: u128 = 3_000;
 /// How long a shape change takes at its shortest. The morph is the point, so it is
 /// long enough to be seen rather than only to be over.
 const MORPH_IN_MS: u128 = 360;
@@ -116,22 +121,30 @@ const INTERACTIVITY: KeyboardInteractivity = KeyboardInteractivity::OnDemand;
 /// A frame per step of whatever is moving: a shape change, the rise into place, the
 /// working light, or a request whose bytes can arrive at any moment.
 const FRAME_WAKE: Duration = Duration::from_millis(16);
-/// How often `copied N lines` needs a frame while it is up: it only has to clear itself.
-const COPY_NOTE_WAKE: Duration = Duration::from_millis(100);
+/// How often a toast needs a frame while it is up: it only has to clear itself.
+const TOAST_WAKE: Duration = Duration::from_millis(100);
 /// The idle tick: nothing on screen can change on its own, so the loop only comes back to
 /// pick up whatever the compositor sends.
 const IDLE_WAKE: Duration = Duration::from_millis(250);
 
 const USAGE: &str = "\
-usage: aside [--model MODEL] [--base-url URL] [--proxy URL] [--output OUTPUT] [--preview FILE] [--help] [--version]
+usage: aside [--model MODEL] [--base-url URL] [--proxy URL] [--output OUTPUT] [--font-size PX] [--font-family NAME] [--preview FILE] [--help] [--version]
 
   --model MODEL     model to ask (default deepseek/deepseek-v4.1-flash)
   --base-url URL    provider base URL (default https://opencode.ai/zen/go/v1)
   --proxy URL       proxy for the request, any scheme curl accepts
                     (e.g. socks5h://127.0.0.1:1080); default is a direct connection
   --output OUTPUT   pin the panel to this output; without it the compositor places it
+  --font-size PX    text size, 8 to 72 logical px (overrides font_size)
+  --font-family NAME  font family (overrides font_family)
   --preview FILE    render a scripted conversation to FILE and its leaving stages
                     to FILE.decompose.ppm and FILE.extract.ppm, then exit
+
+keys:
+  Enter send   Esc cancel or close   Ctrl+V paste   Alt+C / Ctrl+C copy
+  Up/Down scroll   PageUp/PageDown page   Ctrl+T prefix (then [ copy mode,
+  + / - text size)   Alt+hjkl move panel (Ctrl: 160 px)
+  Ctrl+Alt+- / + resize panel   Ctrl+Alt+BackSpace reset size
 ";
 
 /// What a key press means. Kept pure, so the key table in the spec can be
@@ -205,6 +218,22 @@ fn trace(label: &str) {
     );
 }
 
+/// `--font-size`: a number in the range the configuration accepts, named on stderr
+/// when it is not.
+fn parse_font_size(value: &str) -> Result<f32, String> {
+    let size = value
+        .parse::<f32>()
+        .map_err(|_| format!("`--font-size` must be a number of pixels: {value:?}"))?;
+    if !(*font::SIZE_RANGE.start() as f32..=*font::SIZE_RANGE.end() as f32).contains(&size) {
+        return Err(format!(
+            "`--font-size` must be between {} and {} pixels: {value:?}",
+            font::SIZE_RANGE.start(),
+            font::SIZE_RANGE.end()
+        ));
+    }
+    Ok(size)
+}
+
 fn main() {
     trace("main entry");
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -234,16 +263,28 @@ fn main() {
         }
     };
     trace("config read");
-    let font_size = file
-        .iter()
-        .find(|(k, _)| k == "font_size")
-        .and_then(|(_, v)| v.parse().ok())
-        .unwrap_or(font::SIZE);
-    let font_family = file
-        .iter()
-        .find(|(k, _)| k == "font_family")
-        .map(|(_, v)| v.clone())
-        .filter(|v| !v.trim().is_empty());
+    let font_size = match flag("--font-size") {
+        Some(value) => match parse_font_size(&value) {
+            Ok(size) => size,
+            Err(e) => {
+                eprintln!("aside: {e}");
+                exit(2);
+            }
+        },
+        None => file
+            .iter()
+            .find(|(k, _)| k == "font_size")
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(font::SIZE),
+    };
+    let font_family = flag("--font-family")
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            file.iter()
+                .find(|(k, _)| k == "font_family")
+                .map(|(_, v)| v.clone())
+                .filter(|v| !v.trim().is_empty())
+        });
     font::configure(font_size, font_family);
     // Animation is a setting, not a constant: the transitions are one frame each when
     // it is off, and the light and the scroll indicator stay either way.
@@ -526,7 +567,11 @@ fn run(options: Options) -> Result<(), String> {
         selecting: false,
         selection: None,
         copy_cursor: (0, 0),
-        copied: None,
+        toast: None,
+        returned_at: None,
+        new_content: false,
+        waiting_label: String::new(),
+        waiting_secs: u64::MAX,
         thumb_at: None,
         scroll_frac: 0.0,
         axis_source: None,
@@ -1608,6 +1653,24 @@ struct Question {
     leaving: Option<std::time::Instant>,
 }
 
+/// End the question: with animation, it starts leaving; without, it is gone in the
+/// frame that ends the request, so nothing waits out a motion the reader turned off.
+fn end_question(question: &mut Option<Question>, animate: bool, now: std::time::Instant) {
+    if !animate {
+        *question = None;
+        return;
+    }
+    if let Some(q) = question.as_mut() {
+        q.leaving = Some(now);
+    }
+}
+
+/// Typing takes the bar back: whatever the question was doing, particles included,
+/// it stops in the frame the new text appears.
+fn typing_takes_question(question: &mut Option<Question>) {
+    *question = None;
+}
+
 /// The panel's three states. Their sizes are fixed by the spec; this is the
 /// state machine behind them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1698,8 +1761,15 @@ struct State {
     selection: Option<panel::Selection>,
     /// Where the copy-mode cursor is: a line and a character of it.
     copy_cursor: (usize, usize),
-    /// When the last copy happened, and how many lines it took.
-    copied: Option<(std::time::Instant, usize)>,
+    /// The last transient bar note: what happened, and when it should stop showing.
+    toast: Option<(std::time::Instant, String)>,
+    /// When a failed request put its question back, so the bar can glow once.
+    returned_at: Option<std::time::Instant>,
+    /// Whether new reply text arrived while the reader was scrolled up.
+    new_content: bool,
+    /// The bar's waiting label, rebuilt only when the whole seconds change.
+    waiting_label: String,
+    waiting_secs: u64,
     /// When the user last moved the view: the scroll indicator's clock.
     thumb_at: Option<std::time::Instant>,
     /// What is left of a scroll that has not reached a whole pixel yet: a touchpad
@@ -1819,7 +1889,7 @@ impl State {
     /// What the panel paints itself as in this frame.
     fn look(&self) -> panel::Look {
         let (spread, rise) = self.tracks();
-        match self.morph.filter(|_| self.morphing()) {
+        let mut look = match self.morph.filter(|_| self.morphing()) {
             Some(m) => panel::Look::moving(
                 self.shape,
                 state_of(m.from),
@@ -1832,7 +1902,11 @@ impl State {
                 spread,
                 ..panel::Look::settled(self.shape)
             },
-        }
+        };
+        look.focused = self.keys.held();
+        look.returned = self.returned_ink();
+        look.new_content = self.new_content;
+        look
     }
 
     /// Move to another phase, morphing into it: the surface takes the larger of the
@@ -1851,6 +1925,7 @@ impl State {
         self.shape = shape;
         self.phase = to;
         self.phase_start = std::time::Instant::now();
+        self.waiting_secs = u64::MAX;
         self.apply_size();
         self.dirty = true;
     }
@@ -1863,6 +1938,33 @@ impl State {
             self.apply_size();
             self.dirty = true;
         }
+    }
+
+    /// Keep the bar's cancel hint current: always `Esc cancel`, and the elapsed whole
+    /// seconds once the request has run long enough to make waiting feel indefinite.
+    fn refresh_waiting_label(&mut self) {
+        if self.phase != Phase::Thinking {
+            return;
+        }
+        let secs = self.phase_start.elapsed().as_secs();
+        if self.waiting_secs == secs {
+            return;
+        }
+        self.waiting_secs = secs;
+        self.waiting_label = if self.phase_start.elapsed().as_millis() >= WAIT_HINT_AFTER_MS {
+            format!("Esc cancel ({secs}s)")
+        } else {
+            "Esc cancel".to_string()
+        };
+    }
+
+    /// How strongly the bar's returned-question rim is lit, from one at the moment the
+    /// question came back to zero at the end of its short glow.
+    fn returned_ink(&self) -> f32 {
+        self.returned_at.map_or(0.0, |at| {
+            (1.0 - at.elapsed().as_secs_f32() / (RETURN_HIGHLIGHT_MS as f32 / 1000.0))
+                .clamp(0.0, 1.0)
+        })
     }
 
     /// Where the light is on the rim, while a request has been open long enough to
@@ -2158,6 +2260,7 @@ impl State {
                 moving.then_some(FRAME_WAKE),
                 self.request.is_some().then_some(FRAME_WAKE),
                 self.copy_note_up().then_some(COPY_NOTE_WAKE),
+                self.returned_at.is_some().then_some(FRAME_WAKE),
                 self.light_in(),
                 self.thumb_in(),
                 self.caret_age().map(caret_flip_in),
@@ -2196,6 +2299,9 @@ impl State {
             return;
         }
         let question = self.input.take();
+        self.new_content = false;
+        self.toast = None;
+        self.returned_at = None;
         // The bar keeps it while the request runs, so what a reader sees while a slow
         // model thinks is the question they asked. The input line is empty: a follow-up
         // is a new question, not an edit of this one.
@@ -2256,9 +2362,7 @@ impl State {
             request.cancel();
             self.request = None;
             // Cancelling ends the request too: the question is drawn away like any other.
-            if let Some(q) = self.question.as_mut() {
-                q.leaving = Some(std::time::Instant::now());
-            }
+            end_question(&mut self.question, self.animate, std::time::Instant::now());
             let max_w = self.text_width();
             let State {
                 transcript,
@@ -2613,10 +2717,11 @@ impl State {
         }
     }
 
-    /// Whether `copied N lines` is still on the bar, which needs frames to clear it.
-    fn copy_note_up(&self) -> bool {
-        self.copied
-            .is_some_and(|(at, _)| at.elapsed() < Duration::from_millis(COPY_NOTE_MS))
+    /// Whether a transient bar note is still up, which needs frames to clear it.
+    fn toast_up(&self) -> bool {
+        self.toast
+            .as_ref()
+            .is_some_and(|(at, _)| at.elapsed() < Duration::from_millis(TOAST_MS))
     }
 
     /// `Ctrl` + the wheel: a notch away from the user is bigger, a notch towards them
@@ -2670,22 +2775,45 @@ impl State {
         self.dirty = true;
     }
 
-    /// The bar's right-hand label, which is how a swallowed keystroke explains
-    /// itself.
-    fn mode_label(&self) -> &'static str {
-        // The copy note outranks the mode label: it is what just happened, and it
-        // is only up for a moment.
-        if let Some((at, lines)) = self.copied
-            && at.elapsed() < Duration::from_millis(COPY_NOTE_MS)
+    /// Put a transient note in the bar.
+    fn note(&mut self, text: String) {
+        self.toast = Some((std::time::Instant::now(), text));
+        self.dirty = true;
+    }
+
+    /// The copy note, shared by the keyboard and copy mode.
+    fn note_copied(&mut self, lines: usize) {
+        self.note(if lines <= 1 {
+            "copied 1 line".to_string()
+        } else {
+            format!("copied {lines} lines")
+        });
+    }
+
+    /// The bar's right-hand label, copied into `buf` so a paint can borrow the panel
+    /// mutably while it draws. The label is short; the buffer is the allocation-free
+    /// way to hand it across that borrow.
+    fn bar_label<'a>(&self, buf: &'a mut [u8; 64]) -> &'a str {
+        let text = self.mode_label();
+        let mut n = text.len().min(buf.len());
+        while !text.is_char_boundary(n) {
+            n -= 1;
+        }
+        buf[..n].copy_from_slice(&text.as_bytes()[..n]);
+        std::str::from_utf8(&buf[..n]).unwrap_or("")
+    }
+
+    /// The bar's right-hand label: the last thing that happened, the mode that owns
+    /// the keyboard, or the request's own cancel hint.
+    fn mode_label(&self) -> &str {
+        if let Some((at, text)) = &self.toast
+            && at.elapsed() < Duration::from_millis(TOAST_MS)
         {
-            return if lines <= 1 {
-                "copied 1 line"
-            } else {
-                "copied lines"
-            };
+            return text;
         }
         match self.mode {
             Mode::Copy => "-- COPY --",
+            Mode::Typing if self.phase == Phase::Thinking => &self.waiting_label,
             Mode::Typing | Mode::Prefix => "",
         }
     }
@@ -2704,21 +2832,10 @@ impl State {
                 if pasted.cut || !fit {
                     // The line and the clipboard read are both capped, so a long
                     // selection is reported rather than silently shortened.
-                    let max_w = self.text_width();
-                    let State {
-                        transcript, font, ..
-                    } = self;
-                    if let Some(font) = font.as_ref() {
-                        transcript.add_note(
-                            &format!(
-                                "the question is capped at {} KiB and the clipboard text was cut",
-                                layout::INPUT_CAP / 1024
-                            ),
-                            font,
-                            max_w,
-                        );
-                    }
-                    self.dirty = true;
+                    self.note(format!(
+                        "pasted text cut at {} KiB",
+                        layout::INPUT_CAP / 1024
+                    ));
                 }
             }
             Err(e) => {
@@ -2789,6 +2906,7 @@ impl State {
                 "the compositor did not configure the window within {CONFIGURE_TIMEOUT_S}s"
             ));
         }
+        self.refresh_waiting_label();
         if self.phase == Phase::Thinking {
             // The blink is the only thing moving, so keep asking for frames.
             self.dirty = true;
@@ -2805,6 +2923,20 @@ impl State {
             self.dirty = true;
             if q.leaving.is_some_and(|at| at.elapsed() >= SUCK) {
                 self.question = None;
+            }
+        }
+        if self.toast.is_some() {
+            // A toast is on screen: keep the frames coming, and drop it when its time
+            // is up so the bar is a line again.
+            self.dirty = true;
+            if !self.toast_up() {
+                self.toast = None;
+            }
+        }
+        if self.returned_at.is_some() {
+            self.dirty = true;
+            if self.returned_ink() == 0.0 {
+                self.returned_at = None;
             }
         }
         if self.thumb_at.is_some() {
@@ -2832,9 +2964,14 @@ impl State {
             self.input.insert(&text);
             self.after_typing();
         }
+        if self.viewport.following {
+            // The reader is at the tail, so nothing is waiting below it.
+            self.new_content = false;
+        }
         let max_w = self.text_width();
         let mut text_arrived = false;
         let mut restore_question = false;
+        let mut content_hidden = false;
         if let Some(open) = self.request.as_mut() {
             let State {
                 transcript,
@@ -2846,9 +2983,7 @@ impl State {
             if let Some(font) = font.as_ref() {
                 if open.poll(transcript, font, max_w) {
                     text_arrived = true;
-                    if viewport.following {
-                        viewport.clamp(transcript.total_height());
-                    }
+                    content_hidden |= follow_stream(viewport, transcript.total_height());
                     self.dirty = true;
                 }
                 if !open.running() {
@@ -2857,8 +2992,8 @@ impl State {
                     // A failure gives the question back to the line instead of
                     // drawing it out of the bar; every other ending lets it go.
                     restore_question = matches!(close, Close::Failed(_));
-                    if !restore_question && let Some(q) = self.question.as_mut() {
-                        q.leaving = Some(std::time::Instant::now());
+                    if !restore_question {
+                        end_question(&mut self.question, self.animate, std::time::Instant::now());
                     }
                     match close {
                         Close::Complete => transcript.finish_answer(font),
@@ -2871,11 +3006,16 @@ impl State {
                     if std::mem::take(context_cut) {
                         transcript.add_note(&context_cut_note(), font, max_w);
                     }
-                    viewport.follow(transcript.total_height());
+                    // Finishing must not yank a reader who scrolled up to read:
+                    // only a view already at the tail follows the last line in.
+                    content_hidden |= follow_stream(viewport, transcript.total_height());
                     self.dirty = true;
                     text_arrived = true;
                 }
             }
+        }
+        if content_hidden {
+            self.new_content = true;
         }
         if restore_question {
             self.restore_question();
@@ -2922,12 +3062,11 @@ impl State {
             _ => None,
         };
         let stride = w as i32 * 4;
-        let label = self.mode_label();
-        let hint = self.mode_hint();
         // The caret's half of the blink is paint state, not a clock the painter owns: the
         // loop compares this against the clock to know when the next frame must go out.
         let caret = self.caret_age().is_some_and(caret_lit);
         self.caret_drawn = caret;
+        let hint = self.mode_hint();
 
         let buffer = match self.buffer.take() {
             Some(buffer) => buffer,
@@ -2946,6 +3085,8 @@ impl State {
             }
         };
         let s = self.s();
+        let mut label_buf = [0u8; 64];
+        let label = self.bar_label(&mut label_buf);
         let Some(canvas) = self.pool.canvas(&buffer) else {
             // The compositor still holds the previous buffer; try again later.
             self.buffer = Some(buffer);
@@ -3136,7 +3277,7 @@ impl State {
 
     fn after_typing(&mut self) {
         // The line is the reader's now; the question it held is the previous one.
-        self.question = None;
+        typing_takes_question(&mut self.question);
         self.dirty = true;
         self.report_cursor();
     }
@@ -3148,15 +3289,19 @@ impl State {
         let Some(question) = self.question.take() else {
             return;
         };
+        let now = std::time::Instant::now();
         if self.input.is_blank() {
             self.input.insert(&question.text);
             self.after_typing();
         } else {
-            let mut question = question;
-            question.leaving = Some(std::time::Instant::now());
-            self.question = Some(question);
+            let mut question = Some(question);
+            end_question(&mut question, self.animate, now);
+            self.question = question;
             self.dirty = true;
         }
+        // The question is back in the line: say so, and let the bar glow once.
+        self.returned_at = Some(now);
+        self.toast = Some((now, "question returned to the line".to_string()));
     }
 
     /// Tell the input method where the caret is, and what text surrounds it, so
@@ -3254,10 +3399,15 @@ impl State {
     }
 }
 
-/// `Viewport::follow` through a reference, so callers holding split borrows can
-/// still re-pin the view to the tail.
-fn viewport_follow(viewport: &mut Viewport, total: u32) {
-    viewport.follow(total);
+/// Whether the view is at the tail and moved with `total`, or stayed where the reader
+/// put it. The second answer is what the "new content" hint is made of.
+fn follow_stream(viewport: &mut Viewport, total: u32) -> bool {
+    if viewport.following {
+        viewport.clamp(total);
+        false
+    } else {
+        true
+    }
 }
 
 impl State {
@@ -3880,6 +4030,76 @@ impl PointerHandler for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streamed_text_does_not_yank_a_reader_who_scrolled_up() {
+        let mut v = Viewport::new(120);
+        v.clamp(1200);
+        assert!(v.following, "it starts at the tail");
+        v.scroll_by(-90, 1200);
+        assert!(!v.following);
+        let top = v.top;
+        assert!(
+            follow_stream(&mut v, 1400),
+            "text below the view is announced, not followed"
+        );
+        assert_eq!(v.top, top, "the reader's place did not move");
+
+        v.scroll_by(10_000, 1400);
+        assert!(v.following, "going back to the tail resumes following");
+        assert!(!follow_stream(&mut v, 1600), "and the tail follows again");
+        assert_eq!(v.top, 1600 - v.height);
+    }
+
+    #[test]
+    fn animation_off_ends_the_question_at_once() {
+        let now = std::time::Instant::now();
+        let question = || {
+            Some(Question {
+                text: "hi".to_string(),
+                at: now,
+                leaving: None,
+            })
+        };
+        let mut off = question();
+        end_question(&mut off, false, now);
+        assert!(off.is_none(), "no particles, no wait: the line is empty");
+
+        let mut on = question();
+        end_question(&mut on, true, now);
+        assert_eq!(
+            on.expect("still drawn").leaving,
+            Some(now),
+            "animation starts the leaving"
+        );
+    }
+
+    #[test]
+    fn the_help_lists_the_keys() {
+        for key in ["Ctrl+T", "copy mode", "Alt+hjkl", "Ctrl+V", "Esc"] {
+            assert!(USAGE.contains(key), "help mentions {key}");
+        }
+    }
+
+    #[test]
+    fn typing_stops_the_particles() {
+        let now = std::time::Instant::now();
+        let mut q = Some(Question {
+            text: "hi".to_string(),
+            at: now,
+            leaving: Some(now),
+        });
+        typing_takes_question(&mut q);
+        assert!(q.is_none(), "the new input is what the bar shows");
+    }
+
+    #[test]
+    fn the_font_size_flag_is_bounded() {
+        assert_eq!(parse_font_size("20").unwrap(), 20.0);
+        assert!(parse_font_size("7.5").is_err());
+        assert!(parse_font_size("72.1").is_err());
+        assert!(parse_font_size("big").is_err());
+    }
 
     #[test]
     fn a_refused_panel_reports_why_instead_of_going_quiet() {

@@ -54,10 +54,13 @@ lines, and seven keys — `model`, `base_url`, `proxy`, `font_size`, `font_famil
 model = "deepseek/deepseek-v4.1-flash"
 font_size = "24"                 # 8 to 72 logical px; the bar follows it
 font_family = "Noto Sans Mono"    # a name nothing provides falls back to the chain
-animations = "true"               # "false" skips the opening, the growth and the closing
+animations = "true"               # "false" skips the opening, the growth, the closing and the particle exit
 instructions = "Answer in Chinese."          # the reader's own constraints: one
 instructions = "At most three sentences."    # rule a line, joined in this order
 ```
+
+The configuration is read once at startup: a changed size needs a new run, or
+`--font-size`/`--font-family` on the command line.
 
 `instructions` is what an `AGENTS.md` is for a coding agent: every request leads with
 them as a `system` message, so a question and its follow-ups all answer under the same
@@ -75,7 +78,9 @@ export OPENCODE_API_KEY=...
 Flags override both: `--model`, `--base-url`, `--proxy`. `--output NAME` pins the
 panel to one output by name; without it the compositor places it, which on
 Hyprland is the focused monitor — with several outputs and no name, a click on
-another output does not close the panel. `aside --preview out.ppm` renders a
+another output does not close the panel. `--font-size PX` and `--font-family NAME`
+override the configuration for the run, which is also how `--preview` shows another
+size. `aside --preview out.ppm` renders a
 scripted transcript to an image without opening a window, plus `out.ppm.decompose.ppm`
 and `out.ppm.extract.ppm` for the question's leaving stages; this is how the layout
 and the animation are checked on a machine with no compositor.
@@ -119,7 +124,13 @@ left. The particles accelerate and fade, so the bar is an empty, typable line ag
 with the line leaving rather than blinking out. A key pressed in that moment drops
 it at once. If the request fails instead of ending, the question goes back into the
 input line, caret at its end, ready for `Enter` — unless you have started typing
-something else, in which case your text wins. The request carries at most 512 KiB
+something else, in which case your text wins; the bar says the question returned and
+glows for a moment. While an answer streams, scrolling up keeps your place: new text
+below the view raises a small `new content` mark at the bottom of the replies, and
+scrolling back to the tail clears it and resumes following. An unfocused bar carries
+a faint inner rim, so a keyboard that has gone elsewhere is visible; while a request
+runs the bar's right side reads `Esc cancel`, adding the elapsed seconds after three.
+The request carries at most 512 KiB
 of turn text; older turns are dropped from it and their text is freed, and the
 transcript says when that happened.
 `Up`/`Down` mark the highlighted line with brighter ink two pixels in from its
@@ -197,7 +208,7 @@ edge of their card rather than being cut off mid-line.
 | `Ctrl+V` | typing | paste the clipboard into the input line |
 
 The question is capped at 64 KiB: a longer selection is pasted up to the cap, on a
-whole character, and the transcript says it was cut.
+whole character, and the bar says it was cut.
 
 Two sizes, deliberately separate. `Ctrl+T` then `+`/`-` changes the **text** by two
 points. `Ctrl+Alt` `+`/`-` — or `Ctrl` with the wheel, or a pinch — changes the

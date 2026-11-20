@@ -41,6 +41,25 @@ bind=SUPER,A   # substitute your compositor's binding syntax
    out of the edge it was heading for at that instant — and the bar is an empty line
    again. A short question does the same, leaving to the left. Type while the answer
    streams and the question goes at once, the typing being what the line shows.
+1a4. Scroll up while a long answer is still streaming: the view stays where you put
+   it, a small `new content` mark appears at the bottom-left of the replies, and more
+   text does not pull the view down. Scroll back to the last line: the mark goes and
+   later text follows again. Let the request end while scrolled up: the view is not
+   yanked to the end.
+1a5. With `animations = "false"`, end a request while the question is in the bar: the
+   bar is empty at once, with no particles. With animations on, start typing while the
+   particles are still flying: the particles go and the typed line is what shows.
+1a6. Focus another window, then look at the panel: the bar has a faint inner rim and
+   no caret. Click the panel or summon it again: the rim goes and typing lands in it.
+   Ask a slow question: the bar's right side reads `Esc cancel`, and after three
+   seconds adds the seconds.
+1a7. Copy a line: the bar briefly says how many lines. Paste more than 64 KiB: the
+   line is capped on a whole character and the bar says the text was cut. Make a
+   request fail with an empty line: the question returns, the caret is at its end, the
+   bar says so and glows briefly.
+1a8. Run `aside --font-size 32 --preview out.ppm`: the image and its two leaving
+   frames are at 32 px. Run `aside --help`: the key table is there, including the
+   `Ctrl+T` prefix and copy mode.
 1b. While the panel is up, switch to another window with your compositor's binding
    and type there: the characters land in that window, not in the panel. Go back to
    the panel, type again: they land in the panel. This is the check that the panel

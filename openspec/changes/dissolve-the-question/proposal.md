@@ -30,7 +30,8 @@ right; a short question, which never moved, decomposes and leaves to the left.
   index, with a hard cap of 480 particles. Their start is the glyph's advance box at
   the frozen scroll; their exit is the frozen direction's edge, through the same
   travel/limit arithmetic `leaving_offset` uses today. Particles are one logical-pixel
-  squares in the prompt ink and are clipped to the bar's row and width.
+  squares in full white, brighter than the prompt ink so a dense cloud still reads on
+  the dark glass, and are clipped to the bar's row and width.
 - **Nothing else moves.** Layout, the bar's size, the caret and the input line are
   unchanged; typing still drops the leaving question at once; the transcript still
   draws no question.

@@ -92,6 +92,14 @@ pub struct Look {
     pub rise: f32,
     /// How far the card has spread across from its centre: 1 when full width.
     pub spread: f32,
+    /// Whether the compositor has given the panel the keyboard. An unfocused bar
+    /// draws a faint rim so "why is typing dead" has a visible answer.
+    pub focused: bool,
+    /// The returned-question glow on the bar, 1 at the moment the question came back
+    /// to 0 once it has faded.
+    pub returned: f32,
+    /// Whether reply text arrived while the reader was scrolled up.
+    pub new_content: bool,
 }
 
 impl Look {
@@ -103,6 +111,9 @@ impl Look {
             t: 1.0,
             rise: 1.0,
             spread: 1.0,
+            focused: true,
+            returned: 0.0,
+            new_content: false,
         }
     }
 
@@ -115,6 +126,9 @@ impl Look {
             t: t.clamp(0.0, 1.0),
             rise: rise.clamp(0.0, 1.0),
             spread: spread.clamp(0.0, 1.0),
+            focused: true,
+            returned: 0.0,
+            new_content: false,
         }
     }
 
@@ -420,6 +434,9 @@ pub fn draw(
             buf, w, font, transcript, viewport, selection, highlight, cursor, replies, clip, 1.0,
             aa, s,
         );
+        if look.new_content {
+            draw_new_content(buf, w, h, font, replies, aa, s);
+        }
     }
     render::body(buf, w, &bar, bar_tone);
 
@@ -499,6 +516,15 @@ pub fn draw(
     // The working light, over the rim the bar has just painted: a request in flight
     // is shown by the field's own edge, not by taking the field away. It runs while
     // the box stays up for a follow-up, so the box is never without a sign.
+    if look.returned > 0.0 {
+        let ink = render::dim(render::LABEL_ACCENT, 0.55 * look.returned);
+        draw_rim(buf, w, h, &bar, s, ink);
+    }
+    if !look.focused {
+        // A very faint inner rim: the bar is there, the keyboard is not. The caret
+        // already says so to a reader who looks; this says it from across the room.
+        draw_rim(buf, w, h, &bar, s, render::dim(render::FG_NORMAL, 0.28));
+    }
     if let Some(head) = head {
         render::orbit(buf, w, h, &bar, head, s);
     }
@@ -726,8 +752,7 @@ fn draw_bar(
                 }
                 if particles > 0.0 {
                     draw_particles(
-                        buf, w, h, font, p.text, text_x, baseline, limit, &leaving, since, s, ink,
-                        clip,
+                        buf, w, h, font, p.text, text_x, baseline, limit, &leaving, since, s, clip,
                     );
                 }
                 return;
@@ -1047,7 +1072,6 @@ fn draw_particles(
     leaving: &Leaving,
     since: Duration,
     s: u32,
-    ink: Bgra,
     clip: std::ops::Range<u32>,
 ) {
     let (_, mix) = decompose_mix(since);
@@ -1088,7 +1112,7 @@ fn draw_particles(
                 start_y.max(0.0) as u32,
                 x1 - x0,
                 side as u32,
-                render::dim(ink, alpha),
+                render::dim(render::FG_SEL, alpha),
             );
         },
     );
@@ -2736,6 +2760,57 @@ mod tests {
                 "a line that fits does not move"
             );
         }
+    }
+
+    /// The bar says when it does not have the keyboard, glows when a failed question
+    /// comes back, and marks replies that arrived below a scrolled-up view.
+    #[test]
+    fn the_bar_shows_focus_return_and_new_content() {
+        let f = font();
+        let scene = scene(&f, 300.0);
+        let (w, h) = sized(&scene, &f);
+        let (bw, bh) = frame(w, h);
+        let paint = |look: Look| {
+            let mut buf = vec![0u8; (bw * bh * 4) as usize];
+            draw(
+                &mut buf,
+                bw,
+                bh,
+                &f,
+                &scene.transcript,
+                &scene.input,
+                None,
+                &scene.viewport,
+                None,
+                None,
+                None,
+                false,
+                "",
+                "",
+                "",
+                look,
+                None,
+                0.0,
+                1,
+            );
+            buf
+        };
+        let settled = paint(Look::settled(State::Replies));
+        let unfocused = paint(Look {
+            focused: false,
+            ..Look::settled(State::Replies)
+        });
+        let returned = paint(Look {
+            returned: 1.0,
+            ..Look::settled(State::Replies)
+        });
+        let new_content = paint(Look {
+            new_content: true,
+            ..Look::settled(State::Replies)
+        });
+        assert_ne!(unfocused, settled, "the unfocused bar has a rim");
+        assert_ne!(returned, settled, "the returned bar glows");
+        assert_ne!(new_content, settled, "the new-content pill is drawn");
     }
 
     /// Copy mode has to say so: the bar reads `-- COPY --` on the right and the

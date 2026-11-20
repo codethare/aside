@@ -75,9 +75,21 @@ where it stands into small particles, and those are pulled out of the bar: the e
 and the scroll are the ones it had at that instant, so a line that was running out
 leaves to the left and one that was coming back leaves to the right, and a short
 question leaves to the left.  The particles accelerate and fade.  No caret is drawn
-while the question is there.  If the request fails, the
+while the question is there.  With
+.I animations
+false the question is gone in the frame the request ends, with no particles to wait
+out.  If the request fails, the
 question goes back into the input line, caret at its end, ready for another
-\fBEnter\fP; if typing has already resumed, that text wins.  A request carries at
+\fBEnter\fP; if typing has already resumed, that text wins.  The bar says the
+question returned and its inner rim glows briefly.
+While an answer streams, scrolling up keeps the reader's place: text that arrives
+below the view raises a small
+.B new content
+mark at the bottom of the replies, and scrolling back to the tail clears it and
+resumes following.  An unfocused bar draws a faint inner rim.  While a request is in
+flight the bar's right side reads
+.B Esc cancel
+and, after three seconds, the elapsed seconds.  A request carries at
 most 512 KiB of turn text: older turns are dropped from it, their text is freed,
 and the transcript says so.  The highlighted line is marked by brighter ink, two pixels in from its
 neighbours.  The replies arrive with the panel's own growth and are not animated a
@@ -149,6 +161,14 @@ it the compositor places the panel, which on Hyprland is the focused monitor; wi
 several outputs and no name, a click on another output does not close the panel.
 A name no output has is one line naming the outputs that exist, and no panel.
 .TP
+.BI \-\-font\-size " px"
+Override the configuration's text size for this run, between 8 and 72 logical
+pixels.  A size outside that range is one line on stderr, and no panel.
+.TP
+.BI \-\-font\-family " name"
+Override the configuration's font family for this run.  A name nothing provides
+falls back to the chain.
+.TP
 .B \-\-preview " file"
 Render a scripted conversation to
 .I file
@@ -161,7 +181,7 @@ show the question coming apart and being pulled out.  This is how the layout and
 the leaving are checked on a machine with no compositor.
 .TP
 .B \-\-help
-Print usage and exit.
+Print usage, the key table and exit.
 .TP
 .B \-\-version
 Print the version and exit.
@@ -182,12 +202,13 @@ Move it one page.
 .B Alt+C ", " Ctrl+C
 Copy the highlighted line to the clipboard with
 .BR wl\-copy (1).
+The bar briefly says how many lines were copied.
 .TP
 .B Ctrl+V
 Paste the clipboard into the input line with
 .BR wl\-paste (1).
 The question is capped at 64 KiB: a longer selection is pasted up to the cap, on a
-whole character, and the transcript says it was cut.
+whole character, and the bar says it was cut.
 .TP
 .B Ctrl+Alt+minus ", " Ctrl+Alt+plus ", " Ctrl+Alt+equal
 Make the panel's box smaller or bigger by 15 per cent, in every mode: its width and

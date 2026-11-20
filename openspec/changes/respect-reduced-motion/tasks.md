@@ -6,6 +6,7 @@
 - [x] 1.2 `State::animate` is read from the configuration at startup
 - [x] 1.3 `clock_ms(animate, since)` returns the elapsed milliseconds, or a reading past every deadline when animation is off; the opening, the closing and a shape change all read it
 - [x] 1.4 A test pins it: with animation off the tracks are already at their end and the closing has already finished; with it on they are not
+- [x] 1.5 A question that ends with animation off is cleared in that frame, not left to a 340 ms particle exit
 
 ## 2. Docs and gate
 

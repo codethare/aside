@@ -10,10 +10,12 @@ the key absent, the panel is animated.
 
 With `animations = "false"` the panel SHALL change state without the transitions: its
 opening, its growth into the replies and its closing SHALL each take one frame, and no
-intermediate frame SHALL be drawn for them. What the panel uses to report that
-something is happening — the light running round the bar's rim while a request is open,
-the scroll indicator showing and fading while the view moves — SHALL stay: they are
-cues about the request and the view, not the panel moving.
+intermediate frame SHALL be drawn for them. A question that ends with the request
+SHALL be cleared in that same frame, with no decompose and no particles: a motion the
+reader turned off is not waited out. What the panel uses to report that something is
+happening — the light running round the bar's rim while a request is open, the scroll
+indicator showing and fading while the view moves — SHALL stay: they are cues about
+the request and the view, not the panel moving.
 
 The setting SHALL NOT change the panel's sizes, the fixed reply box, or any key.
 
@@ -26,6 +28,11 @@ The setting SHALL NOT change the panel's sizes, the fixed reply box, or any key.
 
 - **WHEN** `animations = "false"` and a request takes longer than half a second
 - **THEN** the light still runs round the bar's rim until the first text arrives
+
+#### Scenario: Animations off drops the question at once
+
+- **WHEN** `animations = "false"` and the request ends while the question is in the bar
+- **THEN** the bar is empty in the frame the request ends, with no decompose and no particles
 
 #### Scenario: A value that is not a boolean is refused
 

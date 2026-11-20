@@ -21,11 +21,12 @@ it reads.
 - One new configuration key, `animations`, `"true"` or `"false"`. Anything else is one
   line naming the file and the line, and no panel — the same contract every other key
   has. Absent means animated.
-- With it `false` the three transitions are skipped, not shortened: the tracks of the
+- With it `false` the transitions are skipped, not shortened: the tracks of the
   opening and the closing are already at their end, and a shape change has already
   settled, so the panel appears, changes shape and goes in a single frame each. The
-  working light on the rim and the scroll indicator's fade stay: they are cues that
-  something is happening, not the panel moving.
+  question's particle leaving is skipped too: the bar is empty in the frame the
+  request ends. The working light on the rim and the scroll indicator's fade stay:
+  they are cues that something is happening, not the panel moving.
 - The reading is one helper, `clock_ms`, at the three places where a duration is
   compared against elapsed time. Nothing else in the state machine changes.
 
