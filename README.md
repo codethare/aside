@@ -76,8 +76,9 @@ Flags override both: `--model`, `--base-url`, `--proxy`. `--output NAME` pins th
 panel to one output by name; without it the compositor places it, which on
 Hyprland is the focused monitor — with several outputs and no name, a click on
 another output does not close the panel. `aside --preview out.ppm` renders a
-scripted transcript to an image without opening a window, which is how the layout
-is checked on a machine with no compositor.
+scripted transcript to an image without opening a window, plus `out.ppm.decompose.ppm`
+and `out.ppm.extract.ppm` for the question's leaving stages; this is how the layout
+and the animation are checked on a machine with no compositor.
 
 ## What it looks like
 
@@ -110,9 +111,11 @@ gaps. A question you sent is kept for the next request and is not part of the
 transcript: the bar keeps it in view while the request runs, and a question wider
 than the bar scrolls slowly out to its last character, holds, comes back, and turns
 round again for as long as the request is unfinished. The bar is the question's
-while it is out — no caret on a line nobody can type into. When the request ends
-it is drawn out of the bar: it keeps the heading it had, accelerates and fades, and
-leaves by the edge it was moving towards, so the bar is an empty, typable line again
+while it is out — no caret on a line nobody can type into. When the request ends it
+comes apart into particles where it stands, and those are pulled out of the bar:
+the scroll and the heading are frozen at that instant, so a line running out leaves
+to the left, one coming back leaves to the right, and a short question leaves to the
+left. The particles accelerate and fade, so the bar is an empty, typable line again
 with the line leaving rather than blinking out. A key pressed in that moment drops
 it at once. If the request fails instead of ending, the question goes back into the
 input line, caret at its end, ready for `Enter` — unless you have started typing
@@ -317,7 +320,7 @@ Every path-opening call in the program, in full:
 |---|---|---|
 | `font.rs` | `fs::read` on the chain's font files | read |
 | `provider.rs` | `read_to_string` on `config.toml` | read |
-| `main.rs` | `fs::write` of the `--preview` image, and only under `--preview` | write |
+| `main.rs` | `fs::write` of the `--preview` images, and only under `--preview` | write |
 | `control.rs` | `remove_file` of a stale socket in `$XDG_RUNTIME_DIR` (tmpfs), before binding a new one | unlink |
 
 No state, cache or history directory is created or read, and no temporary file is

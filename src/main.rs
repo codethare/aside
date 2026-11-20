@@ -130,7 +130,8 @@ usage: aside [--model MODEL] [--base-url URL] [--proxy URL] [--output OUTPUT] [-
   --proxy URL       proxy for the request, any scheme curl accepts
                     (e.g. socks5h://127.0.0.1:1080); default is a direct connection
   --output OUTPUT   pin the panel to this output; without it the compositor places it
-  --preview FILE    render a scripted conversation to a PPM file and exit
+  --preview FILE    render a scripted conversation to FILE and its leaving stages
+                    to FILE.decompose.ppm and FILE.extract.ppm, then exit
 ";
 
 /// What a key press means. Kept pure, so the key table in the spec can be
@@ -358,30 +359,55 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
     // when an answer outgrows the box.
     let mut viewport = Viewport::new(panel::transcript_px(ph, &font, 1));
     viewport.follow(transcript.total_height());
-    let mut buf = vec![0u8; (w * h * 4) as usize];
-    panel::draw(
-        &mut buf,
-        w,
-        h,
-        &font,
-        &transcript,
-        &input,
-        None,
-        &viewport,
-        None,
-        Some(0),
-        None,
-        true,
-        "",
-        "",
-        "",
-        panel::Look::settled(panel::State::Replies),
-        None,
-        0.0,
-        None,
-        1,
-    );
-    std::fs::write(path, panel::to_ppm(&buf, w, h)).map_err(|e| format!("{}: {e}", path.display()))
+    let frame = |pending: Option<panel::Pending<'_>>| {
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        panel::draw(
+            &mut buf,
+            w,
+            h,
+            &font,
+            &transcript,
+            &input,
+            pending,
+            &viewport,
+            None,
+            Some(0),
+            None,
+            true,
+            "",
+            "",
+            "",
+            panel::Look::settled(panel::State::Replies),
+            None,
+            0.0,
+            None,
+            1,
+        );
+        buf
+    };
+    let write = |path: &std::path::Path, buf: &[u8]| {
+        std::fs::write(path, panel::to_ppm(buf, w, h))
+            .map_err(|e| format!("{}: {e}", path.display()))
+    };
+    write(path, &frame(None))?;
+    // The leaving's two stages, so the break-up and the pull can be looked at without
+    // a compositor. The question is wider than the bar, which is where the marquee
+    // and the edge choice matter.
+    let question = "a question long enough that the bar cannot hold all of it at once, \
+                    and then a few words more";
+    for (suffix, since) in [
+        ("decompose.ppm", DECOMPOSE),
+        ("extract.ppm", DECOMPOSE + EXTRACT / 2),
+    ] {
+        let pending = panel::Pending {
+            text: question,
+            elapsed: Duration::from_secs(1) + since,
+            leaving: Some(since),
+        };
+        let out = std::path::PathBuf::from(format!("{}.{suffix}", path.display()));
+        write(&out, &frame(Some(pending)))?;
+    }
+    Ok(())
 }
 
 /// How long to wait for the first configure before calling the compositor's
@@ -1244,10 +1270,15 @@ const LAP_MS: u128 = 1_400;
 const MARQUEE_SPEED: f32 = 26.0;
 const MARQUEE_HOLD: Duration = Duration::from_millis(700);
 
-/// How long a question takes to be drawn out of the bar when its request ends: long
-/// enough to read as being pulled, short enough that the bar is a line again before a
-/// reader can reach the keyboard.
-pub(crate) const SUCK: Duration = Duration::from_millis(260);
+/// How long the question's glyphs take to come apart into particles when its request
+/// ends: long enough to see the line break up, short enough not to hold the bar.
+pub(crate) const DECOMPOSE: Duration = Duration::from_millis(120);
+/// How long those particles take to be pulled out of the bar once the line has come
+/// apart. The whole leaving is the two together.
+pub(crate) const EXTRACT: Duration = Duration::from_millis(220);
+/// How long a question takes to leave the bar when its request ends: the decompose and
+/// the extract, and no longer. The bar is a line again before a reader can reach it.
+pub(crate) const SUCK: Duration = Duration::from_millis(340);
 
 /// How long a request runs before the working light appears. A request that is
 /// answered sooner shows no cue at all: one that appears and vanishes is noise.

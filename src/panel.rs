@@ -15,7 +15,7 @@ use crate::font::PanelFont;
 use crate::layout::{self, Blocks, Input, MAX_ROWS, Style, Viewport};
 use crate::render::{self, Bgra, Subpixel};
 use crate::transcript::{Kind, Row, Transcript};
-use crate::{MARQUEE_HOLD, MARQUEE_SPEED};
+use crate::{DECOMPOSE, EXTRACT, MARQUEE_HOLD, MARQUEE_SPEED};
 
 /// A question that is already out. The bar shows it instead of the input line, at a
 /// scroll that depends only on how long it has been out, so nothing has to be kept
@@ -25,9 +25,18 @@ pub struct Pending<'a> {
     pub text: &'a str,
     pub elapsed: Duration,
     /// Set once the request ends: how long into being drawn out of the bar this frame
-    /// is. The line keeps its heading and leaves the edge it was moving towards.
+    /// is. The scroll and the heading are frozen at the instant it was set.
     pub leaving: Option<Duration>,
 }
+
+/// The line comes apart into this many particles per visible glyph, up to a hard cap:
+/// the bar is one row, and a longer question must not turn a frame into a field.
+const PARTICLES_PER_GLYPH: usize = 3;
+const MAX_PARTICLES: usize = 240;
+
+/// The most of the extract a particle can spend waiting for its seed's turn. The
+/// stagger is what makes the pull read as a cloud rather than one rigid block.
+const PARTICLE_DELAY: f32 = 0.25;
 
 /// The panel's three shapes, as shapes rather than as the state machine's phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -693,25 +702,55 @@ fn draw_bar(
     // because there is nowhere to put one, and no pre-edit because nothing composes it.
     if let Some(p) = pending {
         let travel = (render::advance(font, p.text) - limit).max(0.0);
-        let (scroll, solid) = match p.leaving {
-            Some(since) => leaving_offset(p.elapsed, since, travel, limit, s),
-            None => (marquee(p.elapsed, travel, s), 1.0),
-        };
-        let (skip, shift) = scroll_to(font, p.text, scroll);
-        render::draw_text(
-            buf,
-            w,
-            h,
-            font,
-            text_x - shift,
-            baseline,
-            &p.text[skip..],
-            render::dim(ink, solid),
-            limit + shift,
-            clip.clone(),
-            aa,
-        );
-        return;
+        match p.leaving {
+            Some(since) => {
+                // Read once: a marquee that turns round during the exit must not
+                // change the edge the particles were already pulled towards.
+                let leaving = Leaving::at(p.elapsed, since, travel, limit, s);
+                let (glyph, particles) = decompose_mix(since);
+                if glyph > 0.0 {
+                    let (skip, shift) = scroll_to(font, p.text, leaving.start);
+                    render::draw_text(
+                        buf,
+                        w,
+                        h,
+                        font,
+                        text_x - shift,
+                        baseline,
+                        &p.text[skip..],
+                        render::dim(ink, glyph),
+                        limit + shift,
+                        clip.clone(),
+                        aa,
+                    );
+                }
+                if particles > 0.0 {
+                    draw_particles(
+                        buf, w, h, font, p.text, text_x, baseline, limit, &leaving, since, s, ink,
+                        clip,
+                    );
+                }
+                return;
+            }
+            None => {
+                let scroll = marquee(p.elapsed, travel, s);
+                let (skip, shift) = scroll_to(font, p.text, scroll);
+                render::draw_text(
+                    buf,
+                    w,
+                    h,
+                    font,
+                    text_x - shift,
+                    baseline,
+                    &p.text[skip..],
+                    ink,
+                    limit + shift,
+                    clip.clone(),
+                    aa,
+                );
+                return;
+            }
+        }
     }
     // While the prefix waits, the bar carries the instruction and no input: the
     // caret and the pre-edit belong to a line nobody is typing on.
@@ -886,26 +925,181 @@ fn marquee_left(elapsed: Duration, travel: f32, s: u32) -> bool {
     t < run || t >= leg + run
 }
 
-/// Where the line is and how solid it is once the request has ended: it carries on the
-/// way it was going, off the edge it was heading for, fading as it goes.
-fn leaving_offset(
-    elapsed: Duration,
-    since: Duration,
-    travel: f32,
+/// The leaving read once: where the line stood and which edge it was heading for when
+/// the request ended. `elapsed` is the request's age and `since` the age of the leaving,
+/// so their difference is the instant the request ended and stays fixed as frames pass.
+#[derive(Debug, Clone, Copy)]
+struct Leaving {
+    start: f32,
+    to: f32,
+}
+
+impl Leaving {
+    fn at(elapsed: Duration, since: Duration, travel: f32, limit: f32, s: u32) -> Self {
+        let age = elapsed.saturating_sub(since);
+        let start = marquee(age, travel, s);
+        // A line that never moved has no heading; it leaves to the left, the way a line
+        // read to its end would go.
+        let to = if marquee_left(age, travel, s) {
+            travel + limit
+        } else {
+            -limit
+        };
+        Self { start, to }
+    }
+}
+
+/// How much of the line is still glyph and how much has become particles: `0` is the
+/// whole line, `DECOMPOSE` is the whole cloud.
+fn decompose_mix(since: Duration) -> (f32, f32) {
+    let d = (since.as_secs_f32() / DECOMPOSE.as_secs_f32()).clamp(0.0, 1.0);
+    (1.0 - d, d)
+}
+
+/// How far into the extract `since` is, from `0` at the end of the decompose to `1` at
+/// `SUCK`.
+fn extract_progress(since: Duration) -> f32 {
+    let after = since.saturating_sub(DECOMPOSE);
+    (after.as_secs_f32() / EXTRACT.as_secs_f32()).clamp(0.0, 1.0)
+}
+
+/// One particle's flight through the extract: how far along the pull it is and how much
+/// ink it has left. The seed decides how long it waits, so the cloud leaves raggedly.
+fn particle_flight(seed: u32, extract: f32) -> (f32, f32) {
+    let delay = fraction(seed, 0) * PARTICLE_DELAY;
+    let local = ((extract - delay) / (1.0 - delay)).clamp(0.0, 1.0);
+    // The square is the acceleration: it leaves slowly and is pulled out fast.
+    (local * local, 1.0 - local)
+}
+
+/// A deterministic 32-bit seed for one particle of one glyph. `byte` is the glyph's
+/// byte index in the line, so a particle keeps its place across frames.
+fn particle_seed(byte: usize, particle: u32) -> u32 {
+    let mut h = (byte as u32)
+        .wrapping_mul(0x9e37_79b1)
+        .wrapping_mul(0x85eb_ca77)
+        ^ particle.wrapping_mul(0x7feb_352d);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7feb_352d);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846c_a68b);
+    h ^ (h >> 16)
+}
+
+/// One lane of a seed as a fraction in `[0, 1)`. Rotating and mixing per lane keeps the
+/// x, y, size, delay and jitter of one particle independent of each other.
+fn fraction(seed: u32, lane: u32) -> f32 {
+    let v = seed.rotate_left(lane.wrapping_mul(7)) ^ lane.wrapping_mul(0x9e37_79b9);
+    (v & 0xffff) as f32 / 65536.0
+}
+
+/// Walk the glyphs the bar can see at `scroll`, emitting up to `MAX_PARTICLES` seeds.
+/// `x` is relative to the bar's text edge and `advance` is the glyph's box.
+fn for_each_particle(
+    font: &PanelFont,
+    text: &str,
+    scroll: f32,
     limit: f32,
+    mut f: impl FnMut(usize, u32, f32, f32, u32),
+) {
+    let (skip, shift) = scroll_to(font, text, scroll);
+    let mut pen = -shift;
+    let mut count = 0;
+    for (offset, ch) in text[skip..].char_indices() {
+        let advance = render::advance(font, ch.encode_utf8(&mut [0; 4]));
+        let at = skip + offset;
+        // The same box `draw_text` would paint: a glyph wholly off either edge, or
+        // one the right edge would cut in half, is not part of the visible line.
+        if pen + advance > 0.0 && pen + advance <= limit {
+            for particle in 0..PARTICLES_PER_GLYPH {
+                if count >= MAX_PARTICLES {
+                    return;
+                }
+                f(
+                    at,
+                    particle as u32,
+                    pen,
+                    advance,
+                    particle_seed(at, particle as u32),
+                );
+                count += 1;
+            }
+        }
+        pen += advance;
+        if pen >= limit {
+            break;
+        }
+    }
+}
+
+/// Paint the cloud over the glyphs: it fades in where the line stood, then accelerates
+/// out of the frozen edge, clipped to the bar's text width and rows.
+#[allow(clippy::too_many_arguments)]
+fn draw_particles(
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    font: &PanelFont,
+    text: &str,
+    text_x: f32,
+    baseline: f32,
+    limit: f32,
+    leaving: &Leaving,
+    since: Duration,
     s: u32,
-) -> (f32, f32) {
-    let start = marquee(elapsed, travel, s);
-    // A line that never moved has no heading; it leaves to the left, the way a line
-    // read to its end would go.
-    let to = if marquee_left(elapsed, travel, s) {
-        travel + limit
-    } else {
-        -limit
-    };
-    let p = (since.as_secs_f32() / crate::SUCK.as_secs_f32()).clamp(0.0, 1.0);
-    // The square makes it leave at the speed it had and accelerate out.
-    (start + (to - start) * p * p, 1.0 - p)
+    ink: Bgra,
+    clip: std::ops::Range<u32>,
+) {
+    let (_, mix) = decompose_mix(since);
+    let extract = extract_progress(since);
+    let delta = leaving.to - leaving.start;
+    let line_top = baseline - font.ascent_px;
+    let scale = s as f32;
+    for_each_particle(
+        font,
+        text,
+        leaving.start,
+        limit,
+        |_, _, x, advance, seed| {
+            let side = ((1 + (seed & 1)) * s) as f32;
+            let jitter = (fraction(seed, 3) - 0.5) * 2.0 * scale * mix;
+            let rise = (fraction(seed, 4) - 0.5) * 2.0 * scale * mix;
+            let start_x = text_x + x + fraction(seed, 1) * advance + jitter;
+            let start_y = line_top + fraction(seed, 2) * font.line_h + rise;
+            let (travel, alpha) = if extract > 0.0 {
+                particle_flight(seed, extract)
+            } else {
+                (0.0, mix)
+            };
+            if alpha <= 0.0 {
+                return;
+            }
+            let Some((x0, x1)) =
+                particle_span(start_x - delta * travel, side, text_x, text_x + limit)
+            else {
+                return;
+            };
+            band(
+                buf,
+                w,
+                h,
+                clip.clone(),
+                x0,
+                start_y.max(0.0) as u32,
+                x1 - x0,
+                side as u32,
+                render::dim(ink, alpha),
+            );
+        },
+    );
+}
+
+/// A particle's pixel span inside the bar's text width, or nothing when it is wholly
+/// outside it. Clamping both edges keeps the width exact.
+fn particle_span(x: f32, side: f32, left: f32, right: f32) -> Option<(u32, u32)> {
+    let a = x.max(left);
+    let b = (x + side).min(right);
+    (b > a).then_some((a as u32, b as u32))
 }
 
 /// How far into a question that is already out the bar has scrolled, in pixels.
@@ -2261,21 +2455,31 @@ mod tests {
             paint(Duration::from_secs(60), None, false, Some("hi")),
             "a question that fits does not move"
         );
-        // The exit starts as the scroll and runs the line out of the bar: an inkless
-        // bar within `SUCK` is the same frame as an empty one.
+        // The exit starts as the scroll, comes apart in place, then the cloud is
+        // pulled out; an inkless bar at `SUCK` is the same frame as an empty one.
+        let left = Duration::from_secs(1);
+        let at = |since| paint(left + since, Some(since), false, Some(long));
         assert_eq!(
-            paint(
-                Duration::from_secs(1),
-                Some(Duration::ZERO),
-                false,
-                Some(long)
-            ),
-            paint(Duration::from_secs(1), None, false, Some(long)),
+            at(Duration::ZERO),
+            paint(left, None, false, Some(long)),
             "the exit begins where the scroll was"
         );
+        let glyphs = at(DECOMPOSE / 2);
+        assert!(inked(&glyphs) > 0, "half-decomposed, the bar still has ink");
+        assert_ne!(
+            glyphs,
+            at(Duration::ZERO),
+            "and it is not the line any more"
+        );
+        let cloud = at(DECOMPOSE);
+        assert!(inked(&cloud) > 0, "the particles are at the glyphs' places");
+        assert_ne!(cloud, glyphs, "the glyphs have gone");
+        let pulled = at(DECOMPOSE + EXTRACT / 2);
+        assert!(inked(&pulled) > 0, "the cloud is still in the bar");
+        assert_ne!(pulled, cloud, "but it has moved");
         assert_eq!(
-            paint(Duration::from_secs(1), Some(crate::SUCK), false, Some(long)),
-            paint(Duration::from_secs(1), Some(crate::SUCK), false, None),
+            at(crate::SUCK),
+            paint(left + crate::SUCK, Some(crate::SUCK), false, None),
             "and the bar is empty once it has left"
         );
 
@@ -2382,34 +2586,98 @@ mod tests {
         assert!(marquee_left(Duration::from_secs(3), 0.0, s));
     }
 
-    /// The exit is the scroll read one more way: where it was at that instant, then one
-    /// accelerated run past the edge it was heading for, fading out.
+    /// The exit is the scroll read once: where the line stood and which edge it was
+    /// heading for at the instant the request ended. A marquee that would have turned
+    /// round during the leaving must not change either.
     #[test]
-    fn a_finished_question_is_drawn_off_the_edge_it_was_heading_for() {
-        let (travel, limit, s) = (200.0, 300.0, 1);
+    fn the_leaving_freezes_the_scroll_and_the_edge() {
+        let (travel, limit, s) = (20.0, 300.0, 1);
         let run = travel / MARQUEE_SPEED;
         let hold = MARQUEE_HOLD.as_secs_f32();
         let leg = run + hold;
 
+        // Coming back, a hair before it reaches the start: the old read would turn
+        // round to the left within the leaving.
+        let leave = Duration::from_secs_f32(leg + run - 0.01);
+        let frozen = Leaving::at(leave, Duration::ZERO, travel, limit, s);
+        assert_eq!(frozen.start, marquee(leave, travel, s));
+        assert_eq!(frozen.to, -limit, "it is heading right");
+        for since in [
+            Duration::ZERO,
+            Duration::from_millis(10),
+            Duration::from_millis(30),
+            crate::SUCK,
+        ] {
+            let later = Leaving::at(leave + since, since, travel, limit, s);
+            assert_eq!(later.start, frozen.start, "the start is frozen");
+            assert_eq!(later.to, frozen.to, "the edge is frozen");
+        }
+        assert!(
+            marquee_left(leave + Duration::from_millis(30), travel, s),
+            "the live marquee has turned by now, which is what freezing avoids"
+        );
+
         // Outbound: the line is running left, so it leaves by the left edge.
         let out = Duration::from_secs_f32(run / 2.0);
-        let (x, solid) = leaving_offset(out, Duration::ZERO, travel, limit, s);
-        assert_eq!(x, marquee(out, travel, s), "the exit starts on the scroll");
-        assert_eq!(solid, 1.0, "at full ink");
-        let (x, solid) = leaving_offset(out, crate::SUCK, travel, limit, s);
-        assert_eq!(x, travel + limit, "and ends past the left edge");
-        assert_eq!(solid, 0.0, "with no ink left");
+        assert_eq!(
+            Leaving::at(out, Duration::ZERO, travel, limit, s).to,
+            travel + limit,
+            "outbound leaves left"
+        );
+        // A question that fits never moved, so it leaves the way a read line would.
+        assert_eq!(
+            Leaving::at(Duration::from_secs(3), Duration::ZERO, 0.0, limit, s).to,
+            limit,
+            "a short question leaves left"
+        );
+    }
 
-        // Coming back: it is running right, so it leaves by the right edge, which is a
-        // negative offset: the line is pushed out past the right edge.
-        let back = Duration::from_secs_f32(leg + run / 2.0);
-        let (x, _) = leaving_offset(back, crate::SUCK, travel, limit, s);
-        assert_eq!(x, -limit, "and ends past the right edge");
+    /// The line is gone by the time the extract begins, and the cloud is gone by
+    /// `SUCK`; the two stages add up to the whole leaving.
+    #[test]
+    fn the_leaving_decomposes_before_it_extracts() {
+        assert_eq!(crate::SUCK, DECOMPOSE + EXTRACT);
+        assert_eq!(decompose_mix(Duration::ZERO), (1.0, 0.0));
+        let (glyph, particles) = decompose_mix(DECOMPOSE / 2);
+        assert!(glyph > 0.0 && glyph < 1.0, "the glyphs are half gone");
+        assert_eq!(particles, 1.0 - glyph, "what left the glyph is a particle");
+        assert_eq!(decompose_mix(DECOMPOSE), (0.0, 1.0));
 
-        // Both keep going the way they were going, and neither arrives before its time.
-        let (early, solid) = leaving_offset(out, crate::SUCK / 2, travel, limit, s);
-        assert!(early > marquee(out, travel, s) && early < travel + limit);
-        assert!((0.0..1.0).contains(&solid), "half-way is half solid");
+        assert_eq!(extract_progress(Duration::ZERO), 0.0);
+        assert_eq!(extract_progress(DECOMPOSE), 0.0);
+        assert!((extract_progress(DECOMPOSE + EXTRACT / 2) - 0.5).abs() < 1e-6);
+        assert_eq!(extract_progress(crate::SUCK), 1.0);
+    }
+
+    /// A particle's seed is stable across frames and its flight runs from the glyph
+    /// to the edge, fading out; the cloud has a hard cap however long the line is.
+    #[test]
+    fn particles_are_seeded_deterministically_and_capped() {
+        assert_eq!(particle_seed(7, 2), particle_seed(7, 2));
+        assert_ne!(particle_seed(7, 2), particle_seed(7, 1));
+        assert_ne!(particle_seed(7, 2), particle_seed(8, 2));
+
+        let seed = particle_seed(7, 2);
+        assert_eq!(particle_flight(seed, 0.0), (0.0, 1.0));
+        assert_eq!(particle_flight(seed, 1.0), (1.0, 0.0));
+        let (travel, alpha) = particle_flight(seed, 0.5);
+        assert!(travel > 0.0 && travel < 1.0, "it is on its way");
+        assert!(alpha > 0.0 && alpha < 1.0, "and fading");
+
+        let f = font();
+        let long = "x".repeat(400);
+        let mut count = 0;
+        for_each_particle(&f, &long, 0.0, 100_000.0, |_, _, _, _, _| count += 1);
+        assert_eq!(count, MAX_PARTICLES, "a long line cannot flood the bar");
+    }
+
+    /// Particles are clipped to the bar's text width, including one straddling an edge.
+    #[test]
+    fn particles_are_clipped_to_the_bars_width() {
+        assert_eq!(particle_span(10.0, 2.0, 0.0, 300.0), Some((10, 12)));
+        assert_eq!(particle_span(-5.0, 2.0, 0.0, 300.0), None);
+        assert_eq!(particle_span(299.5, 2.0, 0.0, 300.0), Some((299, 300)));
+        assert_eq!(particle_span(300.0, 2.0, 0.0, 300.0), None);
     }
 
     /// A question too long for the bar is read, not flicked past: it runs at

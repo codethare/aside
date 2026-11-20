@@ -70,9 +70,12 @@ failure or note that belongs to it, 8 pixels apart.  Earlier turns are kept for
 the request and drawn nowhere.  The question you typed is not part of the
 transcript either: the bar keeps it while its request runs, and a question wider
 than the bar scrolls slowly out to its last character, holds, comes back, and turns
-round again until the request is over.  When the request ends it is drawn out of
-the bar: it keeps its heading, accelerates and fades, and leaves by the edge it was
-moving towards.  No caret is drawn while it is there.  If the request fails, the
+round again until the request is over.  When the request ends the line comes apart
+where it stands into small particles, and those are pulled out of the bar: the edge
+and the scroll are the ones it had at that instant, so a line that was running out
+leaves to the left and one that was coming back leaves to the right, and a short
+question leaves to the left.  The particles accelerate and fade.  No caret is drawn
+while the question is there.  If the request fails, the
 question goes back into the input line, caret at its end, ready for another
 \fBEnter\fP; if typing has already resumed, that text wins.  A request carries at
 most 512 KiB of turn text: older turns are dropped from it, their text is freed,
@@ -146,11 +149,16 @@ it the compositor places the panel, which on Hyprland is the focused monitor; wi
 several outputs and no name, a click on another output does not close the panel.
 A name no output has is one line naming the outputs that exist, and no panel.
 .TP
-.BI \-\-preview " file"
+.B \-\-preview " file"
 Render a scripted conversation to
 .I file
 as a PPM image and exit, without opening a window or contacting a provider.
-This is how the layout is checked on a machine with no compositor.
+Two more images,
+.IR file .decompose.ppm
+and
+.IR file .extract.ppm,
+show the question coming apart and being pulled out.  This is how the layout and
+the leaving are checked on a machine with no compositor.
 .TP
 .B \-\-help
 Print usage and exit.
