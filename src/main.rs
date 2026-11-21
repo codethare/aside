@@ -863,6 +863,46 @@ fn byte_index(text: &str, index: usize) -> usize {
 }
 
 /// How many lines a selection covers: the rows from its first end to its last.
+/// What a copy takes from the visible rows: the pointer's characters, or the whole
+/// highlighted line. A table row is copied once per logical row as TSV, so the
+/// screen's padding never reaches the clipboard and a wrapped cell is not cut.
+fn copy_text(
+    rows: &[crate::transcript::Row<'_>],
+    selection: Option<panel::Selection>,
+    highlight: usize,
+) -> Option<String> {
+    let text = match selection {
+        Some(sel) => {
+            let mut lines: Vec<String> = Vec::new();
+            let mut last_table = None;
+            for (index, row) in rows.iter().enumerate() {
+                if let Some(table) = row.table {
+                    if sel.columns(index, row.text.chars().count()).is_some()
+                        && last_table != Some(table.row)
+                    {
+                        lines.push(table.cells.join("\t"));
+                        last_table = Some(table.row);
+                    }
+                    continue;
+                }
+                last_table = None;
+                let Some((from, to)) = sel.columns(index, row.text.chars().count()) else {
+                    continue;
+                };
+                lines.push(
+                    row.text[byte_index(row.text, from)..byte_index(row.text, to)].to_string(),
+                );
+            }
+            lines.join("\n")
+        }
+        None => rows.get(highlight).map_or_else(String::new, |row| {
+            row.table
+                .map_or_else(|| row.text.to_string(), |table| table.cells.join("\t"))
+        }),
+    };
+    (!text.is_empty()).then_some(text)
+}
+
 fn copied_lines(sel: &panel::Selection, rows: &[crate::transcript::Row<'_>]) -> usize {
     let ((r0, _), (r1, _)) = sel.ends();
     rows.iter()
@@ -2863,12 +2903,9 @@ impl State {
             return false;
         };
         let rows = self.transcript.rows(layout::Blocks::new(font));
-                let mut lines = Vec::new();
-                    lines.push(&row.text[byte_index(row.text, from)..byte_index(row.text, to)]);
-                Some(row) => row.text.to_string(),
         let Some(text) = copy_text(&rows, self.selection, self.highlight) else {
             return false;
-        }
+        };
         if let Err(e) = clipboard::copy(&text) {
             let max_w = self.text_width();
             let State {

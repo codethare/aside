@@ -644,6 +644,19 @@ fn draw_replies(
 ) {
     let blocks = Blocks::new(font);
     let rows = transcript.rows(blocks);
+    // Which logical table rows the pointer touched: every display row of one wraps
+    // into the same selection, so a cell is never half marked.
+    let table_marks: Vec<usize> = selection
+        .map(|sel| {
+            rows.iter()
+                .enumerate()
+                .filter(|(index, row)| {
+                    row.table.is_some() && sel.columns(*index, row.text.chars().count()).is_some()
+                })
+                .filter_map(|(_, row)| row.table.map(|t| t.row))
+                .collect()
+        })
+        .unwrap_or_default();
     // A fenced block is one tint behind its rows, with the card's own corner shape: a
     // tint per row would have square corners wherever a block begins and ends.
     let pad = crate::PAD * s;

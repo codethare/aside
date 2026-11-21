@@ -28,6 +28,12 @@ pub struct Layout {
     from: usize,
     /// Rows of the open tail, thrown away and rebuilt as text arrives.
     tail: Vec<Line>,
+    /// The width the last update used, so a finished tail can be laid out once more
+    /// with its final table widths.
+    max_w: f32,
+    /// Whether a mark was appended after the last update: it is not in the answer's
+    /// text, so re-rendering the tail would lose it.
+    marked: bool,
 }
 
 impl Layout {
@@ -36,18 +42,43 @@ impl Layout {
         let cut = boundary(text, self.from);
         if cut > self.from {
             let before = !self.done.is_empty();
-            let more = render(&text[self.from..cut], font, max_w, before);
+            let more = render(&text[self.from..cut], font, max_w, before, true);
             self.done.extend(more);
             self.from = cut;
         }
-        self.tail = render(&text[self.from..], font, max_w, !self.done.is_empty());
+        self.max_w = max_w;
+        self.marked = false;
+        self.tail = render(
+            &text[self.from..],
+            font,
+            max_w,
+            !self.done.is_empty(),
+            false,
+        );
+    }
+
+    /// The answer is complete: lay the open tail out once with its settled table
+    /// widths. Streaming had to grow columns without shrinking them; now the final
+    /// fit may use the natural widths.
+    pub fn finish(&mut self, text: &str, font: &PanelFont) {
+        if self.tail.is_empty() || self.marked {
+            return;
+        }
+        self.tail = render(
+            &text[self.from..],
+            font,
+            self.max_w,
+            !self.done.is_empty(),
+            true,
+        );
     }
 
     /// One more row outside the answer's text: the mark that says the rest of a
     /// too-long answer was dropped.
     pub fn mark(&mut self, text: &str, font: &PanelFont, max_w: f32) {
         self.tail
-            .extend(render(text, font, max_w, !self.tail.is_empty()));
+            .extend(render(text, font, max_w, !self.tail.is_empty(), true));
+        self.marked = true;
     }
 
     pub fn rows(&self) -> impl Iterator<Item = &Line> {
@@ -63,6 +94,8 @@ impl Layout {
         self.done = Vec::new();
         self.tail = Vec::new();
         self.from = 0;
+        self.max_w = 0.0;
+        self.marked = false;
     }
 }
 
@@ -96,7 +129,7 @@ fn fence_marker(trimmed: &str) -> Option<String> {
 }
 
 /// Blocks in, rows out.
-fn render(text: &str, font: &PanelFont, max_w: f32, before: bool) -> Vec<Line> {
+fn render(text: &str, font: &PanelFont, max_w: f32, before: bool, settled: bool) -> Vec<Line> {
     let mut r = Renderer {
         font,
         pad: crate::PAD * layout::scale_of(font),
@@ -112,6 +145,7 @@ fn render(text: &str, font: &PanelFont, max_w: f32, before: bool) -> Vec<Line> {
         lists: Vec::new(),
         table: None,
         before,
+        settled,
     };
     for event in Parser::new_ext(text, Options::ENABLE_TABLES) {
         r.event(event);
@@ -173,6 +207,9 @@ struct Renderer<'a> {
     /// Whether the answer already has rows above these: a slice of an answer is laid
     /// out on its own, and the separation at the seam must still be there.
     before: bool,
+    /// Whether this slice is a completed block: a settled table may fit its final
+    /// natural widths once; an open one may only grow.
+    settled: bool,
 }
 
 impl Renderer<'_> {
@@ -410,13 +447,12 @@ impl Renderer<'_> {
 
     /// A table, as rows of padded columns. Everything is drawn in the code face: a
     /// column lines up only when a padding space is the same width as the characters
-    /// beside it.
+    /// beside it. When even the minimum columns cannot fit the card, the table
+    /// degrades to `header: value` lines instead of being clipped on the right.
     fn flush_table(&mut self) {
         let Some(table) = self.table.take() else {
             return;
         };
-        // A table is drawn in the code face: a column lines up only when a padding
-        // space is as wide as the characters beside it.
         let mono = self.font.mono();
         let face = mono.as_deref().unwrap_or(self.font);
         let unit = table_unit(face);
@@ -428,22 +464,43 @@ impl Renderer<'_> {
         if columns == 0 {
             return;
         }
-        let mut width = vec![MIN_UNITS; columns];
-        for row in std::iter::once(&table.head).chain(table.rows.iter()) {
-            for (i, cell) in row.iter().enumerate() {
-                width[i] = width[i].max(cell_units(face, &cell.text, unit));
-            }
-        }
         let indent = self.indent();
         let quote = self.quote > 0;
-        // Fit the card: the widest column loses a unit at a time, so a wide table is
-        // narrowed rather than cut, and no column is squeezed below a few characters.
-        // One space after every column's text: it separates a full cell from the next
-        // column's, and the last one is trimmed away.
         let avail = ((self.max_w - indent as f32) / unit as f32)
             .floor()
             .max(1.0) as usize;
+        // Every column needs MIN_UNITS and every gap one unit. If that floor does
+        // not fit, no amount of wrapping can keep the columns on the card.
+        if columns.saturating_mul(MIN_UNITS + 1).saturating_sub(1) > avail {
+            self.flush_table_as_pairs(&table, columns, indent, quote);
+            return;
+        }
+        // A settled table fits its natural widths once. An open one starts from the
+        // header, which is what it can show without guessing, and a body row may only
+        // add units while the card has room: no later row can shrink a column, so a
+        // streaming table never jitters sideways.
+        let mut width: Vec<usize> = if self.settled {
+            let mut width = vec![MIN_UNITS; columns];
+            for row in std::iter::once(&table.head).chain(table.rows.iter()) {
+                for (i, cell) in row.iter().enumerate() {
+                    width[i] = width[i].max(cell_units(face, &cell.text, unit));
+                }
+            }
+            width
+        } else {
+            (0..columns)
+                .map(|i| {
+                    table
+                        .head
+                        .get(i)
+                        .map_or(MIN_UNITS, |c| cell_units(face, &c.text, unit))
+                        .max(MIN_UNITS)
+                })
+                .collect()
+        };
         let mut total: usize = width.iter().sum::<usize>() + columns - 1;
+        // A table too wide for the card loses units from its widest column, down to
+        // the minimum, so the columns still open at the same places.
         while total > avail {
             let widest = width
                 .iter()
@@ -455,13 +512,49 @@ impl Renderer<'_> {
             width[i] -= 1;
             total -= 1;
         }
+        if !self.settled {
+            for row in &table.rows {
+                let mut need: Vec<usize> = (0..columns)
+                    .map(|i| {
+                        let want = row
+                            .get(i)
+                            .map_or(MIN_UNITS, |c| cell_units(face, &c.text, unit))
+                            .max(MIN_UNITS);
+                        want.saturating_sub(width[i])
+                    })
+                    .collect();
+                let mut room = avail.saturating_sub(total);
+                // The shortest need goes first: a one-unit header cell is not starved
+                // by a long neighbour that could keep taking every remaining unit.
+                while room > 0 {
+                    let Some(i) = need
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, n)| **n > 0)
+                        .min_by_key(|(_, n)| **n)
+                        .map(|(i, _)| i)
+                    else {
+                        break;
+                    };
+                    need[i] -= 1;
+                    width[i] += 1;
+                    total += 1;
+                    room -= 1;
+                }
+            }
+        }
         let align = &table.align;
+        let cells = |row: &[Cell]| -> Vec<String> {
+            (0..columns)
+                .map(|i| row.get(i).map_or("", |c| c.text.as_str()).to_string())
+                .collect()
+        };
         let mut out: Vec<Line> = Vec::new();
-        let row_of = |cells: &[Cell], out: &mut Vec<Line>| {
+        let row_of = |cells: &[Cell], index: usize, tsv: &[String], out: &mut Vec<Line>| {
             // Each cell wraps inside its own column; the row is as tall as the tallest
             // of them, and a shorter cell pads with empty lines so the columns below
             // stay under themselves.
-            let wrapped: Vec<Vec<String>> = (0..columns)
+            let wrapped: Vec<Vec<Line>> = (0..columns)
                 .map(|i| {
                     let text = cells.get(i).map_or("", |c| c.text.as_str());
                     let breadth = width[i] as f32 * unit as f32;
@@ -474,16 +567,13 @@ impl Renderer<'_> {
                         mono.as_deref(),
                         Style::Code,
                     )
-                    .into_iter()
-                    .map(|l| l.text)
-                    .collect()
                 })
                 .collect();
             let tall = wrapped.iter().map(Vec::len).max().unwrap_or(0).max(1);
             for line in 0..tall {
                 let mut text = String::new();
                 for (i, w) in width.iter().enumerate() {
-                    let piece = wrapped[i].get(line).map_or("", |s| s.as_str());
+                    let piece = wrapped[i].get(line).map_or("", |l| l.text.as_str());
                     let used = cell_units(face, piece, unit).min(*w);
                     // The colons in the rule are alignment: the short side carries the
                     // padding, and a centre's odd unit goes to the right.
@@ -502,10 +592,14 @@ impl Renderer<'_> {
                     }
                     text.push(' ');
                 }
-                out.push(table_line(text.trim_end(), indent, quote));
+                let table = TableLine {
+                    row: index,
+                    cells: tsv.to_vec(),
+                };
+                out.push(table_line(text.trim_end(), indent, quote, Some(table)));
             }
         };
-        row_of(&table.head, &mut out);
+        row_of(&table.head, 0, &cells(&table.head), &mut out);
         // The rule marks the header: with one style per span, "monospace and bolder"
         // cannot be said, so the boundary is drawn instead.
         let total: usize = width.iter().sum::<usize>() + columns - 1;
@@ -516,6 +610,11 @@ impl Renderer<'_> {
         while render::advance(self.font, &rule) < span && rule.len() < 4096 {
             rule.push('\u{2500}');
         }
+        // The dash is measured in the text face, the table in the code face: stop at
+        // the last dash that does not run past the table.
+        if render::advance(self.font, &rule) > span {
+            rule.pop();
+        }
         out.push(Line {
             text: rule,
             spans: vec![Span {
@@ -525,16 +624,55 @@ impl Renderer<'_> {
             indent,
             code: false,
             quote,
+            table: None,
         });
         if let Some(last) = out.last_mut() {
             last.spans[0].range = 0..last.text.len();
             last.spans.retain(|s| s.range.end > 0);
         }
-        for row in &table.rows {
-            row_of(row, &mut out);
+        for (index, row) in table.rows.iter().enumerate() {
+            row_of(row, index + 1, &cells(row), &mut out);
         }
         self.separate();
         self.out.extend(out);
+    }
+
+    /// The narrow fallback: one `header: value` line per cell, wrapped to the card.
+    /// The columns are no longer on one line, but nothing is clipped and a reader can
+    /// still tell which value belongs to which header.
+    fn flush_table_as_pairs(&mut self, table: &Table, columns: usize, indent: u32, quote: bool) {
+        self.separate();
+        if table.rows.is_empty() {
+            self.out.push(Line {
+                text: "table wider than card".to_string(),
+                indent,
+                quote,
+                ..Line::blank()
+            });
+            return;
+        }
+        let breadth = (self.max_w - indent as f32).max(1.0);
+        for row in &table.rows {
+            for i in 0..columns {
+                let head = table.head.get(i).map_or("", |c| c.text.as_str());
+                let head = if head.is_empty() {
+                    format!("column {}", i + 1)
+                } else {
+                    head.to_string()
+                };
+                let value = row.get(i).map_or("", |c| c.text.as_str());
+                let text = if value.is_empty() {
+                    format!("{head}:")
+                } else {
+                    format!("{head}: {value}")
+                };
+                let mut lines = wrap(&text, &[], indent, breadth, self.font, None, Style::Plain);
+                for line in &mut lines {
+                    line.quote = quote;
+                }
+                self.out.extend(lines);
+            }
+        }
     }
 
     /// A fenced block: each source line is its own row, measured in the code face and
@@ -590,7 +728,7 @@ fn cell_units(face: &PanelFont, text: &str, unit: u32) -> usize {
 
 /// A table row as a line: the whole of it is code, padding included, because that is
 /// what puts the columns in their places.
-fn table_line(text: &str, indent: u32, quote: bool) -> Line {
+fn table_line(text: &str, indent: u32, quote: bool, table: Option<TableLine>) -> Line {
     Line {
         text: text.to_string(),
         spans: vec![Span {
@@ -600,6 +738,7 @@ fn table_line(text: &str, indent: u32, quote: bool) -> Line {
         indent,
         code: false,
         quote,
+        table,
     }
 }
 
@@ -665,6 +804,7 @@ fn wrap(
                 indent,
                 code: plain_style == Style::Code,
                 quote: false,
+                table: None,
             };
             if row.spans.is_empty() && plain_style != Style::Plain {
                 row.spans.push(Span {
@@ -717,7 +857,7 @@ mod tests {
 
     /// An answer as the panel would draw it, row by row.
     fn rows(text: &str, f: &PanelFont, max_w: f32) -> Vec<Line> {
-        render(text, f, max_w, false)
+        render(text, f, max_w, false, true)
     }
 
     fn texts(rows: &[Line]) -> Vec<&str> {
@@ -1061,40 +1201,29 @@ mod tests {
         assert!(header.quote, "and puts its rail beside it");
     }
 
-    /// A table that cannot be narrowed enough is drawn and clipped, never reflowed or
-    /// dropped: it stops at the narrowest column and the painter cuts the rest.
+    /// A table that cannot be narrowed enough degrades to `header: value` lines:
+    /// nothing is clipped on the right, and the cells keep their names.
     #[test]
-    fn a_table_that_cannot_shrink_is_still_a_table() {
+    fn a_table_that_cannot_shrink_becomes_pairs() {
         let f = font();
         let header: String = (0..12).map(|i| format!(" | c{i}")).collect();
         let rule: String = (0..12).map(|_| " | ---").collect();
         let body: String = (0..12).map(|i| format!(" | v{i}")).collect();
         let table = format!("{header}\n{rule}\n{body}");
         let lines = rows(&table, &f, 60.0);
+        let texts = texts(&lines);
         let all = texts.join(" ");
         assert!(
-            lines.len() >= 3,
-            "the table is still drawn: {:?}",
-            texts(&lines)
+            all.contains("c0: v0"),
+            "the first cell is a pair: {texts:?}"
         );
-        // Every row still starts its cells in the same places, even though the table
-        // is wider than the card: the painter clips it, the renderer does not reflow it.
-        let starts = |row: &str| -> Vec<usize> {
-            let mut out = Vec::new();
-            let mut after_space = true;
-            for (i, c) in row.char_indices() {
-                if c != ' ' && after_space {
-                    out.push(i);
-                }
-                after_space = c == ' ';
-            }
-            out
-        };
-        let want = starts(&lines[0].text);
-        assert_eq!(want.len(), 12, "twelve columns: {:?}", lines[0].text);
-        // The rule between them is one run of dashes, not a row of cells.
-        for line in lines.iter().filter(|l| !l.text.starts_with('\u{2500}')) {
-            assert_eq!(starts(&line.text), want, "a row lost its columns: {line:?}");
+        assert!(
+            all.contains("c11:") && all.contains("v11"),
+            "the last cell is present, not clipped: {texts:?}"
+        );
+        for line in &lines {
+            let wide = render::advance(&f, &line.text);
+            assert!(wide <= 61.0, "a pair fits the card: {wide} {:?}", line.text);
         }
     }
 
@@ -1125,6 +1254,50 @@ mod tests {
         for (a, b) in before.iter().zip(&after) {
             assert!(b >= a, "a column moved left: {before:?} -> {after:?}");
         }
+    }
+
+    /// A table row carries its cells unpadded, and every display row of a wrapped
+    /// cell carries the same logical row, so a copy can emit TSV once.
+    #[test]
+    fn table_rows_carry_their_cells_for_a_tsv_copy() {
+        let f = font();
+        let lines = rows(
+            "| name | value |\n|---|---|\n| a long cell that wraps in a narrow card | 2 |",
+            &f,
+            160.0,
+        );
+        let body: Vec<_> = lines
+            .iter()
+            .filter(|l| l.table.as_ref().is_some_and(|t| t.row == 1))
+            .collect();
+        assert!(body.len() >= 2, "the cell wrapped: {:?}", texts(&lines));
+        assert_eq!(
+            body[0].table.as_ref().unwrap().cells,
+            ["a long cell that wraps in a narrow card", "2"]
+        );
+        assert!(
+            body.iter()
+                .all(|l| l.table.as_ref().unwrap().cells == body[0].table.as_ref().unwrap().cells),
+            "every display row of the logical row carries the same cells"
+        );
+    }
+
+    /// A table is not drawn before its separator: until then the lines are the
+    /// paragraph the model has sent so far.
+    #[test]
+    fn a_table_waits_for_its_rule() {
+        let f = font();
+        let partial = rows("| a | b |\n", &f, 900.0);
+        assert!(
+            partial.iter().all(|l| l.table.is_none()),
+            "no table before the rule: {:?}",
+            texts(&partial)
+        );
+        let complete = rows("| a | b |\n|---|---|\n| 1 | 2 |", &f, 900.0);
+        assert!(
+            complete.iter().any(|l| l.table.is_some()),
+            "the completed table has rows"
+        );
     }
 
     /// A copy takes a row's own string, so the spaces the columns are made of are

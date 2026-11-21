@@ -73,6 +73,8 @@ pub struct Row<'a> {
     pub code: bool,
     /// A block quote's row, which carries a rail.
     pub quote: bool,
+    /// The logical table row this display row belongs to, for a TSV copy.
+    pub table: Option<&'a crate::layout::TableLine>,
     pub kind: Kind,
     /// Buffer-pixel top of this row.
     pub y: u32,
@@ -260,6 +262,8 @@ impl Transcript {
     pub fn finish_answer(&mut self, font: &PanelFont) {
         if let Some(i) = self.open.take() {
             self.entries[i].complete = true;
+            let Entry { lines, text, .. } = &mut self.entries[i];
+            lines.finish(text, font);
             self.settle(Blocks::new(font));
         }
     }
@@ -311,6 +315,7 @@ impl Transcript {
                     indent: line.indent,
                     code: line.code,
                     quote: line.quote,
+                    table: line.table.as_ref(),
                     kind: entry.kind,
                     y: entry.y + i as u32 * blocks.row_h,
                     block: (entry.y, entry.h),
