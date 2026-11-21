@@ -103,6 +103,17 @@ pub struct Line {
     pub code: bool,
     /// Belongs to a block quote, whose rows carry a rail.
     pub quote: bool,
+    /// The logical table row this display row belongs to, with its cells unpadded:
+    /// what a copy takes as TSV instead of the screen's padding.
+    pub table: Option<TableLine>,
+}
+
+/// A table row as data, carried by every display row it wraps into. `row` identifies
+/// the logical row, so a selection across a wrapped cell copies it once.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TableLine {
+    pub row: usize,
+    pub cells: Vec<String>,
 }
 
 impl Line {
@@ -168,11 +179,11 @@ pub(crate) fn break_tail(s: &str, adv: &dyn Fn(usize, char) -> f32, max_w: f32) 
 
 /// Advance width of one character in the chain.
 pub fn char_advance(font: &PanelFont, c: char) -> f32 {
-    // No face carries it: advance by the widest thing we can measure so the
-    // layout cannot loop forever on a character nothing can draw.
+    // No face carries it: advance by a space, the same placeholder the painter's
+    // measure and missing box use, so a table cell or a wrapped word keeps its place.
     font.glyph(c)
         .map(|(_, _, advance)| advance)
-        .unwrap_or(font.size / 2.0)
+        .unwrap_or_else(|| render::space_width(font))
 }
 
 /// A scrollback window over the transcript, in buffer pixels: a card's padding

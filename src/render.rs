@@ -799,7 +799,7 @@ pub fn draw_text(
 }
 
 /// The advance of one space, the yardstick a tab and a missing box use.
-fn space_width(font: &crate::font::PanelFont) -> f32 {
+pub(crate) fn space_width(font: &crate::font::PanelFont) -> f32 {
     font.glyph(' ')
         .map_or(font.size * 0.5, |(_, _, advance)| advance)
 }

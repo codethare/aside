@@ -211,6 +211,11 @@ bind=SUPER,A   # substitute your compositor's binding syntax
 13. Start once with `font_size = "72"` and ask something long: the rows, the cards and
     the scrolling follow the size, lines never overlap, the last line still fades into
     the card's bottom edge, and the 64-row cap holds on a small output.
+13a. Ask for a table with CJK or emoji and a long cell. While it streams, the columns
+    only widen; a wrapped cell stays under its header. Narrow the panel until the
+    columns cannot fit: the table becomes `header: value` lines, with no column cut
+    off. Copy a row and paste it into a spreadsheet: the cells land in separate
+    columns, without the screen's padding.
 14. Time the first frame on a cold start (`time aside` with no transcript): it
     should be well under 50 ms after the compositor has the surface.
 15. Put a `wlmenu` frame next to an `aside --preview out.ppm` frame and check the

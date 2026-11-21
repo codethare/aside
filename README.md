@@ -223,7 +223,9 @@ character, `0`/`$` to the ends of the line, `j`/`k` a line, `w`/`b` a word,
 `Ctrl+d`/`Ctrl+u` half a page, `Ctrl+f`/`Ctrl+b` (or `PageDown`/`PageUp`) a page,
 `g`/`G` the first and last line. `Space` starts a selection and `Enter` or `y`
 copies it — or the line the cursor is on — and leaves; `q` leaves, `Esc` clears a
-selection first. After a copy the bar says `copied N lines` for a moment.
+selection first. After a copy the bar says `copied N lines` for a moment. A table
+row is copied as TSV: the screen's padding is removed and the cells are separated by
+tabs, so pasting into a spreadsheet fills its columns.
 
 `Ctrl+T` is tmux's prefix shape rather than a mode toggle: it takes exactly one
 key. `[` enters copy mode and `+` (`=` unshifted) and `-` change the text size two
@@ -277,7 +279,13 @@ graph for one request. Answers are rendered as a markdown subset — fenced code
 blocks in a monospace face, inline code, bold, italic, headings, lists, quotes,
 tables and the text of links — and everything outside it (task lists, raw HTML) is
 drawn as the characters the model sent. A table is drawn in the monospace face with
-its columns padded so they line up, and narrowed until it fits the card. There is no
+its columns padded so they line up, measured by display width rather than character
+count: CJK and emoji take the width their face gives them, and a combining mark adds
+none. The header starts the column widths and a later row may only widen them, so a
+streaming table does not jitter; a cell too wide wraps inside its column. A table too
+narrow for its columns degrades to `header: value` lines rather than losing the right
+side. Copying a table row gives TSV with the visual padding removed, so a spreadsheet
+sees the cells. There is no
 complex-script shaping. A character no installed face covers is drawn as a hollow
 box, and a tab keeps four spaces' width; the first such miss adds the system's
 script faces to the chain.

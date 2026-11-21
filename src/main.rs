@@ -2863,26 +2863,10 @@ impl State {
             return false;
         };
         let rows = self.transcript.rows(layout::Blocks::new(font));
-        // What the pointer chose, character for character; without a selection the
-        // whole line the keyboard names, which is what Home/End then Alt+C did before
-        // there was a pointer.
-        let text = match self.selection {
-            Some(sel) => {
                 let mut lines = Vec::new();
-                for (index, row) in rows.iter().enumerate() {
-                    let Some((from, to)) = sel.columns(index, row.text.chars().count()) else {
-                        continue;
-                    };
                     lines.push(&row.text[byte_index(row.text, from)..byte_index(row.text, to)]);
-                }
-                lines.join("\n")
-            }
-            None => match rows.get(self.highlight) {
                 Some(row) => row.text.to_string(),
-                None => return false,
-            },
-        };
-        if text.is_empty() {
+        let Some(text) = copy_text(&rows, self.selection, self.highlight) else {
             return false;
         }
         if let Err(e) = clipboard::copy(&text) {
@@ -4419,6 +4403,49 @@ mod tests {
             cursor: (2, 3),
         };
         assert_eq!(copied_lines(&three, &rows), 3, "three lines");
+    }
+
+    #[test]
+    fn a_table_row_copies_as_tsv() {
+        fn row<'a>(
+            text: &'a str,
+            table: Option<&'a crate::layout::TableLine>,
+        ) -> crate::transcript::Row<'a> {
+            crate::transcript::Row {
+                text,
+                spans: &[],
+                indent: 0,
+                code: false,
+                quote: false,
+                table,
+                kind: crate::transcript::Kind::Answer,
+                y: 0,
+                block: (0, 0),
+            }
+        }
+        let table = crate::layout::TableLine {
+            row: 1,
+            cells: vec!["a".to_string(), "b".to_string()],
+        };
+        let rows = [row("a  b", Some(&table))];
+        assert_eq!(
+            copy_text(&rows, None, 0).as_deref(),
+            Some("a\tb"),
+            "the screen's padding is not copied"
+        );
+
+        // Two display rows of one wrapped logical row copy once.
+        let wrapped = [row("a  b", Some(&table)), row("c  d", Some(&table))];
+        let selection = panel::Selection {
+            anchor: (0, 0),
+            cursor: (1, 1),
+        };
+        assert_eq!(
+            copy_text(&wrapped, Some(selection), 0).as_deref(),
+            Some("a\tb")
+        );
+        let prose = [row("hello world", None)];
+        assert_eq!(copy_text(&prose, None, 0).as_deref(), Some("hello world"));
     }
 
     /// The keyboard is the compositor's to move. An exclusive layer surface makes every

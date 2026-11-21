@@ -16,7 +16,7 @@ use std::ops::Range;
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 
 use crate::font::PanelFont;
-use crate::layout::{self, Line, Span, Style};
+use crate::layout::{self, Line, Span, Style, TableLine};
 use crate::render;
 
 /// One answer's rows, with the part that can still change rendered separately.
@@ -580,7 +580,10 @@ fn table_unit(face: &PanelFont) -> u32 {
     (render::advance(face, " ").ceil() as u32).max(1)
 }
 
-/// How many space units `text` occupies in the code face.
+/// How many space units `text` occupies in the code face. This is a measured
+/// advance, not a character count: a CJK glyph or an emoji takes the width its face
+/// gives it, and a combining mark adds none. A character no face covers advances by
+/// a space, so a missing CJK glyph still leaves its place in the column.
 fn cell_units(face: &PanelFont, text: &str, unit: u32) -> usize {
     ((render::advance(face, text) / unit as f32).ceil() as usize).max(1)
 }
@@ -1068,6 +1071,7 @@ mod tests {
         let body: String = (0..12).map(|i| format!(" | v{i}")).collect();
         let table = format!("{header}\n{rule}\n{body}");
         let lines = rows(&table, &f, 60.0);
+        let all = texts.join(" ");
         assert!(
             lines.len() >= 3,
             "the table is still drawn: {:?}",
@@ -1091,6 +1095,35 @@ mod tests {
         // The rule between them is one run of dashes, not a row of cells.
         for line in lines.iter().filter(|l| !l.text.starts_with('\u{2500}')) {
             assert_eq!(starts(&line.text), want, "a row lost its columns: {line:?}");
+        }
+    }
+
+    /// A body row can only widen a column: the header's column starts never move
+    /// left as more text arrives.
+    #[test]
+    fn a_streaming_table_only_widens_its_columns() {
+        let f = font();
+        let starts = |row: &str| -> Vec<usize> {
+            let mut out = Vec::new();
+            let mut after_space = true;
+            for (i, c) in row.char_indices() {
+                if c != ' ' && after_space {
+                    out.push(i);
+                }
+                after_space = c == ' ';
+            }
+            out
+        };
+        let base = "| h1 | h2 | h3 |\n|---|---|---|\n| a | b | c |";
+        let more = format!("{base}\n| a much longer first cell | b | c |");
+        let one = rows(base, &f, 600.0);
+        let two = rows(&more, &f, 600.0);
+        let before = starts(&one[0].text);
+        let after = starts(&two[0].text);
+        assert_eq!(before.len(), 3);
+        assert_eq!(after.len(), 3);
+        for (a, b) in before.iter().zip(&after) {
+            assert!(b >= a, "a column moved left: {before:?} -> {after:?}");
         }
     }
 

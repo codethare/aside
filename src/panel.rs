@@ -698,7 +698,12 @@ fn draw_replies(
         // characters — or it is the keyboard's line, inked. A pointer that has
         // selected text wins, because that is what the copy would take.
         let len = row.text.chars().count();
-        let columns = selection.and_then(|sel| sel.columns(index, len));
+        let mut columns = selection.and_then(|sel| sel.columns(index, len));
+        // A table cell is copied whole, so a selection that touches it marks the
+        // whole display row rather than half a cell.
+        if row.table.is_some_and(|t| table_marks.contains(&t.row)) && columns.is_some() {
+            columns = Some((0, len));
+        }
         let mark = match columns {
             Some(cols) => RowMark::Band(cols),
             None if highlight == Some(index) => RowMark::Ink,
