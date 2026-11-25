@@ -1711,6 +1711,12 @@ fn typing_takes_question(question: &mut Option<Question>) {
     *question = None;
 }
 
+/// The question in the bar needs a frame even when nothing else moves: its scroll and
+/// its particle exit are both read from the clock.
+fn question_wake(question: Option<&Question>) -> Option<Duration> {
+    question.map(|_| FRAME_WAKE)
+}
+
 /// The panel's three states. Their sizes are fixed by the spec; this is the
 /// state machine behind them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2301,6 +2307,7 @@ impl State {
                 self.request.is_some().then_some(FRAME_WAKE),
                 self.toast_up().then_some(TOAST_WAKE),
                 self.returned_at.is_some().then_some(FRAME_WAKE),
+                question_wake(self.question.as_ref()),
                 self.light_in(),
                 self.thumb_in(),
                 self.caret_age().map(caret_flip_in),
@@ -2401,8 +2408,6 @@ impl State {
         if let Some(request) = self.request.as_mut() {
             request.cancel();
             self.request = None;
-            // Cancelling ends the request too: the question is drawn away like any other.
-            end_question(&mut self.question, self.animate, std::time::Instant::now());
             let max_w = self.text_width();
             let State {
                 transcript,
@@ -2416,6 +2421,9 @@ impl State {
                     transcript.add_note(&context_cut_note(), font, max_w);
                 }
             }
+            // Cancelling ends the request too: the question is drawn away like any
+            // other, and only after the cancelled text's layout is done.
+            end_question(&mut self.question, self.animate, std::time::Instant::now());
             // Cancelling is an ending too: a reader who scrolled up keeps their place.
             if follow_stream(&mut self.viewport, transcript.total_height()) {
                 self.new_content = true;
@@ -3016,9 +3024,6 @@ impl State {
                     // A failure gives the question back to the line instead of
                     // drawing it out of the bar; every other ending lets it go.
                     restore_question = matches!(close, Close::Failed(_));
-                    if !restore_question {
-                        end_question(&mut self.question, self.animate, std::time::Instant::now());
-                    }
                     match close {
                         Close::Complete => transcript.finish_answer(font),
                         Close::Empty => {
@@ -3029,6 +3034,12 @@ impl State {
                     }
                     if std::mem::take(context_cut) {
                         transcript.add_note(&context_cut_note(), font, max_w);
+                    }
+                    // The question starts leaving only after the answer's layout is
+                    // done: a large second answer must not consume the animation's
+                    // 340 ms before the first frame is painted.
+                    if !restore_question {
+                        end_question(&mut self.question, self.animate, std::time::Instant::now());
                     }
                     // Finishing must not yank a reader who scrolled up to read:
                     // only a view already at the tail follows the last line in.
@@ -4102,6 +4113,18 @@ mod tests {
         for key in ["Ctrl+T", "copy mode", "Alt+hjkl", "Ctrl+V", "Esc"] {
             assert!(USAGE.contains(key), "help mentions {key}");
         }
+    }
+
+    #[test]
+    fn a_question_in_the_bar_asks_for_frames() {
+        let now = std::time::Instant::now();
+        let q = Question {
+            text: "hi".to_string(),
+            at: now,
+            leaving: None,
+        };
+        assert_eq!(question_wake(Some(&q)), Some(FRAME_WAKE));
+        assert_eq!(question_wake(None), None);
     }
 
     #[test]

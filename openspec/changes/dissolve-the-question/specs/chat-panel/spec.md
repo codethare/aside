@@ -25,7 +25,10 @@ milliseconds those particles SHALL accelerate out of the edge the frozen directi
 names — the right edge when the line was coming back, the left edge when it was
 running out, and the left edge for a question that never moved — fading as they go.
 The whole SHALL be over by `DECOMPOSE + EXTRACT` milliseconds, at which point the bar
-shows the empty input line again.
+shows the empty input line again. The leaving SHALL start when the answer's layout is
+finished, not before it, so a large answer cannot consume the animation's time before
+the first frame; while the question is in the bar the panel SHALL request frames at
+the animation cadence, not the idle cadence.
 
 Particles SHALL be seeded only from the visible glyphs, deterministically from their
 index, with a fixed upper bound, and SHALL be clipped to the bar. The transcript SHALL

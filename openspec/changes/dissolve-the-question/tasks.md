@@ -45,3 +45,5 @@
   scrolling, the line visibly breaks into particles and is pulled out the side it was
   heading for; a short question does the same to the left; typing in the middle of it
   clears it immediately
+- [ ] 4.2 A second, larger answer: the leaving still runs its full 340 ms because it
+  starts after the answer is laid out and the bar asks for animation frames
