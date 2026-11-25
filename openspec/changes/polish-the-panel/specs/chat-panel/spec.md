@@ -99,3 +99,23 @@ The table SHALL be short enough to fit one page with the existing usage text.
 
 - **WHEN** the user runs `aside --help`
 - **THEN** the usage and the key table are printed and the process exits
+
+### Requirement: A follow-up retracts the previous answer
+
+Sending a follow-up while an answer is on screen SHALL keep the reply box where it is
+and SHALL slide the previous answer down out of the card into the bar over 200 ms,
+fading as it goes. The request SHALL start when that retract is over, so the old text
+never disappears in one frame and the panel never folds shut and opens again. With
+animations off the old text is cleared at once and the request starts immediately.
+Typing during the retract SHALL cancel the pending follow-up and leave the old answer
+where it is.
+
+#### Scenario: A second question
+
+- **WHEN** the first answer is on screen and the user sends a follow-up
+- **THEN** the answer slides down out of its card into the bar, the box stays, and the new answer grows in that box
+
+#### Scenario: Typing during the retract
+
+- **WHEN** the user types while the old answer is sliding away
+- **THEN** the pending follow-up is dropped and the old answer stays until the text replaces it

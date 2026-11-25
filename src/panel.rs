@@ -100,6 +100,8 @@ pub struct Look {
     pub returned: f32,
     /// Whether reply text arrived while the reader was scrolled up.
     pub new_content: bool,
+    /// How far the previous answer has slid down out of the card, 0..1.
+    pub retract: f32,
 }
 
 impl Look {
@@ -114,6 +116,7 @@ impl Look {
             focused: true,
             returned: 0.0,
             new_content: false,
+            retract: 0.0,
         }
     }
 
@@ -129,6 +132,7 @@ impl Look {
             focused: true,
             returned: 0.0,
             new_content: false,
+            retract: 0.0,
         }
     }
 
@@ -190,6 +194,7 @@ fn draw_content(
     card: &render::Panel,
     head: Option<f32>,
     fade: f32,
+    retract: f32,
     aa: Subpixel,
     s: u32,
 ) {
@@ -233,6 +238,7 @@ fn draw_content(
             card,
             card.y..(card.y + card.h),
             fade,
+            retract,
             aa,
             s,
         ),
@@ -365,6 +371,7 @@ pub fn draw(
             // What is leaving is all but gone when what arrives begins, so the
             // card is never seen empty; and nothing is drawn on a line or a point.
             (1.0 - look.t * 1.8).clamp(0.0, 1.0) * window,
+            look.retract,
             aa,
             s,
         );
@@ -390,6 +397,7 @@ pub fn draw(
             head,
             // What arrives does so once there is a card wide enough to hold it.
             ((look.t - 0.45) * 1.8).clamp(0.0, 1.0) * window,
+            look.retract,
             aa,
             s,
         );
@@ -431,8 +439,20 @@ pub fn draw(
         // out of the bar with it instead of being wiped in place.
         let clip = replies.y..(replies.y + replies.h);
         draw_replies(
-            buf, w, font, transcript, viewport, selection, highlight, cursor, replies, clip, 1.0,
-            aa, s,
+            buf,
+            w,
+            font,
+            transcript,
+            viewport,
+            selection,
+            highlight,
+            cursor,
+            replies,
+            clip,
+            1.0,
+            look.retract,
+            aa,
+            s,
         );
         if look.new_content {
             draw_new_content(buf, w, h, font, replies, aa, s);
@@ -639,11 +659,19 @@ fn draw_replies(
     card: &render::Panel,
     clip: std::ops::Range<u32>,
     fade: f32,
+    retract: f32,
     aa: Subpixel,
     s: u32,
 ) {
     let blocks = Blocks::new(font);
     let rows = transcript.rows(blocks);
+    // A follow-up sends the old answer down out of the card: it leaves through the
+    // bottom edge, into the bar, rather than vanishing in one frame.
+    let slide = (retract.clamp(0.0, 1.0) * (card.h + blocks.row_h) as f32).round() as i64;
+    let fade = fade * (1.0 - retract.clamp(0.0, 1.0));
+    if fade <= 0.0 {
+        return;
+    }
     // Which logical table rows the pointer touched: every display row of one wraps
     // into the same selection, so a cell is never half marked.
     let table_marks: Vec<usize> = selection
@@ -661,6 +689,8 @@ fn draw_replies(
     // tint per row would have square corners wherever a block begins and ends.
     let pad = crate::PAD * s;
     for (top, bottom) in code_runs(&rows, card, viewport, blocks) {
+        let top = (top as i64 + slide).max(0) as u32;
+        let bottom = (bottom as i64 + slide).max(0) as u32;
         // The card's own rim and its inner band are chrome: a block that starts at the
         // card's very top edge stops under them rather than painting them over. The
         // tint keeps the block's own geometry, so its corners stay its own wherever
@@ -699,7 +729,7 @@ fn draw_replies(
         // Signed on purpose: `saturating_sub` would clamp a partly scrolled row to
         // the card's top and paint it over the row below, which is exactly the
         // squashed pair of lines a scrolled view showed.
-        let y = card.y as i64 + row.y as i64 - viewport.top as i64;
+        let y = card.y as i64 + row.y as i64 - viewport.top as i64 + slide;
         if y < clip.start as i64 {
             continue;
         }
@@ -2898,9 +2928,14 @@ mod tests {
             new_content: true,
             ..Look::settled(State::Replies)
         });
+        let retracted = paint(Look {
+            retract: 0.5,
+            ..Look::settled(State::Replies)
+        });
         assert_ne!(unfocused, settled, "the unfocused bar has a rim");
         assert_ne!(returned, settled, "the returned bar glows");
         assert_ne!(new_content, settled, "the new-content pill is drawn");
+        assert_ne!(retracted, settled, "the old answer slides down");
     }
 
     /// Copy mode has to say so: the bar reads `-- COPY --` on the right and the

@@ -80,6 +80,10 @@ const RETURN_HIGHLIGHT_MS: u64 = 700;
 /// How long a request may run before the bar adds the elapsed seconds to its
 /// cancel hint.
 const WAIT_HINT_AFTER_MS: u128 = 3_000;
+/// How long the previous answer takes to slide down out of its card when a follow-up
+/// is sent. The card stays; only its old text retracts.
+const RETRACT_MS: u64 = 200;
+
 /// How long a shape change takes at its shortest. The morph is the point, so it is
 /// long enough to be seen rather than only to be over.
 const MORPH_IN_MS: u128 = 360;
@@ -570,6 +574,8 @@ fn run(options: Options) -> Result<(), String> {
         toast: None,
         returned_at: None,
         new_content: false,
+        pending_send: None,
+        retract_at: None,
         waiting_label: String::new(),
         waiting_secs: u64::MAX,
         thumb_at: None,
@@ -1813,6 +1819,10 @@ struct State {
     returned_at: Option<std::time::Instant>,
     /// Whether new reply text arrived while the reader was scrolled up.
     new_content: bool,
+    /// The follow-up waiting for the previous answer to retract, and when that
+    /// retract started.
+    pending_send: Option<String>,
+    retract_at: Option<std::time::Instant>,
     /// The bar's waiting label, rebuilt only when the whole seconds change.
     waiting_label: String,
     waiting_secs: u64,
@@ -1886,7 +1896,10 @@ impl State {
     fn target_size(&self) -> (u32, u32) {
         match self.morph.filter(|_| self.morphing()) {
             Some(m) => morph_size(m.from, m.to, self.output_h, self.size),
-            None => size_for(self.phase, self.output_h, self.size),
+            None => match self.shape {
+                panel::State::Bar => size_for(Phase::Thinking, self.output_h, self.size),
+                panel::State::Replies => size_for(Phase::Answering, self.output_h, self.size),
+            },
         }
     }
 
@@ -1952,6 +1965,7 @@ impl State {
         look.focused = self.keys.held();
         look.returned = self.returned_ink();
         look.new_content = self.new_content;
+        look.retract = self.retract_progress();
         look
     }
 
@@ -2010,6 +2024,13 @@ impl State {
         self.returned_at.map_or(0.0, |at| {
             (1.0 - at.elapsed().as_secs_f32() / (RETURN_HIGHLIGHT_MS as f32 / 1000.0))
                 .clamp(0.0, 1.0)
+        })
+    }
+
+    /// How far the previous answer has slid down out of its card, 0..1.
+    fn retract_progress(&self) -> f32 {
+        self.retract_at.map_or(0.0, |at| {
+            (at.elapsed().as_millis() as f32 / RETRACT_MS as f32).clamp(0.0, 1.0)
         })
     }
 
@@ -2308,6 +2329,7 @@ impl State {
                 self.toast_up().then_some(TOAST_WAKE),
                 self.returned_at.is_some().then_some(FRAME_WAKE),
                 question_wake(self.question.as_ref()),
+                self.retract_at.is_some().then_some(FRAME_WAKE),
                 self.light_in(),
                 self.thumb_in(),
                 self.caret_age().map(caret_flip_in),
@@ -2342,7 +2364,11 @@ impl State {
     }
 
     fn send(&mut self) {
-        if self.request.is_some() || self.input.is_blank() {
+        if self.request.is_some()
+            || self.pending_send.is_some()
+            || self.retract_at.is_some()
+            || self.input.is_blank()
+        {
             return;
         }
         let question = self.input.take();
@@ -2357,6 +2383,21 @@ impl State {
             at: std::time::Instant::now(),
             leaving: None,
         });
+        // A follow-up over a visible answer first lets that answer slide down out of
+        // its card. The request starts when the card is clear, so the old text never
+        // snaps away and the panel never folds shut in one frame.
+        if self.animate && self.shape == panel::State::Replies && self.transcript.total_height() > 0
+        {
+            self.pending_send = Some(question);
+            self.retract_at = Some(std::time::Instant::now());
+            self.dirty = true;
+            return;
+        }
+        self.begin_request(question);
+    }
+
+    /// The request half of `send`, after any retract has finished.
+    fn begin_request(&mut self, question: String) {
         let max_w = self.text_width();
         let State {
             transcript,
@@ -2405,6 +2446,15 @@ impl State {
     }
 
     fn cancel(&mut self) {
+        // A follow-up still retracting has not been sent: Esc drops it and leaves the
+        // old answer where it is.
+        if self.retract_at.is_some() {
+            self.pending_send = None;
+            self.retract_at = None;
+            self.question = None;
+            self.dirty = true;
+            return;
+        }
         if let Some(request) = self.request.as_mut() {
             request.cancel();
             self.request = None;
@@ -2939,6 +2989,15 @@ impl State {
             ));
         }
         self.refresh_waiting_label();
+        if let Some(start) = self.retract_at {
+            self.dirty = true;
+            if start.elapsed() >= Duration::from_millis(RETRACT_MS) {
+                self.retract_at = None;
+                if let Some(question) = self.pending_send.take() {
+                    self.begin_request(question);
+                }
+            }
+        }
         if self.phase == Phase::Thinking {
             // The blink is the only thing moving, so keep asking for frames.
             self.dirty = true;
@@ -3312,6 +3371,9 @@ impl State {
     fn after_typing(&mut self) {
         // The line is the reader's now; the question it held is the previous one.
         typing_takes_question(&mut self.question);
+        // Typing cancels a follow-up still waiting for the card to retract.
+        self.pending_send = None;
+        self.retract_at = None;
         self.dirty = true;
         self.report_cursor();
     }

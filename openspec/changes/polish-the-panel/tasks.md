@@ -12,6 +12,7 @@
 - [x] 2.1 An unfocused bar draws a faint inner rim, driven by the keyboard-held state; a focused frame draws none
 - [x] 2.2 While a request runs the bar's right side reads `Esc cancel`, and after three seconds adds the elapsed seconds
 - [x] 2.3 Typing during the particle leaving clears the question in the frame the text appears
+- [x] 2.4 A follow-up slides the previous answer down out of the card over 200 ms, keeps the box, and starts the request after the retract; typing cancels the pending send
 
 ## 3. Startup and discovery
 
