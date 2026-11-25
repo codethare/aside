@@ -729,7 +729,13 @@ fn draw_replies(
         // Signed on purpose: `saturating_sub` would clamp a partly scrolled row to
         // the card's top and paint it over the row below, which is exactly the
         // squashed pair of lines a scrolled view showed.
-        let y = card.y as i64 + row.y as i64 - viewport.top as i64 + slide;
+        let base = card.y as i64 + row.y as i64 - viewport.top as i64;
+        // Rows that were above the card stay above it: sliding must empty the card
+        // from the top down, not pull older lines in behind the retracting ones.
+        if retract > 0.0 && base < card.y as i64 {
+            continue;
+        }
+        let y = base + slide;
         if y < clip.start as i64 {
             continue;
         }

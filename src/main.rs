@@ -81,7 +81,7 @@ const RETURN_HIGHLIGHT_MS: u64 = 700;
 /// cancel hint.
 const WAIT_HINT_AFTER_MS: u128 = 3_000;
 /// How long the previous answer takes to slide down out of its card when a follow-up
-/// is sent. The card stays; only its old text retracts.
+/// is sent.
 const RETRACT_MS: u64 = 200;
 
 /// How long a shape change takes at its shortest. The morph is the point, so it is
@@ -2445,14 +2445,20 @@ impl State {
         });
     }
 
+    /// Abandon a follow-up still folding the old answer away: put the full box back
+    /// and leave the answer where it was.
+    fn cancel_retract(&mut self) {
+        self.pending_send = None;
+        self.retract_at = None;
+        self.question = None;
+        self.dirty = true;
+    }
+
     fn cancel(&mut self) {
         // A follow-up still retracting has not been sent: Esc drops it and leaves the
         // old answer where it is.
         if self.retract_at.is_some() {
-            self.pending_send = None;
-            self.retract_at = None;
-            self.question = None;
-            self.dirty = true;
+            self.cancel_retract();
             return;
         }
         if let Some(request) = self.request.as_mut() {
@@ -3372,8 +3378,9 @@ impl State {
         // The line is the reader's now; the question it held is the previous one.
         typing_takes_question(&mut self.question);
         // Typing cancels a follow-up still waiting for the card to retract.
-        self.pending_send = None;
-        self.retract_at = None;
+        if self.retract_at.is_some() {
+            self.cancel_retract();
+        }
         self.dirty = true;
         self.report_cursor();
     }
