@@ -102,18 +102,18 @@ The table SHALL be short enough to fit one page with the existing usage text.
 
 ### Requirement: A follow-up retracts the previous answer
 
-Sending a follow-up while an answer is on screen SHALL keep the reply box where it is
-and SHALL slide the previous answer down out of the card into the bar over 200 ms,
-fading as it goes. The request SHALL start when that retract is over, so the old text
-never disappears in one frame and the panel never folds shut and opens again. With
-animations off the old text is cleared at once and the request starts immediately.
+Sending a follow-up while an answer is on screen SHALL fold the previous answer's
+card down into the bar over 360 ms, fading as it goes, leaving no empty card behind.
+The request SHALL start when that retract is over; the new answer's growth then opens
+the box again. With animations off the old text is cleared at once and the request
+starts immediately.
 Typing during the retract SHALL cancel the pending follow-up and leave the old answer
 where it is.
 
 #### Scenario: A second question
 
 - **WHEN** the first answer is on screen and the user sends a follow-up
-- **THEN** the answer slides down out of its card into the bar, the box stays, and the new answer grows in that box
+- **THEN** the answer and its card fold down into the bar, and the new answer grows out of it
 
 #### Scenario: Typing during the retract
 

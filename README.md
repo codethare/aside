@@ -135,8 +135,8 @@ of turn text; older turns are dropped from it and their text is freed, and the
 transcript says when that happened.
 `Up`/`Down` mark the highlighted line with brighter ink two pixels in from its
 neighbours, so there is no mark in the margin at all. The replies arrive with the
-panel's own growth and are not animated a second time; a follow-up first sends the
-previous answer down out of its card in 200 ms, then the new answer appears. The wheel scrolls the replies while the pointer is over them — five rows a notch, a touchpad's own
+panel's own growth and are not animated a second time; a follow-up first folds the
+previous answer's card down into the bar in 360 ms, then the new answer grows out of it. The wheel scrolls the replies while the pointer is over them — five rows a notch, a touchpad's own
 delta otherwise — and does nothing over the bar. The notch is counted from whichever step field the
 compositor fills in, so a modern wheel and an old one move the same distance, and a
 touchpad's fraction is carried rather than rounded away. A burst of quick notches
@@ -177,10 +177,9 @@ panel's width the card unfolds up out of it. Sending a question moves nothing: t
 bar stays, and — once the request has taken half a second, which a fast answer never
 reaches — a light runs round its rim, one lap in 1.4 s, until the first text
 arrives, which grows the panel out of the bar in 460 ms — that growth is the reply's
-entrance, and nothing plays after it. A follow-up keeps the box it was asked from:
-the panel does not fold shut and open again; the previous answer slides down out of
-the card into the bar in 200 ms, and the light runs on the bar's rim until the new
-answer starts. Closing is the opening
+entrance, and nothing plays after it. A follow-up folds the previous answer's card down
+into the bar in 360 ms, leaving no empty card behind, and the light runs on the bar's
+rim until the new answer grows out of it. Closing is the opening
 run backwards, over 200 ms: the card rolls up into a line, the line pulls in from
 both ends, and only then does the process exit. The replies dissolve into the bottom
 edge of their card rather than being cut off mid-line.

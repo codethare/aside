@@ -80,9 +80,8 @@ const RETURN_HIGHLIGHT_MS: u64 = 700;
 /// How long a request may run before the bar adds the elapsed seconds to its
 /// cancel hint.
 const WAIT_HINT_AFTER_MS: u128 = 3_000;
-/// How long the previous answer takes to slide down out of its card when a follow-up
-/// is sent.
-const RETRACT_MS: u64 = 200;
+/// How long a follow-up takes to fold the previous answer's card down into the bar.
+const RETRACT_MS: u64 = 360;
 
 /// How long a shape change takes at its shortest. The morph is the point, so it is
 /// long enough to be seen rather than only to be over.
@@ -1965,7 +1964,6 @@ impl State {
         look.focused = self.keys.held();
         look.returned = self.returned_ink();
         look.new_content = self.new_content;
-        look.retract = self.retract_progress();
         look
     }
 
@@ -2024,13 +2022,6 @@ impl State {
         self.returned_at.map_or(0.0, |at| {
             (1.0 - at.elapsed().as_secs_f32() / (RETURN_HIGHLIGHT_MS as f32 / 1000.0))
                 .clamp(0.0, 1.0)
-        })
-    }
-
-    /// How far the previous answer has slid down out of its card, 0..1.
-    fn retract_progress(&self) -> f32 {
-        self.retract_at.map_or(0.0, |at| {
-            (at.elapsed().as_millis() as f32 / RETRACT_MS as f32).clamp(0.0, 1.0)
         })
     }
 
@@ -2388,8 +2379,18 @@ impl State {
         // snaps away and the panel never folds shut in one frame.
         if self.animate && self.shape == panel::State::Replies && self.transcript.total_height() > 0
         {
+            // Fold the whole replies card down into the bar while its old answer stays
+            // readable: the old output leaves, and no empty card is left behind.
+            let now = std::time::Instant::now();
             self.pending_send = Some(question);
-            self.retract_at = Some(std::time::Instant::now());
+            self.retract_at = Some(now);
+            self.phase = Phase::Answering;
+            self.shape = panel::State::Bar;
+            self.morph = Some(Morph {
+                from: Phase::Answering,
+                to: Phase::Thinking,
+                start: now,
+            });
             self.dirty = true;
             return;
         }
@@ -2450,7 +2451,11 @@ impl State {
     fn cancel_retract(&mut self) {
         self.pending_send = None;
         self.retract_at = None;
+        self.morph = None;
+        self.phase = Phase::Answering;
+        self.shape = panel::State::Replies;
         self.question = None;
+        self.apply_size();
         self.dirty = true;
     }
 
