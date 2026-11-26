@@ -273,31 +273,19 @@ fn draw_split(
     s: u32,
 ) {
     let g = growth.clamp(0.01, 0.99);
-    let lobe_h = ((replies.h as f32) * g).round().max(1.0) as u32;
-    let half = ((replies.w as f32) * 0.5 * g).round().max(1.0) as u32;
-    let gap = ((replies.w as f32) * 0.045 * (1.0 - g)).round() as u32;
-    let y = replies.y + replies.h - lobe_h;
-    let cx = replies.x + replies.w / 2;
-    let r = replies.r.min(half / 2).min(lobe_h / 2).max(1);
-    let left = render::Panel {
-        x: cx.saturating_sub(half + gap / 2),
-        y,
-        w: half,
-        h: lobe_h,
-        r,
-    };
-    let right = render::Panel {
-        x: cx + gap / 2,
-        y,
-        w: half,
-        h: lobe_h,
-        r,
-    };
-    render::shadow(buf, w, h, &[left, right, *bar], s);
+    let cx = replies.x as f32 + replies.w as f32 / 2.0;
+    let base = bar.y as f32;
+    let rx = replies.w as f32 * 0.35 * g;
+    let ry = (base - replies.y as f32) * 0.5 * g;
+    let cy = base - ry;
+    let lobe_dx = replies.w as f32 * 0.25 * g;
+    let left_cx = cx - lobe_dx;
+    let right_cx = cx + lobe_dx;
+    render::shadow(buf, w, h, &[*bar], s);
     render::body(buf, w, replies, render::BG_PROMPT);
-    // The text comes in once the two lobes have made a surface to hold it: before
+    // The text comes in once the two cells have made a surface to hold it: before
     // that the frame is just the living glass, not chopped words.
-    let text = ((g - 0.42) / 0.58).clamp(0.0, 1.0);
+    let text = ((g - 0.55) / 0.45).clamp(0.0, 1.0);
     draw_replies(
         buf,
         w,
@@ -313,16 +301,18 @@ fn draw_split(
         aa,
         s,
     );
-    // Mask the full card down to the two lobes.
-    let span_at = |panel: &render::Panel, row: u32| -> Option<(u32, u32)> {
-        (row >= panel.y && row < panel.y + panel.h).then(|| {
-            let (x0, x1) = render::rounded_span(panel.w, panel.h, panel.r, row - panel.y);
-            (panel.x + x0, panel.x + x1)
-        })
+    let span = |lobe_cx: f32, row: f32| -> Option<(u32, u32)> {
+        let dy = (row - cy) / ry.max(1.0);
+        if dy.abs() > 1.0 {
+            return None;
+        }
+        let dx = rx * (1.0 - dy * dy).sqrt();
+        Some(((lobe_cx - dx).max(0.0) as u32, (lobe_cx + dx) as u32))
     };
+    let rim = render::dim(render::FG_PROMPT, 0.8);
     for row in replies.y..(replies.y + replies.h).min(h) {
-        let ls = span_at(&left, row);
-        let rs = span_at(&right, row);
+        let ls = span(left_cx, row as f32);
+        let rs = span(right_cx, row as f32);
         for x in replies.x..(replies.x + replies.w).min(w) {
             let inside = ls.is_some_and(|(a, b)| x >= a && x < b)
                 || rs.is_some_and(|(a, b)| x >= a && x < b);
@@ -333,20 +323,10 @@ fn draw_split(
                 }
             }
         }
-    }
-    // The lobe walls are the cell membrane: a lit edge, not a second card.
-    let rim = render::dim(render::FG_PROMPT, 0.8);
-    for panel in [&left, &right] {
-        for rel in 0..panel.h {
-            let (x0, x1) = render::rounded_span(panel.w, panel.h, panel.r, rel);
-            let y = panel.y + rel;
-            if x1 <= x0 {
-                continue;
-            }
-            render::rect(buf, w, h, panel.x + x0, y, 1, 1, rim);
-            render::rect(buf, w, h, panel.x + x1 - 1, y, 1, 1, rim);
-            if rel == 0 || rel + 1 == panel.h {
-                render::rect(buf, w, h, panel.x + x0, y, x1 - x0, 1, rim);
+        for (a, b) in [ls, rs].into_iter().flatten() {
+            if b > a {
+                render::rect(buf, w, h, a, row, 1, 1, rim);
+                render::rect(buf, w, h, b - 1, row, 1, 1, rim);
             }
         }
     }
@@ -379,7 +359,7 @@ fn draw_split(
         buf,
         w,
         h,
-        cx.saturating_sub(seam / 2),
+        (cx as u32).saturating_sub(seam / 2),
         bar.y,
         seam,
         s,
