@@ -120,24 +120,24 @@ where it is.
 - **WHEN** the user types while the old answer is splitting away
 - **THEN** the pending follow-up is dropped and the old answer stays until the text replaces it
 
-### Requirement: The reply card appears as lobes and leaves as a droplet
+### Requirement: The reply card appears and leaves as a droplet
 
-The reply card SHALL grow out of the top border of the bar as two rounded lobes,
-like a cell dividing: the lobes start at the border's centre, move apart and upward,
-and merge into the full card. Its text SHALL fade in only once the lobes have made a
-surface, so opening does not show chopped words.
+The reply card SHALL grow out of the top border of the bar as one rounded droplet:
+it starts small on the border's centre, swells, and becomes the full card. Its text
+SHALL fade in only once the droplet has made a surface, so opening does not show
+chopped words.
 
-Leaving SHALL instead gather the card into one rounded droplet that falls onto the
-bar and disappears into it, with no empty card left. Closing the panel, a follow-up's
-answer and its retract SHALL use this movement. With animations off the card appears
-and goes in one frame.
+Leaving SHALL be the reverse: the card gathers into one rounded droplet that falls
+onto the bar and disappears into it, with no empty card left. Closing the panel, a
+follow-up's answer and its retract SHALL use this movement. With animations off the
+card appears and goes in one frame.
 
 #### Scenario: The first answer
 
 - **WHEN** the first text arrives and the reply card appears
-- **THEN** two rounded lobes rise from the bar's top border, merge, and the text fades in on the merged card
+- **THEN** one rounded droplet rises from the bar's top border, swells, and the text fades in on it
 
 #### Scenario: The panel closes
 
 - **WHEN** the panel closes with an answer on screen
-- **THEN** the card gathers into one droplet that falls onto the bar before the process exits
+- **THEN** the card gathers into the droplet and it falls onto the bar before the process exits

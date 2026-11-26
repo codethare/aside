@@ -1965,7 +1965,6 @@ impl State {
         look.returned = self.returned_ink();
         look.new_content = self.new_content;
         look.growth = self.reply_growth();
-        look.closing = self.retract_at.is_some() || self.close_start.is_some();
         look
     }
 

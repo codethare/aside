@@ -101,11 +101,8 @@ pub struct Look {
     /// Whether reply text arrived while the reader was scrolled up.
     pub new_content: bool,
     /// How much of the reply card is out of the bar, 0..1. A transition draws the
-    /// card as two lobes growing from the border; 1 is the settled card.
+    /// card as a droplet growing from the border; 1 is the settled card.
     pub growth: f32,
-    /// Whether the reply card is being put away: it becomes a droplet and falls onto
-    /// the bar instead of splitting into lobes.
-    pub closing: bool,
 }
 
 impl Look {
@@ -121,7 +118,6 @@ impl Look {
             returned: 0.0,
             new_content: false,
             growth: 1.0,
-            closing: false,
         }
     }
 
@@ -138,7 +134,6 @@ impl Look {
             returned: 0.0,
             new_content: false,
             growth: 1.0,
-            closing: false,
         }
     }
 
@@ -249,9 +244,9 @@ fn draw_content(
     }
 }
 
-/// The reply card while it grows out of the bar as two rounded lobes: the content is
-/// painted whole, then masked to the union, so the card divides out of the border and
-/// comes back into it instead of fading or sliding.
+/// The reply card while it grows out of, or back into, the bar as one rounded droplet.
+/// The droplet starts small on the bar's top border and swells into the full card;
+/// the reverse gathers the card back into the drop. The bar is always painted last.
 #[allow(clippy::too_many_arguments)]
 fn draw_split(
     buf: &mut [u8],
@@ -272,7 +267,6 @@ fn draw_split(
     replies: &render::Panel,
     bar: &render::Panel,
     growth: f32,
-    closing: bool,
     head: Option<f32>,
     _bar_h: u32,
     aa: Subpixel,
@@ -280,77 +274,22 @@ fn draw_split(
 ) {
     let g = growth.clamp(0.01, 0.99);
     let cx = replies.x as f32 + replies.w as f32 / 2.0;
-    if closing {
-        // Putting the card away: it gathers into one droplet that falls onto the bar.
-        let min_h = (6 * s) as f32;
-        let dh = (replies.h as f32 * g).max(min_h);
-        let dw = (replies.w as f32 * g * g).max(min_h * 0.9);
-        let y = (replies.y as f32 + (bar.y as f32 - min_h - replies.y as f32) * (1.0 - g)).round()
-            as u32;
-        let drop = render::Panel {
-            x: (cx - dw / 2.0) as u32,
-            y,
-            w: dw as u32,
-            h: dh as u32,
-            r: (dh / 2.0 + (replies.r as f32 - dh / 2.0) * g) as u32,
-        };
-        render::shadow(buf, w, h, &[*bar, drop], s);
-        render::body(buf, w, &drop, render::BG_PROMPT);
-        let text = ((g - 0.55) / 0.45).clamp(0.0, 1.0);
-        draw_replies(
-            buf,
-            w,
-            font,
-            transcript,
-            viewport,
-            selection,
-            highlight,
-            cursor,
-            &drop,
-            drop.y..(drop.y + drop.h),
-            text,
-            aa,
-            s,
-        );
-        let bar_tone = if hint.is_empty() {
-            render::BG_PROMPT
-        } else {
-            render::BG_MODE
-        };
-        render::body(buf, w, bar, bar_tone);
-        draw_bar(
-            buf,
-            w,
-            h,
-            bar,
-            font,
-            input,
-            pending,
-            bar.y..(bar.y + bar.h),
-            caret_visible,
-            preedit,
-            hint,
-            label,
-            1.0,
-            aa,
-            s,
-        );
-        if let Some(head) = head {
-            render::orbit(buf, w, h, bar, head, s);
-        }
-        return;
-    }
-    let base = bar.y as f32;
-    let rx = replies.w as f32 * 0.35 * g;
-    let ry = (base - replies.y as f32) * 0.5 * g;
-    let cy = base - ry;
-    let lobe_dx = replies.w as f32 * 0.25 * g;
-    let left_cx = cx - lobe_dx;
-    let right_cx = cx + lobe_dx;
-    render::shadow(buf, w, h, &[*bar], s);
-    render::body(buf, w, replies, render::BG_PROMPT);
-    // The text comes in once the two cells have made a surface to hold it: before
-    // that the frame is just the living glass, not chopped words.
+    let min_h = (6 * s) as f32;
+    let dh = (replies.h as f32 * g).max(min_h);
+    // Width grows later than height, so early frames are a drop rather than a card.
+    let dw = (replies.w as f32 * g * g).max(min_h * 0.9);
+    let y =
+        (replies.y as f32 + (bar.y as f32 - min_h - replies.y as f32) * (1.0 - g)).round() as u32;
+    let drop = render::Panel {
+        x: (cx - dw / 2.0) as u32,
+        y,
+        w: dw as u32,
+        h: dh as u32,
+        r: (dh / 2.0 + (replies.r as f32 - dh / 2.0) * g) as u32,
+    };
+    render::shadow(buf, w, h, &[*bar, drop], s);
+    render::body(buf, w, &drop, render::BG_PROMPT);
+    // Text appears only once the droplet has a surface that can hold it.
     let text = ((g - 0.55) / 0.45).clamp(0.0, 1.0);
     draw_replies(
         buf,
@@ -361,41 +300,12 @@ fn draw_split(
         selection,
         highlight,
         cursor,
-        replies,
-        replies.y..(replies.y + replies.h),
+        &drop,
+        drop.y..(drop.y + drop.h),
         text,
         aa,
         s,
     );
-    let span = |lobe_cx: f32, row: f32| -> Option<(u32, u32)> {
-        let dy = (row - cy) / ry.max(1.0);
-        if dy.abs() > 1.0 {
-            return None;
-        }
-        let dx = rx * (1.0 - dy * dy).sqrt();
-        Some(((lobe_cx - dx).max(0.0) as u32, (lobe_cx + dx) as u32))
-    };
-    let rim = render::dim(render::FG_PROMPT, 0.8);
-    for row in replies.y..(replies.y + replies.h).min(h) {
-        let ls = span(left_cx, row as f32);
-        let rs = span(right_cx, row as f32);
-        for x in replies.x..(replies.x + replies.w).min(w) {
-            let inside = ls.is_some_and(|(a, b)| x >= a && x < b)
-                || rs.is_some_and(|(a, b)| x >= a && x < b);
-            if !inside {
-                let at = ((row * w + x) * 4) as usize;
-                if at + 4 <= buf.len() {
-                    buf[at..at + 4].fill(0);
-                }
-            }
-        }
-        for (a, b) in [ls, rs].into_iter().flatten() {
-            if b > a {
-                render::rect(buf, w, h, a, row, 1, 1, rim);
-                render::rect(buf, w, h, b - 1, row, 1, 1, rim);
-            }
-        }
-    }
     let bar_tone = if hint.is_empty() {
         render::BG_PROMPT
     } else {
@@ -418,18 +328,6 @@ fn draw_split(
         1.0,
         aa,
         s,
-    );
-    // The seam in the border that the two lobes come out of.
-    let seam = ((1.0 - g) * replies.w as f32 * 0.18).round() as u32;
-    render::rect(
-        buf,
-        w,
-        h,
-        (cx as u32).saturating_sub(seam / 2),
-        bar.y,
-        seam,
-        s,
-        render::dim(render::LABEL_ACCENT, 0.8 * (1.0 - g)),
     );
     if let Some(head) = head {
         render::orbit(buf, w, h, bar, head, s);
@@ -522,8 +420,8 @@ pub fn draw(
         buf.fill(0);
         return;
     };
-    // A reply card that is appearing or leaving is two lobes growing out of the bar's
-    // top border, like a cell dividing: the width and height both come from `growth`.
+    // A reply card that is appearing or leaving is one droplet growing out of the
+    // bar's top border: the width and height both come from `growth`.
     if look.growth < 1.0 && look.state == State::Replies {
         let sep = render::SEPARATION * s;
         let bar = render::Panel {
@@ -556,7 +454,6 @@ pub fn draw(
                 &replies,
                 &bar,
                 look.growth,
-                look.closing,
                 head,
                 bar_h,
                 aa,
@@ -3163,21 +3060,12 @@ mod tests {
             growth: 0.5,
             ..Look::settled(State::Replies)
         });
-        let droplet = paint(Look {
-            growth: 0.5,
-            closing: true,
-            ..Look::settled(State::Replies)
-        });
         assert_ne!(unfocused, settled, "the unfocused bar has a rim");
         assert_ne!(returned, settled, "the returned bar glows");
         assert_ne!(new_content, settled, "the new-content pill is drawn");
         assert_ne!(
             split, settled,
-            "half-grown, the card is two lobes, not the full card"
-        );
-        assert_ne!(
-            droplet, split,
-            "closing gathers into one droplet, not two lobes"
+            "half-grown, the card is a droplet, not the full card"
         );
     }
 

@@ -137,7 +137,7 @@ transcript says when that happened.
 neighbours, so there is no mark in the margin at all. The replies arrive with the
 panel's own growth and are not animated a second time; a follow-up first gathers the
 previous answer's card into one droplet that falls onto the bar, then the new answer
-grows out of the border. The wheel scrolls the replies while the pointer is over them — five rows a notch, a touchpad's own
+grows out of the border as a droplet. The wheel scrolls the replies while the pointer is over them — five rows a notch, a touchpad's own
 delta otherwise — and does nothing over the bar. The notch is counted from whichever step field the
 compositor fills in, so a modern wheel and an old one move the same distance, and a
 touchpad's fraction is carried rather than rounded away. A burst of quick notches
@@ -174,14 +174,14 @@ drag, release — and `Alt+C` or `Ctrl+C` copies every selected line, one per li
 State changes are animated, and always as one card changing shape, painted inside
 one buffer, so the surface is resized once per state and never per frame. Opening
 takes 520 ms: a line spreads out of a point at the centre, and once it has the
-panel's width the reply card grows out of it as two lobes. Sending a question moves nothing: the
+panel's width the reply card grows out of it as a droplet. Sending a question moves nothing: the
 bar stays, and — once the request has taken half a second, which a fast answer never
 reaches — a light runs round its rim, one lap in 1.4 s, until the first text
 arrives, which grows the panel out of the bar in 460 ms — that growth is the reply's
-entrance: the reply card grows out of the bar's top border as two rounded lobes that
-merge, like a cell dividing, and nothing plays after it. A follow-up gathers the previous answer's card into one
+entrance: the reply card grows out of the bar's top border as one rounded droplet that
+swells into the card, and nothing plays after it. A follow-up gathers the previous answer's card into one
 droplet that falls onto the bar in 300 ms, leaving no empty card behind; the light
-runs on the bar's rim until the new answer grows out of the border. Closing gathers the card into the same
+runs on the bar's rim until the new answer grows out of the border as a droplet. Closing gathers the card into the same
 droplet and drops it onto the bar, and then the process exits. The replies dissolve into the bottom
 edge of their card rather than being cut off mid-line.
 
