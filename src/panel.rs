@@ -100,8 +100,9 @@ pub struct Look {
     pub returned: f32,
     /// Whether reply text arrived while the reader was scrolled up.
     pub new_content: bool,
-    /// How far the previous answer's card has slid down toward the bar, 0..1.
-    pub retract: f32,
+    /// How much of the reply card is out of the bar, 0..1. A transition draws the
+    /// card as two lobes growing from the border; 1 is the settled card.
+    pub growth: f32,
 }
 
 impl Look {
@@ -116,7 +117,7 @@ impl Look {
             focused: true,
             returned: 0.0,
             new_content: false,
-            retract: 0.0,
+            growth: 1.0,
         }
     }
 
@@ -132,7 +133,7 @@ impl Look {
             focused: true,
             returned: 0.0,
             new_content: false,
-            retract: 0.0,
+            growth: 1.0,
         }
     }
 
@@ -243,6 +244,152 @@ fn draw_content(
     }
 }
 
+/// The reply card while it grows out of the bar as two rounded lobes: the content is
+/// painted whole, then masked to the union, so the card divides out of the border and
+/// comes back into it instead of fading or sliding.
+#[allow(clippy::too_many_arguments)]
+fn draw_split(
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    font: &PanelFont,
+    transcript: &Transcript,
+    input: &Input,
+    pending: Option<Pending<'_>>,
+    viewport: &Viewport,
+    selection: Option<Selection>,
+    highlight: Option<usize>,
+    cursor: Option<(usize, usize)>,
+    caret_visible: bool,
+    preedit: &str,
+    hint: &str,
+    label: &str,
+    replies: &render::Panel,
+    bar: &render::Panel,
+    growth: f32,
+    head: Option<f32>,
+    _bar_h: u32,
+    aa: Subpixel,
+    s: u32,
+) {
+    let g = growth.clamp(0.01, 0.99);
+    let lobe_h = ((replies.h as f32) * g).round().max(1.0) as u32;
+    let half = ((replies.w as f32) * 0.5 * g).round().max(1.0) as u32;
+    let gap = ((replies.w as f32) * 0.045 * (1.0 - g)).round() as u32;
+    let y = replies.y + replies.h - lobe_h;
+    let cx = replies.x + replies.w / 2;
+    let r = replies.r.min(half / 2).min(lobe_h / 2).max(1);
+    let left = render::Panel {
+        x: cx.saturating_sub(half + gap / 2),
+        y,
+        w: half,
+        h: lobe_h,
+        r,
+    };
+    let right = render::Panel {
+        x: cx + gap / 2,
+        y,
+        w: half,
+        h: lobe_h,
+        r,
+    };
+    render::shadow(buf, w, h, &[left, right, *bar], s);
+    render::body(buf, w, replies, render::BG_PROMPT);
+    // The text comes in once the two lobes have made a surface to hold it: before
+    // that the frame is just the living glass, not chopped words.
+    let text = ((g - 0.42) / 0.58).clamp(0.0, 1.0);
+    draw_replies(
+        buf,
+        w,
+        font,
+        transcript,
+        viewport,
+        selection,
+        highlight,
+        cursor,
+        replies,
+        replies.y..(replies.y + replies.h),
+        text,
+        aa,
+        s,
+    );
+    // Mask the full card down to the two lobes.
+    let span_at = |panel: &render::Panel, row: u32| -> Option<(u32, u32)> {
+        (row >= panel.y && row < panel.y + panel.h).then(|| {
+            let (x0, x1) = render::rounded_span(panel.w, panel.h, panel.r, row - panel.y);
+            (panel.x + x0, panel.x + x1)
+        })
+    };
+    for row in replies.y..(replies.y + replies.h).min(h) {
+        let ls = span_at(&left, row);
+        let rs = span_at(&right, row);
+        for x in replies.x..(replies.x + replies.w).min(w) {
+            let inside = ls.is_some_and(|(a, b)| x >= a && x < b)
+                || rs.is_some_and(|(a, b)| x >= a && x < b);
+            if !inside {
+                let at = ((row * w + x) * 4) as usize;
+                if at + 4 <= buf.len() {
+                    buf[at..at + 4].fill(0);
+                }
+            }
+        }
+    }
+    // The lobe walls are the cell membrane: a lit edge, not a second card.
+    let rim = render::dim(render::FG_PROMPT, 0.8);
+    for panel in [&left, &right] {
+        for rel in 0..panel.h {
+            let (x0, x1) = render::rounded_span(panel.w, panel.h, panel.r, rel);
+            let y = panel.y + rel;
+            if x1 <= x0 {
+                continue;
+            }
+            render::rect(buf, w, h, panel.x + x0, y, 1, 1, rim);
+            render::rect(buf, w, h, panel.x + x1 - 1, y, 1, 1, rim);
+            if rel == 0 || rel + 1 == panel.h {
+                render::rect(buf, w, h, panel.x + x0, y, x1 - x0, 1, rim);
+            }
+        }
+    }
+    let bar_tone = if hint.is_empty() {
+        render::BG_PROMPT
+    } else {
+        render::BG_MODE
+    };
+    render::body(buf, w, bar, bar_tone);
+    draw_bar(
+        buf,
+        w,
+        h,
+        bar,
+        font,
+        input,
+        pending,
+        bar.y..(bar.y + bar.h),
+        caret_visible,
+        preedit,
+        hint,
+        label,
+        1.0,
+        aa,
+        s,
+    );
+    // The seam in the border that the two lobes come out of.
+    let seam = ((1.0 - g) * replies.w as f32 * 0.18).round() as u32;
+    render::rect(
+        buf,
+        w,
+        h,
+        cx.saturating_sub(seam / 2),
+        bar.y,
+        seam,
+        s,
+        render::dim(render::LABEL_ACCENT, 0.8 * (1.0 - g)),
+    );
+    if let Some(head) = head {
+        render::orbit(buf, w, h, bar, head, s);
+    }
+}
+
 /// The card a state is painted as, inside `panel`: the bar's band on the bottom
 /// row, the ball's square centred on it, or the whole panel for the two-card pane.
 pub fn card_of(state: State, panel: &render::Panel, bar_h: u32) -> render::Panel {
@@ -329,6 +476,67 @@ pub fn draw(
         buf.fill(0);
         return;
     };
+    // A reply card that is appearing or leaving is two lobes growing out of the bar's
+    // top border, like a cell dividing: the width and height both come from `growth`.
+    if look.growth < 1.0 && look.state == State::Replies {
+        let sep = render::SEPARATION * s;
+        let bar = render::Panel {
+            y: panel.y + panel.h.saturating_sub(bar_h),
+            h: bar_h.min(panel.h),
+            ..panel
+        };
+        let room = bar.y.saturating_sub(panel.y).saturating_sub(sep);
+        if let Some(replies) = (room > 0).then(|| render::Panel {
+            y: bar.y - sep - room,
+            h: room,
+            ..panel
+        }) {
+            draw_split(
+                buf,
+                w,
+                h,
+                font,
+                transcript,
+                input,
+                pending,
+                viewport,
+                selection,
+                highlight,
+                cursor,
+                caret_visible,
+                preedit,
+                hint,
+                label,
+                &replies,
+                &bar,
+                look.growth,
+                head,
+                bar_h,
+                aa,
+                s,
+            );
+        } else {
+            render::body(buf, w, &bar, render::BG_PROMPT);
+            draw_bar(
+                buf,
+                w,
+                h,
+                &bar,
+                font,
+                input,
+                pending,
+                bar.y..(bar.y + bar.h),
+                caret_visible,
+                preedit,
+                hint,
+                label,
+                1.0,
+                aa,
+                s,
+            );
+        }
+        return;
+    }
     if look.animated() {
         let from = card_of(look.from, &panel, bar_h);
         let to = card_of(look.state, &panel, bar_h);
@@ -419,31 +627,11 @@ pub fn draw(
         h: room,
         ..panel
     });
-    // A follow-up pulls the old reply card down toward the bar: the card keeps its
-    // content, the bar is painted over its lower part, and the top empties as it goes.
-    let retract = look.retract.clamp(0.0, 1.0);
-    let shown = replies.map(|card| {
-        let slide = ((bar.y - card.y) as f32 * retract).round() as u32;
-        let y = card.y + slide;
-        render::Panel {
-            y,
-            // A retracting card keeps its whole height and slides behind the bar; at
-            // rest it is exactly the room above the bar.
-            h: if retract > 0.0 {
-                (bar.y + bar.h).saturating_sub(y)
-            } else {
-                card.h
-            },
-            ..card
-        }
-    });
-    let cards: Vec<render::Panel> = match shown.filter(|card| card.h > 0) {
+    let cards: Vec<render::Panel> = match replies {
         Some(card) => vec![card, bar],
         None => vec![bar],
     };
-    if retract == 0.0 {
-        render::shadow(buf, w, h, &cards, s);
-    }
+    render::shadow(buf, w, h, &cards, s);
     // The bar takes the mode tone while the prefix waits, so a key that will be
     // swallowed is visible before it is pressed.
     let bar_tone = if hint.is_empty() {
@@ -451,17 +639,17 @@ pub fn draw(
     } else {
         render::BG_MODE
     };
-    if let Some(shown) = shown.filter(|card| card.h > 0) {
-        render::body(buf, w, &shown, render::BG_PROMPT);
-        // Rows are painted against the card's own origin, so the text travels with
-        // the card; the bar is drawn after this and hides the part that reaches it.
-        let clip = shown.y..(shown.y + shown.h);
+    if let Some(replies) = replies.as_ref() {
+        render::body(buf, w, replies, render::BG_PROMPT);
+        // Rows are painted against the card's own origin, so the text travels up
+        // out of the bar with it instead of being wiped in place.
+        let clip = replies.y..(replies.y + replies.h);
         draw_replies(
-            buf, w, font, transcript, viewport, selection, highlight, cursor, &shown, clip, 1.0,
+            buf, w, font, transcript, viewport, selection, highlight, cursor, replies, clip, 1.0,
             aa, s,
         );
-        if look.new_content && retract == 0.0 {
-            draw_new_content(buf, w, h, font, &shown, aa, s);
+        if look.new_content {
+            draw_new_content(buf, w, h, font, replies, aa, s);
         }
     }
     render::body(buf, w, &bar, bar_tone);
@@ -470,7 +658,6 @@ pub fn draw(
     // while the transcript overflows the card.
     let total = transcript.total_height();
     if thumb > 0.0
-        && retract == 0.0
         && let Some((track_y, track_h)) = scroll_track(h, bar_h, s)
         && let Some((ty, th)) =
             render::scroll_thumb(track_y, track_h, viewport.height, total, viewport.top)
@@ -2925,9 +3112,17 @@ mod tests {
             new_content: true,
             ..Look::settled(State::Replies)
         });
+        let split = paint(Look {
+            growth: 0.5,
+            ..Look::settled(State::Replies)
+        });
         assert_ne!(unfocused, settled, "the unfocused bar has a rim");
         assert_ne!(returned, settled, "the returned bar glows");
         assert_ne!(new_content, settled, "the new-content pill is drawn");
+        assert_ne!(
+            split, settled,
+            "half-grown, the card is two lobes, not the full card"
+        );
     }
 
     /// Copy mode has to say so: the bar reads `-- COPY --` on the right and the

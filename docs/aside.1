@@ -116,11 +116,13 @@ While a request is out the bar stays exactly where it is and, once the request h
 taken half a second -- which a fast answer never reaches -- a light runs round its
 rim, one lap every 1.4 seconds, until the answer begins.  The states are animated
 rather than snapped: opening takes 520 milliseconds -- a line spreads out of a
-point and the card unfolds up out of it -- and the first text grows the bar into the
+point and the reply card grows out of it as two lobes -- and the first text grows the bar into the
 panel in 460, inside one buffer so the surface is resized once per state.  That
-growth is the reply's entrance: nothing plays after it.  A follow-up folds the previous
-answer's card down into the bar in 300 milliseconds, leaving no empty card behind;
-the light runs on the bar's rim until the new answer grows out of it.  Closing is
+growth is the reply's entrance: the card grows out of the bar's top border as two
+rounded lobes that merge, like a cell dividing, and nothing plays after it.  A follow-up splits the previous
+answer's card into two lobes and draws them back into the bar's top border in 300
+milliseconds, leaving no empty card behind; the light runs on the bar's rim until
+the new answer grows out of the border.  Closing is
 the opening run backwards in 200 milliseconds, and the process
 exits when it has finished.  Replies dissolve into the bottom edge of their card
 rather than being cut off mid-line.  The expanded panel never exceeds the output height less 64 pixels, and

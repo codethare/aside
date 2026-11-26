@@ -1964,7 +1964,7 @@ impl State {
         look.focused = self.keys.held();
         look.returned = self.returned_ink();
         look.new_content = self.new_content;
-        look.retract = self.retract_progress();
+        look.growth = self.reply_growth();
         look
     }
 
@@ -2024,6 +2024,23 @@ impl State {
             (1.0 - at.elapsed().as_secs_f32() / (RETURN_HIGHLIGHT_MS as f32 / 1000.0))
                 .clamp(0.0, 1.0)
         })
+    }
+
+    /// How much of the reply card is out of the bar: the opening's rise, a shape
+    /// change's progress, or one minus a follow-up's retract.
+    fn reply_growth(&self) -> f32 {
+        if self.retract_at.is_some() {
+            return 1.0 - self.retract_progress();
+        }
+        if self.shape != panel::State::Replies {
+            return 1.0;
+        }
+        let rise = self.tracks().1;
+        let morph = self
+            .morph
+            .filter(|_| self.morphing())
+            .map_or(1.0, |_| self.morph_progress());
+        rise.min(morph)
     }
 
     /// How far the previous answer's card has moved down toward the bar, 0..1.

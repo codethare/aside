@@ -102,20 +102,40 @@ The table SHALL be short enough to fit one page with the existing usage text.
 
 ### Requirement: A follow-up retracts the previous answer
 
-Sending a follow-up while an answer is on screen SHALL fold the previous answer's
-card down into the bar over 300 ms, fading as it goes, leaving no empty card behind.
-The request SHALL start when that retract is over; the new answer's growth then opens
-the box again. With animations off the old text is cleared at once and the request
-starts immediately.
+Sending a follow-up while an answer is on screen SHALL split the previous answer's
+card into two rounded lobes and draw them back into the bar's top border over 300 ms,
+leaving no empty card behind. The request SHALL start when that retract is over; the
+new answer's growth then opens the box again. With animations off the old text is
+cleared at once and the request starts immediately.
 Typing during the retract SHALL cancel the pending follow-up and leave the old answer
 where it is.
 
 #### Scenario: A second question
 
 - **WHEN** the first answer is on screen and the user sends a follow-up
-- **THEN** the answer and its card fold down into the bar, and the new answer grows out of it
+- **THEN** the card splits into two lobes and draws back into the bar's top border, and the new answer grows out of it
 
 #### Scenario: Typing during the retract
 
-- **WHEN** the user types while the old answer is sliding away
+- **WHEN** the user types while the old answer is splitting away
 - **THEN** the pending follow-up is dropped and the old answer stays until the text replaces it
+
+### Requirement: The reply card appears and leaves as two lobes
+
+The reply card SHALL grow out of the top border of the bar as two rounded lobes,
+like a cell dividing: the lobes start at the border's centre, move apart and upward,
+and merge into the full card. Its text SHALL fade in only once the lobes have made a
+surface, so opening does not show chopped words. Leaving SHALL be the same movement
+backwards, the lobes drawing into the border, with no empty card left. Closing the
+panel, the first answer, a follow-up's answer and its retract SHALL use this movement.
+With animations off the card appears and goes in one frame.
+
+#### Scenario: The first answer
+
+- **WHEN** the first text arrives and the reply card appears
+- **THEN** two rounded lobes rise from the bar's top border, merge, and the text fades in on the merged card
+
+#### Scenario: The panel closes
+
+- **WHEN** the panel closes with an answer on screen
+- **THEN** the card divides into two lobes and they draw back into the bar before the process exits
