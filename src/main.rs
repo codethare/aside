@@ -1078,12 +1078,15 @@ fn track_at(elapsed_ms: u128, over: u128) -> f32 {
     1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
 }
 
-/// A small spring for the reply card's rise: ease-out-back, about a tenth of the
-/// travel past the end before it settles. The card's top can go a few pixels above its
-/// final row, which reads as the drawer snapping into place.
+/// A small spring for the reply card's rise: ease-out-back with about a couple of
+/// per cent of overshoot, close to a macOS sheet settling. The card's top goes a few
+/// pixels past its final row, then returns, which reads as the drawer snapping in.
 fn spring_at(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    let c1 = 1.2f32;
+    if t == 0.0 || t == 1.0 {
+        return t;
+    }
+    let c1 = 0.7f32;
     let c3 = c1 + 1.0;
     1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
 }
@@ -4222,7 +4225,10 @@ mod tests {
     fn the_rise_has_a_small_spring() {
         assert_eq!(spring_at(0.0), 0.0);
         assert_eq!(spring_at(1.0), 1.0);
-        assert!(spring_at(0.5) > 1.0, "it overshoots before settling");
+        assert!(
+            (0..=100).any(|i| spring_at(i as f32 / 100.0) > 1.0),
+            "it overshoots before settling"
+        );
         assert!(spring_at(0.2) < 1.0);
     }
 
