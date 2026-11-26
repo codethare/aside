@@ -103,8 +103,7 @@ The table SHALL be short enough to fit one page with the existing usage text.
 ### Requirement: A follow-up retracts the previous answer
 
 Sending a follow-up while an answer is on screen SHALL sink the previous answer's
-card back behind the bar over 300 ms, fading as it goes and leaving no empty card
-behind. The request SHALL start when that retract is over; the new answer's
+card back behind the bar over 300 ms, leaving no empty card behind. The request SHALL start when that retract is over; the new answer's
 growth then opens the box again. With animations off the old text is
 cleared at once and the request starts immediately.
 Typing during the retract SHALL cancel the pending follow-up and leave the old answer
@@ -122,21 +121,22 @@ where it is.
 
 ### Requirement: The reply card rises from behind the bar
 
-The reply card SHALL appear by rising from behind the bar: its top edge comes up
-from the bar's top border, the part below that border is clipped, and its opacity
-goes from transparent through half-transparent to fully visible as it rises. The card
-SHALL NOT be drawn below the bar, and no second bar SHALL appear under the bar.
+The reply card SHALL appear by being pulled out from behind the bar like a drawer: its
+top edge comes up from the bar's top border and the part below that border is
+clipped. The visible card SHALL be opaque from the first strip, not faded in; there
+SHALL be no partly transparent phase. The card SHALL NOT be drawn below the bar, and
+no second bar SHALL appear under the bar.
 
-Leaving SHALL be the reverse: the card sinks back behind the bar and fades, with no
+Leaving SHALL be the reverse: the opaque card is pushed back behind the bar, with no
 empty card left. Closing the panel, a follow-up's answer and its retract SHALL use
 this movement. With animations off the card appears and goes in one frame.
 
 #### Scenario: The first answer
 
 - **WHEN** the first text arrives and the reply card appears
-- **THEN** the card rises from behind the bar, turning opaque as it comes up
+- **THEN** the card is pulled out from behind the bar, opaque from the first visible strip
 
 #### Scenario: The panel closes
 
 - **WHEN** the panel closes with an answer on screen
-- **THEN** the card sinks back behind the bar before the process exits
+- **THEN** the card is pushed back behind the bar before the process exits

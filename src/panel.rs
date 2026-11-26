@@ -245,8 +245,9 @@ fn draw_content(
 }
 
 /// The reply card while it rises from behind the bar, or sinks back behind it. The
-/// card is clipped at the bar's top edge and fades from transparent to opaque as it
-/// comes up; the bar itself is always painted last, so nothing shows below it.
+/// card is opaque and clipped at the bar's top edge: it looks like a drawer being
+/// pulled out of, or pushed back into, the bar. The bar is painted last, so nothing
+/// shows below it.
 #[allow(clippy::too_many_arguments)]
 fn draw_split(
     buf: &mut [u8],
@@ -280,16 +281,10 @@ fn draw_split(
         ..*replies
     };
     if shown.h > 0 {
-        // The face has no rim while it is still coming up: a rim is the edge of a
-        // finished card, and drawing one early makes the transparent phase read as a
-        // solid line. The bar is painted after this, hiding the card's lower edge.
-        render::fill(
-            buf,
-            w,
-            &shown,
-            render::dim(render::BG_PROMPT, g),
-            shown.y..(shown.y + shown.h),
-        );
+        // The card is opaque while it is visible: it is being taken out of, or put
+        // back into, the bar like a drawer. Only the part above the bar shows; the
+        // bar is painted after this and hides the rest.
+        render::body(buf, w, &shown, render::BG_PROMPT);
         draw_replies(
             buf,
             w,
@@ -301,7 +296,7 @@ fn draw_split(
             cursor,
             &shown,
             shown.y..(shown.y + shown.h),
-            g,
+            1.0,
             aa,
             s,
         );

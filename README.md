@@ -177,10 +177,10 @@ panel's width the reply card rises out from behind it. Sending a question moves 
 bar stays, and — once the request has taken half a second, which a fast answer never
 reaches — a light runs round its rim, one lap in 1.4 s, until the first text
 arrives, which grows the panel out of the bar in 460 ms — that growth is the reply's
-entrance: the reply card rises out from behind the bar, transparent at first and
-turning opaque as it comes up, and nothing plays after it. A follow-up sinks the previous answer's card back behind the
-bar in 300 ms, fading as it goes and leaving no empty card behind; the light runs on
-the bar's rim until the new answer rises out of it. Closing is the same return behind
+entrance: the reply card is pulled out from behind the bar like a drawer, opaque
+from the first visible strip, and nothing plays after it. A follow-up pushes the previous answer's card back behind the
+bar in 300 ms, leaving no empty card behind; the light runs on the bar's rim until
+the new answer is pulled out of it. Closing is the same return behind
 the bar, and then the process exits.
 
 ## Keys
