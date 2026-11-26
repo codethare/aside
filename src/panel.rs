@@ -327,6 +327,125 @@ fn draw_split(
     }
 }
 
+/// The sheet layout: the reply card hangs from the output's top edge, as tall as its
+/// content (capped), while the bar stays at its usual screen position. `growth` is the
+/// drip/spring: the card's bottom edge is at `growth` of its full height.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_sheet(
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    font: &PanelFont,
+    transcript: &Transcript,
+    input: &Input,
+    pending: Option<Pending<'_>>,
+    viewport: &Viewport,
+    selection: Option<Selection>,
+    highlight: Option<usize>,
+    cursor: Option<(usize, usize)>,
+    caret_visible: bool,
+    preedit: &str,
+    hint: &str,
+    label: &str,
+    growth: f32,
+    focused: bool,
+    returned: f32,
+    new_content: bool,
+    head: Option<f32>,
+    scale: u32,
+) {
+    let s = scale.max(1);
+    let aa = layout::text_aa(s);
+    let mo = render::SHADOW * s;
+    let card_x = mo;
+    let card_w = w.saturating_sub(2 * mo);
+    let bar_h = font.row_h;
+    let bar_y = h.saturating_sub(mo + bar_h);
+    let cap = bar_y.saturating_sub(render::SEPARATION * s);
+    let full_h = transcript
+        .total_height()
+        .min(cap)
+        .min(layout::MAX_ROWS as u32 * font.row_h);
+    let shown_h = ((full_h as f32 * growth.clamp(0.0, 1.25)).round() as u32).min(bar_y);
+    let bar = render::Panel {
+        x: card_x,
+        y: bar_y,
+        w: card_w,
+        h: bar_h,
+        r: render::CORNER_RADIUS * s,
+    };
+    let card = (shown_h > 0).then(|| render::Panel {
+        x: card_x,
+        y: 0,
+        w: card_w,
+        h: shown_h,
+        r: render::CORNER_RADIUS * s,
+    });
+    let mut cards: Vec<render::Panel> = vec![bar];
+    if let Some(card) = card {
+        cards.push(card);
+    }
+    render::shadow(buf, w, h, &cards, s);
+    if let Some(card) = card {
+        render::body(buf, w, &card, render::BG_PROMPT);
+        let vp = Viewport {
+            height: full_h,
+            ..*viewport
+        };
+        draw_replies(
+            buf,
+            w,
+            font,
+            transcript,
+            &vp,
+            selection,
+            highlight,
+            cursor,
+            &card,
+            0..shown_h,
+            1.0,
+            aa,
+            s,
+        );
+        if new_content {
+            draw_new_content(buf, w, h, font, &card, aa, s);
+        }
+    }
+    let bar_tone = if hint.is_empty() {
+        render::BG_PROMPT
+    } else {
+        render::BG_MODE
+    };
+    render::body(buf, w, &bar, bar_tone);
+    draw_bar(
+        buf,
+        w,
+        h,
+        &bar,
+        font,
+        input,
+        pending,
+        bar_y..(bar_y + bar_h),
+        caret_visible,
+        preedit,
+        hint,
+        label,
+        1.0,
+        aa,
+        s,
+    );
+    if returned > 0.0 {
+        let ink = render::dim(render::LABEL_ACCENT, 0.55 * returned);
+        draw_rim(buf, w, h, &bar, s, ink);
+    }
+    if !focused {
+        draw_rim(buf, w, h, &bar, s, render::dim(render::FG_NORMAL, 0.28));
+    }
+    if let Some(head) = head {
+        render::orbit(buf, w, h, &bar, head, s);
+    }
+}
+
 /// The card a state is painted as, inside `panel`: the bar's band on the bottom
 /// row, the ball's square centred on it, or the whole panel for the two-card pane.
 pub fn card_of(state: State, panel: &render::Panel, bar_h: u32) -> render::Panel {

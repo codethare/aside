@@ -536,7 +536,10 @@ fn run(options: Options) -> Result<(), String> {
     // surface's output is a create-time argument, and the output list is only known
     // after an event round, which `boot` does before anything is committed.
     let layer = make_layer(&shell, &compositor, &qh, None);
-    let pool_size = surface_size((WIDTH, FALLBACK_OUTPUT_H));
+    let pool_size = (
+        WIDTH + 2 * render::SHADOW,
+        sheet_height(Some(FALLBACK_OUTPUT_H), 0),
+    );
     let pool = SlotPool::new((pool_size.0 * pool_size.1 * 4) as usize, &shm)
         .map_err(|e| format!("cannot create the shm pool: {e}"))?;
 
@@ -562,6 +565,7 @@ fn run(options: Options) -> Result<(), String> {
         shape: panel::State::Bar,
         context_cut: false,
         animate,
+        sheet: true,
         mode: Mode::Typing,
         drag: Drag::default(),
         press: None,
@@ -1042,6 +1046,13 @@ fn size_for(phase: Phase, output_h: Option<u32>, size: f32) -> (u32, u32) {
             bar + render::SEPARATION + room_for_replies(output_h, size),
         ),
     }
+}
+
+/// The logical surface height of the sheet: from the output's top edge to the bar's
+/// usual place, with only the bottom shadow inside.
+fn sheet_height(output_h: Option<u32>, drag: i32) -> u32 {
+    let out = output_h.unwrap_or(FALLBACK_OUTPUT_H) as i32;
+    (out - edge_gap(output_h, drag) as i32 + render::SHADOW as i32).max(1) as u32
 }
 
 /// The size a shape change is painted at: the larger of its two shapes, so the
@@ -1804,6 +1815,9 @@ struct State {
     context_cut: bool,
     /// Whether the transitions are drawn, or each one is over in the frame it starts.
     animate: bool,
+    /// Whether the replies hang from the output's top edge as a sheet, with the bar
+    /// staying at its usual place.
+    sheet: bool,
     /// The shape it is drawn as, which is not always the phase's own: a request
     /// keeps the box a follow-up was asked from.
     shape: panel::State,
@@ -1906,6 +1920,12 @@ impl State {
     /// change is painted inside the larger of the two shapes, so the surface is
     /// resized once per transition rather than per frame.
     fn target_size(&self) -> (u32, u32) {
+        if self.sheet {
+            return (
+                box_width(self.size),
+                sheet_height(self.output_h, self.drag.bottom),
+            );
+        }
         match self.morph.filter(|_| self.morphing()) {
             Some(m) => morph_size(m.from, m.to, self.output_h, self.size),
             None => match self.shape {
@@ -2127,6 +2147,31 @@ impl State {
     /// re-wrap once if the width changed.
     fn apply_size(&mut self) {
         let (w, h) = self.target_size();
+        if self.sheet {
+            let sw = w + 2 * render::SHADOW;
+            let sh = h;
+            let (left, bottom) = (
+                dragged_left(self.output_w, sw, self.drag.left),
+                (edge_gap(self.output_h, self.drag.bottom) as i32 - render::SHADOW as i32).max(0),
+            );
+            self.layer.set_margin(0, 0, bottom, left);
+            self.layer.set_size(sw, sh);
+            self.sync_viewport();
+            self.set_input_region();
+            let width_changed = w != self.width;
+            if width_changed || h != self.height {
+                self.width = w;
+                self.height = h;
+                if width_changed {
+                    self.rewrap();
+                }
+                self.buffer = None;
+                self.viewport.height = self.sheet_card_h();
+                self.viewport.clamp(self.transcript.total_height());
+                self.dirty = true;
+            }
+            return;
+        }
         let (sw, sh) = surface_size((w, h));
         let (left, bottom) = self.margins(sw, sh);
         self.layer.set_margin(0, 0, bottom, left);
@@ -2233,12 +2278,44 @@ impl State {
     }
 
     fn buffer_height(&self) -> u32 {
+        if self.sheet {
+            return self.height * self.scale;
+        }
         // The surface carries the shadow margin: the panel is inside it.
         surface_size((self.width, self.height)).1 * self.scale
     }
 
     fn buffer_width(&self) -> u32 {
+        if self.sheet {
+            return (self.width + 2 * render::SHADOW) * self.scale;
+        }
         surface_size((self.width, self.height)).0 * self.scale
+    }
+
+    /// The height of the reply sheet: as tall as its content, capped above the bar and
+    /// by the frame's row limit. The sheet's top stays at the output's top edge.
+    fn sheet_card_h(&self) -> u32 {
+        let Some(font) = self.font.as_ref() else {
+            return 0;
+        };
+        let cap = (self.height * self.scale).saturating_sub(
+            render::SHADOW * self.scale + font.row_h + render::SEPARATION * self.scale,
+        );
+        self.transcript
+            .total_height()
+            .min(cap)
+            .min(layout::MAX_ROWS as u32 * font.row_h)
+    }
+
+    /// Whether a pointer at logical `y` is over the reply area. In sheet mode the
+    /// card starts at the output's top edge; the bar keeps its own rect.
+    fn over_replies_at(&self, y: f64) -> bool {
+        if self.sheet {
+            let h = (self.sheet_card_h() / self.scale.max(1)) as f64;
+            y >= 0.0 && y < h
+        } else {
+            over_replies(self.height, y)
+        }
     }
 
     /// The width text is laid out at, in buffer pixels. The panel's own width,
@@ -2621,7 +2698,7 @@ impl State {
     /// Which reply line a pointer position is on, if any: the same walk the
     /// transcript does for the keyboard, in the other direction.
     fn reply_row(&self, position: (f64, f64)) -> Option<usize> {
-        if !over_replies(self.height, position.1) {
+        if !self.over_replies_at(position.1) {
             return None;
         }
         let font = self.font.as_ref()?;
@@ -3034,6 +3111,16 @@ impl State {
             ));
         }
         self.refresh_waiting_label();
+        if self.sheet {
+            let h = self.sheet_card_h();
+            if h != self.viewport.height {
+                self.viewport.height = h;
+                if self.viewport.following {
+                    self.viewport.clamp(self.transcript.total_height());
+                }
+                self.dirty = true;
+            }
+        }
         if let Some(start) = self.retract_at {
             self.dirty = true;
             if start.elapsed() >= Duration::from_millis(RETRACT_MS) {
@@ -3235,30 +3322,57 @@ impl State {
         // Every pixel is written: the shm slots rotate, so a partial paint would
         // show the previous frame through.
         canvas.fill(0);
-        panel::draw(
-            canvas,
-            w,
-            h,
-            self.font.as_ref().expect("checked above"),
-            &self.transcript,
-            &self.input,
-            bar_pending(self.mode, self.question.as_ref(), std::time::Instant::now()),
-            &self.viewport,
-            selection,
-            Some(self.highlight),
-            (self.mode == Mode::Copy).then_some(self.copy_cursor),
-            // The caret follows the keyboard, not the mode, and blinks: an unfocused
-            // panel draws none, so it cannot look focused.
-            caret,
-            &self.ime.preedit,
-            hint,
-            label,
-            look,
-            head,
-            thumb,
-            burst,
-            s,
-        );
+        let pending = bar_pending(self.mode, self.question.as_ref(), std::time::Instant::now());
+        if self.sheet {
+            panel::draw_sheet(
+                canvas,
+                w,
+                h,
+                self.font.as_ref().expect("checked above"),
+                &self.transcript,
+                &self.input,
+                pending,
+                &self.viewport,
+                selection,
+                Some(self.highlight),
+                (self.mode == Mode::Copy).then_some(self.copy_cursor),
+                caret,
+                &self.ime.preedit,
+                hint,
+                label,
+                look.growth,
+                look.focused,
+                look.returned,
+                look.new_content,
+                head,
+                s,
+            );
+        } else {
+            panel::draw(
+                canvas,
+                w,
+                h,
+                self.font.as_ref().expect("checked above"),
+                &self.transcript,
+                &self.input,
+                pending,
+                &self.viewport,
+                selection,
+                Some(self.highlight),
+                (self.mode == Mode::Copy).then_some(self.copy_cursor),
+                // The caret follows the keyboard, not the mode, and blinks: an unfocused
+                // panel draws none, so it cannot look focused.
+                caret,
+                &self.ime.preedit,
+                hint,
+                label,
+                look,
+                head,
+                thumb,
+                burst,
+                s,
+            );
+        }
         self.layer
             .wl_surface()
             .damage_buffer(0, 0, w as i32, h as i32);
@@ -3469,8 +3583,13 @@ impl State {
             (mo + PAD * s) as f32 + render::measure(font, &self.input.text()[..at], limit) - scroll;
         // Both offsets are byte offsets into the surrounding text.
         let caret = self.input.caret() as i32;
-        // The bar is the last row of the panel, inside the shadow margin.
-        let bar_top = mo + (self.height - panel::bar_height()) * s;
+        // The bar is the last row of the panel, inside the shadow margin; on the
+        // sheet it is at the bottom of the surface, above the bottom shadow.
+        let bar_top = if self.sheet {
+            (self.height - render::SHADOW - panel::bar_height()) * s
+        } else {
+            mo + (self.height - panel::bar_height()) * s
+        };
         text_input.set_surrounding_text(self.input.text().to_string(), caret, caret);
         text_input.set_cursor_rectangle(
             x as i32,
@@ -3583,6 +3702,7 @@ impl State {
         }
         let max_w = self.text_width();
         let buffer_h = self.height * self.scale;
+        let sheet_h = if self.sheet { self.sheet_card_h() } else { 0 };
         // The rows are wrapped anew at the new density; a selection anchored to
         // their indices would copy different characters.
         self.selection = None;
@@ -3595,7 +3715,11 @@ impl State {
         } = self;
         if let Some(font) = font.as_ref() {
             transcript.rewrap(font, max_w);
-            viewport.height = panel::transcript_px(buffer_h, font, scale);
+            viewport.height = if self.sheet {
+                sheet_h
+            } else {
+                panel::transcript_px(buffer_h, font, scale)
+            };
             viewport.clamp(transcript.total_height());
         }
         self.buffer = None;
@@ -3637,7 +3761,20 @@ impl State {
     /// shadow margin and the gap are not part of the panel a click can land on.
     fn set_input_region(&self) {
         let region = self.compositor.wl_compositor().create_region(&self.qh, ());
-        for (x, y, w, h) in card_input_rects(self.width, self.height) {
+        let rects: Vec<(i32, i32, i32, i32)> = if self.sheet {
+            let shadow = render::SHADOW as i32;
+            let bar_h = panel::bar_height();
+            let bar_y = self.height as i32 - render::SHADOW as i32 - bar_h as i32;
+            let card_h = (self.sheet_card_h() / self.scale.max(1)) as i32;
+            let mut rects = vec![(shadow, bar_y, self.width as i32, bar_h as i32)];
+            if card_h > 0 {
+                rects.push((shadow, 0, self.width as i32, card_h));
+            }
+            rects
+        } else {
+            card_input_rects(self.width, self.height).to_vec()
+        };
+        for (x, y, w, h) in rects {
             if w > 0 && h > 0 {
                 region.add(x, y, w, h);
             }
@@ -3654,7 +3791,11 @@ impl State {
             return;
         };
         if self.fractional_pref.is_some() {
-            let (w, h) = surface_size((self.width, self.height));
+            let (w, h) = if self.sheet {
+                (self.width + 2 * render::SHADOW, self.height)
+            } else {
+                surface_size((self.width, self.height))
+            };
             viewport.set_destination(w as i32, h as i32);
         } else {
             viewport.set_destination(-1, -1);
@@ -4153,7 +4294,7 @@ impl PointerHandler for State {
                     if let Some(source) = source {
                         self.axis_source = Some(source);
                     }
-                    if over_replies(self.height, event.position.1) {
+                    if self.over_replies_at(event.position.1) {
                         // `Ctrl` makes the wheel the panel's size; without it the wheel
                         // is the transcript's, which is what it has always been.
                         if self.modifiers.ctrl {

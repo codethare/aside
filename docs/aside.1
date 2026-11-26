@@ -116,15 +116,15 @@ While a request is out the bar stays exactly where it is and, once the request h
 taken half a second -- which a fast answer never reaches -- a light runs round its
 rim, one lap every 1.4 seconds, until the answer begins.  The states are animated
 rather than snapped: opening takes 520 milliseconds -- a line spreads out of a
-point and the reply card drips down from its top border -- and the first text grows the bar into the
+point and the reply card drips down from the screen's top edge -- and the first text grows the bar into the
 panel in 460, inside one buffer so the surface is resized once per state.  That
-growth is the reply's entrance: the card hangs from its top border and drips
+growth is the reply's entrance: the card hangs from the screen's top edge and drips
 downward, opaque from the first visible strip, with a small spring that overshoots
-and settles; the top never detaches.  A follow-up draws the previous answer's card
-back up into that top border in 300 milliseconds, accelerating as it goes and leaving
-no empty card behind; the light runs on the bar's rim until the new answer drips
-down.  Closing is the same suction into the top, and the process exits when it has
-finished.  The expanded panel never exceeds the output height less 64 pixels, and
+and settles; the top never detaches.  Its height follows the output, up to the
+frame's row cap.  A follow-up draws the previous answer's card back up to that top
+edge in 300 milliseconds, accelerating as it goes and leaving no empty card behind;
+the bar stays where it was, and the new answer drips down.  Closing is the same
+suction to the top edge, and the process exits when it has finished.  The expanded panel never exceeds the output height less 64 pixels, and
 scrolls inside that limit.  Only the two cards take pointer input: the shadow
 margin and the gap between them let a click through to the window under it.  On a
 compositor that offers fractional scaling, the

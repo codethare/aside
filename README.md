@@ -136,8 +136,8 @@ transcript says when that happened.
 `Up`/`Down` mark the highlighted line with brighter ink two pixels in from its
 neighbours, so there is no mark in the margin at all. The replies arrive with the
 panel's own growth and are not animated a second time; a follow-up first draws the
-previous answer's card up into its top border, then the new answer drips down from
-that border. The wheel scrolls the replies while the pointer is over them — five rows a notch, a touchpad's own
+previous answer's card back up to the screen's top edge, then the new answer drips
+down from there. The wheel scrolls the replies while the pointer is over them — five rows a notch, a touchpad's own
 delta otherwise — and does nothing over the bar. The notch is counted from whichever step field the
 compositor fills in, so a modern wheel and an old one move the same distance, and a
 touchpad's fraction is carried rather than rounded away. A burst of quick notches
@@ -174,16 +174,17 @@ drag, release — and `Alt+C` or `Ctrl+C` copies every selected line, one per li
 State changes are animated, and always as one card changing shape, painted inside
 one buffer, so the surface is resized once per state and never per frame. Opening
 takes 520 ms: a line spreads out of a point at the centre, and once it has the
-panel's width the reply card drips down from its top border. Sending a question moves nothing: the
+panel's width the reply card drips down from the screen's top edge. Sending a question moves nothing: the
 bar stays, and — once the request has taken half a second, which a fast answer never
 reaches — a light runs round its rim, one lap in 1.4 s, until the first text
 arrives, which grows the panel out of the bar in 460 ms — that growth is the reply's
-entrance: the reply card hangs from its top border and drips downward, opaque from
-the first visible strip, with a small spring that overshoots and settles; the top
-never detaches. A follow-up draws the previous answer's card back up into that top
-border in 300 ms, accelerating as it goes and leaving no empty card behind; the
-light runs on the bar's rim until the new answer drips down. Closing is the same
-suction into the top, and then the process exits.
+entrance: the reply card hangs from the screen's top edge and drips downward, opaque
+from the first visible strip, with a small spring that overshoots and settles; the
+top never detaches. Its height follows the output, up to the frame's row cap. A
+follow-up draws the previous answer's card back up to that top edge in 300 ms,
+accelerating as it goes and leaving no empty card behind; the bar stays where it was,
+and the new answer drips down. Closing is the same suction to the top edge, and then
+the process exits.
 
 ## Keys
 
