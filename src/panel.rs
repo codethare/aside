@@ -352,6 +352,7 @@ pub fn draw_sheet(
     returned: f32,
     new_content: bool,
     head: Option<f32>,
+    thumb: f32,
     scale: u32,
 ) {
     let s = scale.max(1);
@@ -410,6 +411,25 @@ pub fn draw_sheet(
         if new_content {
             draw_new_content(buf, w, h, font, &card, aa, s);
         }
+    }
+    if let Some(card) = card
+        && thumb > 0.0
+        && full_h > viewport.height
+        && let Some((ty, th)) =
+            render::scroll_thumb(0, shown_h, viewport.height, full_h, viewport.top)
+    {
+        let tw = 3 * s;
+        let tx = card.x + card.w - (crate::PAD * s + tw) / 2;
+        render::rect(
+            buf,
+            w,
+            h,
+            tx,
+            ty,
+            tw,
+            th,
+            render::dim(render::LABEL_ACCENT, thumb),
+        );
     }
     let bar_tone = if hint.is_empty() {
         render::BG_PROMPT

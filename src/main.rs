@@ -3345,6 +3345,7 @@ impl State {
                 look.returned,
                 look.new_content,
                 head,
+                thumb,
                 s,
             );
         } else {
