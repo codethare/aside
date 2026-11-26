@@ -100,6 +100,8 @@ pub struct Look {
     pub returned: f32,
     /// Whether reply text arrived while the reader was scrolled up.
     pub new_content: bool,
+    /// How far the previous answer's card has slid down toward the bar, 0..1.
+    pub retract: f32,
 }
 
 impl Look {
@@ -114,6 +116,7 @@ impl Look {
             focused: true,
             returned: 0.0,
             new_content: false,
+            retract: 0.0,
         }
     }
 
@@ -129,6 +132,7 @@ impl Look {
             focused: true,
             returned: 0.0,
             new_content: false,
+            retract: 0.0,
         }
     }
 
@@ -415,11 +419,31 @@ pub fn draw(
         h: room,
         ..panel
     });
-    let cards: Vec<render::Panel> = match replies {
+    // A follow-up pulls the old reply card down toward the bar: the card keeps its
+    // content, the bar is painted over its lower part, and the top empties as it goes.
+    let retract = look.retract.clamp(0.0, 1.0);
+    let shown = replies.map(|card| {
+        let slide = ((bar.y - card.y) as f32 * retract).round() as u32;
+        let y = card.y + slide;
+        render::Panel {
+            y,
+            // A retracting card keeps its whole height and slides behind the bar; at
+            // rest it is exactly the room above the bar.
+            h: if retract > 0.0 {
+                (bar.y + bar.h).saturating_sub(y)
+            } else {
+                card.h
+            },
+            ..card
+        }
+    });
+    let cards: Vec<render::Panel> = match shown.filter(|card| card.h > 0) {
         Some(card) => vec![card, bar],
         None => vec![bar],
     };
-    render::shadow(buf, w, h, &cards, s);
+    if retract == 0.0 {
+        render::shadow(buf, w, h, &cards, s);
+    }
     // The bar takes the mode tone while the prefix waits, so a key that will be
     // swallowed is visible before it is pressed.
     let bar_tone = if hint.is_empty() {
@@ -427,17 +451,17 @@ pub fn draw(
     } else {
         render::BG_MODE
     };
-    if let Some(replies) = replies.as_ref() {
-        render::body(buf, w, replies, render::BG_PROMPT);
-        // Rows are painted against the card's own origin, so the text travels up
-        // out of the bar with it instead of being wiped in place.
-        let clip = replies.y..(replies.y + replies.h);
+    if let Some(shown) = shown.filter(|card| card.h > 0) {
+        render::body(buf, w, &shown, render::BG_PROMPT);
+        // Rows are painted against the card's own origin, so the text travels with
+        // the card; the bar is drawn after this and hides the part that reaches it.
+        let clip = shown.y..(shown.y + shown.h);
         draw_replies(
-            buf, w, font, transcript, viewport, selection, highlight, cursor, replies, clip, 1.0,
+            buf, w, font, transcript, viewport, selection, highlight, cursor, &shown, clip, 1.0,
             aa, s,
         );
-        if look.new_content {
-            draw_new_content(buf, w, h, font, replies, aa, s);
+        if look.new_content && retract == 0.0 {
+            draw_new_content(buf, w, h, font, &shown, aa, s);
         }
     }
     render::body(buf, w, &bar, bar_tone);
@@ -446,6 +470,7 @@ pub fn draw(
     // while the transcript overflows the card.
     let total = transcript.total_height();
     if thumb > 0.0
+        && retract == 0.0
         && let Some((track_y, track_h)) = scroll_track(h, bar_h, s)
         && let Some((ty, th)) =
             render::scroll_thumb(track_y, track_h, viewport.height, total, viewport.top)

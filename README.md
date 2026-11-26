@@ -136,7 +136,7 @@ transcript says when that happened.
 `Up`/`Down` mark the highlighted line with brighter ink two pixels in from its
 neighbours, so there is no mark in the margin at all. The replies arrive with the
 panel's own growth and are not animated a second time; a follow-up first folds the
-previous answer's card down into the bar in 360 ms, then the new answer grows out of it. The wheel scrolls the replies while the pointer is over them — five rows a notch, a touchpad's own
+previous answer's card down into the bar in 300 ms, then the new answer grows out of it. The wheel scrolls the replies while the pointer is over them — five rows a notch, a touchpad's own
 delta otherwise — and does nothing over the bar. The notch is counted from whichever step field the
 compositor fills in, so a modern wheel and an old one move the same distance, and a
 touchpad's fraction is carried rather than rounded away. A burst of quick notches
@@ -178,7 +178,7 @@ bar stays, and — once the request has taken half a second, which a fast answer
 reaches — a light runs round its rim, one lap in 1.4 s, until the first text
 arrives, which grows the panel out of the bar in 460 ms — that growth is the reply's
 entrance, and nothing plays after it. A follow-up folds the previous answer's card down
-into the bar in 360 ms, leaving no empty card behind, and the light runs on the bar's
+into the bar in 300 ms, leaving no empty card behind, and the light runs on the bar's
 rim until the new answer grows out of it. Closing is the opening
 run backwards, over 200 ms: the card rolls up into a line, the line pulls in from
 both ends, and only then does the process exit. The replies dissolve into the bottom

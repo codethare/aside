@@ -103,7 +103,7 @@ The table SHALL be short enough to fit one page with the existing usage text.
 ### Requirement: A follow-up retracts the previous answer
 
 Sending a follow-up while an answer is on screen SHALL fold the previous answer's
-card down into the bar over 360 ms, fading as it goes, leaving no empty card behind.
+card down into the bar over 300 ms, fading as it goes, leaving no empty card behind.
 The request SHALL start when that retract is over; the new answer's growth then opens
 the box again. With animations off the old text is cleared at once and the request
 starts immediately.
