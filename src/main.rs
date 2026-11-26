@@ -1078,6 +1078,16 @@ fn track_at(elapsed_ms: u128, over: u128) -> f32 {
     1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
 }
 
+/// A small spring for the reply card's rise: ease-out-back, about a tenth of the
+/// travel past the end before it settles. The card's top can go a few pixels above its
+/// final row, which reads as the drawer snapping into place.
+fn spring_at(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let c1 = 1.2f32;
+    let c3 = c1 + 1.0;
+    1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
+}
+
 /// The two tracks of the opening, `(spread, rise)`, `elapsed_ms` after it began: a
 /// line grows both ways out of a point, and once it has its width the card unfolds
 /// upward out of it.
@@ -1964,7 +1974,12 @@ impl State {
         look.focused = self.keys.held();
         look.returned = self.returned_ink();
         look.new_content = self.new_content;
-        look.growth = self.reply_growth();
+        let growth = self.reply_growth();
+        look.growth = if self.retract_at.is_some() || self.close_start.is_some() {
+            growth
+        } else {
+            spring_at(growth)
+        };
         look
     }
 
@@ -4201,6 +4216,14 @@ mod tests {
         for key in ["Ctrl+T", "copy mode", "Alt+hjkl", "Ctrl+V", "Esc"] {
             assert!(USAGE.contains(key), "help mentions {key}");
         }
+    }
+
+    #[test]
+    fn the_rise_has_a_small_spring() {
+        assert_eq!(spring_at(0.0), 0.0);
+        assert_eq!(spring_at(1.0), 1.0);
+        assert!(spring_at(0.5) > 1.0, "it overshoots before settling");
+        assert!(spring_at(0.2) < 1.0);
     }
 
     #[test]

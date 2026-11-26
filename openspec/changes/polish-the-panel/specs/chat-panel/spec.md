@@ -124,7 +124,8 @@ where it is.
 The reply card SHALL appear by being pulled out from behind the bar like a drawer: its
 top edge comes up from the bar's top border and the part below that border is
 clipped. The visible card SHALL be opaque from the first strip, not faded in; there
-SHALL be no partly transparent phase. The card SHALL NOT be drawn below the bar, and
+SHALL be no partly transparent phase. The rise SHALL use a small spring: it may
+overshoot its final row by a few pixels and settle back without a visible jump. The card SHALL NOT be drawn below the bar, and
 no second bar SHALL appear under the bar.
 
 Leaving SHALL be the reverse: the opaque card is pushed back behind the bar, with no

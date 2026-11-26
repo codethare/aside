@@ -273,7 +273,7 @@ fn draw_split(
     aa: Subpixel,
     s: u32,
 ) {
-    let g = growth.clamp(0.0, 1.0);
+    let g = growth.clamp(0.0, 1.25);
     let top = replies.y + ((bar.y - replies.y) as f32 * (1.0 - g)).round() as u32;
     let shown = render::Panel {
         y: top,
@@ -417,7 +417,7 @@ pub fn draw(
     };
     // A reply card that is appearing or leaving rises from behind the bar: its top
     // comes up, it is clipped at the bar, and it fades from transparent to opaque.
-    if look.growth < 1.0 && look.state == State::Replies {
+    if (look.growth - 1.0).abs() > 1e-4 && look.state == State::Replies {
         let sep = render::SEPARATION * s;
         let bar = render::Panel {
             y: panel.y + panel.h.saturating_sub(bar_h),

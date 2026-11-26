@@ -178,7 +178,8 @@ bar stays, and — once the request has taken half a second, which a fast answer
 reaches — a light runs round its rim, one lap in 1.4 s, until the first text
 arrives, which grows the panel out of the bar in 460 ms — that growth is the reply's
 entrance: the reply card is pulled out from behind the bar like a drawer, opaque
-from the first visible strip, and nothing plays after it. A follow-up pushes the previous answer's card back behind the
+from the first visible strip, with a small spring that overshoots and settles; and
+nothing plays after it. A follow-up pushes the previous answer's card back behind the
 bar in 300 ms, leaving no empty card behind; the light runs on the bar's rim until
 the new answer is pulled out of it. Closing is the same return behind
 the bar, and then the process exits.
