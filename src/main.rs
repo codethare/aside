@@ -1979,7 +1979,9 @@ impl State {
         look.new_content = self.new_content;
         let growth = self.reply_growth();
         look.growth = if self.retract_at.is_some() || self.close_start.is_some() {
-            growth
+            // Pull it back into the top: slow at first, then faster, like a suction.
+            let away = 1.0 - growth;
+            1.0 - away * away
         } else {
             spring_at(growth)
         };

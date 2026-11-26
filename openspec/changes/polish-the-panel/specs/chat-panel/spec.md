@@ -102,8 +102,9 @@ The table SHALL be short enough to fit one page with the existing usage text.
 
 ### Requirement: A follow-up retracts the previous answer
 
-Sending a follow-up while an answer is on screen SHALL sink the previous answer's
-card back behind the bar over 300 ms, leaving no empty card behind. The request SHALL start when that retract is over; the new answer's
+Sending a follow-up while an answer is on screen SHALL draw the previous answer's
+card back up into its top border over 300 ms, accelerating as it goes and leaving no
+empty card behind. The request SHALL start when that retract is over; the new answer's
 growth then opens the box again. With animations off the old text is
 cleared at once and the request starts immediately.
 Typing during the retract SHALL cancel the pending follow-up and leave the old answer
@@ -112,32 +113,33 @@ where it is.
 #### Scenario: A second question
 
 - **WHEN** the first answer is on screen and the user sends a follow-up
-- **THEN** the card sinks back behind the bar, and the new answer rises out of it
+- **THEN** the card is drawn back up into the top border, and the new answer drips down from it
 
 #### Scenario: Typing during the retract
 
-- **WHEN** the user types while the old answer is splitting away
+- **WHEN** the user types while the old answer is being drawn back into the top border
 - **THEN** the pending follow-up is dropped and the old answer stays until the text replaces it
 
-### Requirement: The reply card rises from behind the bar
+### Requirement: The reply card drips from its top border
 
-The reply card SHALL appear by being pulled out from behind the bar like a drawer: its
-top edge comes up from the bar's top border and the part below that border is
-clipped. The visible card SHALL be opaque from the first strip, not faded in; there
-SHALL be no partly transparent phase. The rise SHALL use a small spring: it may
-overshoot its final row by a few pixels and settle back without a visible jump. The card SHALL NOT be drawn below the bar, and
-no second bar SHALL appear under the bar.
+The reply card SHALL appear hanging from its top border: the top edge stays fixed and
+connected, while the bottom edge drips downward until it reaches the full card. The
+visible card SHALL be opaque from the first strip, not faded in; there SHALL be no
+partly transparent phase. The drip SHALL use a small spring: the bottom may overshoot
+its final row by a few pixels and settle back without detaching from the top. No
+second bar SHALL appear under the bar.
 
-Leaving SHALL be the reverse: the opaque card is pushed back behind the bar, with no
-empty card left. Closing the panel, a follow-up's answer and its retract SHALL use
-this movement. With animations off the card appears and goes in one frame.
+Leaving SHALL be the reverse: the bottom edge is drawn back up into the top border,
+accelerating like a suction, with no empty card left. Closing the panel, a follow-up's
+answer and its retract SHALL use this movement. With animations off the card appears
+and goes in one frame.
 
 #### Scenario: The first answer
 
 - **WHEN** the first text arrives and the reply card appears
-- **THEN** the card is pulled out from behind the bar, opaque from the first visible strip
+- **THEN** the card drips down from its top border, which stays attached
 
 #### Scenario: The panel closes
 
 - **WHEN** the panel closes with an answer on screen
-- **THEN** the card is pushed back behind the bar before the process exits
+- **THEN** the card is drawn back up into its top border before the process exits

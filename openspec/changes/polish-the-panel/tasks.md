@@ -12,8 +12,8 @@
 - [x] 2.1 An unfocused bar draws a faint inner rim, driven by the keyboard-held state; a focused frame draws none
 - [x] 2.2 While a request runs the bar's right side reads `Esc cancel`, and after three seconds adds the elapsed seconds
 - [x] 2.3 Typing during the particle leaving clears the question in the frame the text appears
-- [x] 2.4 A follow-up pushes the previous answer's card behind the bar over 300 ms, starts the request after the retract, and leaves no empty card; typing cancels the pending send
-- [x] 2.5 The reply card is pulled out from behind the bar as an opaque drawer, clipped at its top border, with a small spring overshoot; closing pushes it back the same way, with no second bar below
+- [x] 2.4 A follow-up draws the previous answer's card back up into its top border over 300 ms, accelerating like a suction, starts the request after the retract, and leaves no empty card; typing cancels the pending send
+- [x] 2.5 The reply card drips down from its top border, which stays attached, with a small spring overshoot; closing draws it back up into the top border, with no second bar below
 
 ## 3. Startup and discovery
 

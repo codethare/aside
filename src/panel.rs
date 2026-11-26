@@ -244,10 +244,9 @@ fn draw_content(
     }
 }
 
-/// The reply card while it rises from behind the bar, or sinks back behind it. The
-/// card is opaque and clipped at the bar's top edge: it looks like a drawer being
-/// pulled out of, or pushed back into, the bar. The bar is painted last, so nothing
-/// shows below it.
+/// The reply card while it drips down from its top border, or is drawn back up into
+/// it. The top edge is fixed and connected; the bottom edge descends with a small
+/// spring. The bar is painted last, so nothing appears under it.
 #[allow(clippy::too_many_arguments)]
 fn draw_split(
     buf: &mut [u8],
@@ -274,16 +273,15 @@ fn draw_split(
     s: u32,
 ) {
     let g = growth.clamp(0.0, 1.25);
-    let top = replies.y + ((bar.y - replies.y) as f32 * (1.0 - g)).round() as u32;
+    // The card's top edge stays on its own border and the drop hangs from it: the
+    // bottom edge descends (and springs a little past its final row), never detaching
+    // from the top. Closing runs the same shape upwards into the border.
     let shown = render::Panel {
-        y: top,
-        h: bar.y.saturating_sub(top),
+        y: replies.y,
+        h: (replies.h as f32 * g).round() as u32,
         ..*replies
     };
     if shown.h > 0 {
-        // The card is opaque while it is visible: it is being taken out of, or put
-        // back into, the bar like a drawer. Only the part above the bar shows; the
-        // bar is painted after this and hides the rest.
         render::body(buf, w, &shown, render::BG_PROMPT);
         draw_replies(
             buf,
@@ -415,8 +413,8 @@ pub fn draw(
         buf.fill(0);
         return;
     };
-    // A reply card that is appearing or leaving rises from behind the bar: its top
-    // comes up, it is clipped at the bar, and it fades from transparent to opaque.
+    // A reply card that is appearing or leaving hangs from its top border: the bottom
+    // edge drops down (with a small spring) and is pulled back up to the top to leave.
     if (look.growth - 1.0).abs() > 1e-4 && look.state == State::Replies {
         let sep = render::SEPARATION * s;
         let bar = render::Panel {
