@@ -100,8 +100,8 @@ pub struct Look {
     pub returned: f32,
     /// Whether reply text arrived while the reader was scrolled up.
     pub new_content: bool,
-    /// How much of the reply card is out of the bar, 0..1. A transition draws the
-    /// card as a droplet growing from the border; 1 is the settled card.
+    /// How much of the reply card has risen from behind the bar, 0..1. A transition
+    /// draws the card clipped at the bar and fading in; 1 is the settled card.
     pub growth: f32,
 }
 
@@ -244,9 +244,9 @@ fn draw_content(
     }
 }
 
-/// The reply card while it grows out of, or back into, the bar as one rounded droplet.
-/// The droplet starts small on the bar's top border and swells into the full card;
-/// the reverse gathers the card back into the drop. The bar is always painted last.
+/// The reply card while it rises from behind the bar, or sinks back behind it. The
+/// card is clipped at the bar's top edge and fades from transparent to opaque as it
+/// comes up; the bar itself is always painted last, so nothing shows below it.
 #[allow(clippy::too_many_arguments)]
 fn draw_split(
     buf: &mut [u8],
@@ -272,40 +272,40 @@ fn draw_split(
     aa: Subpixel,
     s: u32,
 ) {
-    let g = growth.clamp(0.01, 0.99);
-    let cx = replies.x as f32 + replies.w as f32 / 2.0;
-    let min_h = (6 * s) as f32;
-    let dh = (replies.h as f32 * g).max(min_h);
-    // Width grows later than height, so early frames are a drop rather than a card.
-    let dw = (replies.w as f32 * g * g).max(min_h * 0.9);
-    let y =
-        (replies.y as f32 + (bar.y as f32 - min_h - replies.y as f32) * (1.0 - g)).round() as u32;
-    let drop = render::Panel {
-        x: (cx - dw / 2.0) as u32,
-        y,
-        w: dw as u32,
-        h: dh as u32,
-        r: (dh / 2.0 + (replies.r as f32 - dh / 2.0) * g) as u32,
+    let g = growth.clamp(0.0, 1.0);
+    let top = replies.y + ((bar.y - replies.y) as f32 * (1.0 - g)).round() as u32;
+    let shown = render::Panel {
+        y: top,
+        h: bar.y.saturating_sub(top),
+        ..*replies
     };
-    render::shadow(buf, w, h, &[*bar, drop], s);
-    render::body(buf, w, &drop, render::BG_PROMPT);
-    // Text appears only once the droplet has a surface that can hold it.
-    let text = ((g - 0.55) / 0.45).clamp(0.0, 1.0);
-    draw_replies(
-        buf,
-        w,
-        font,
-        transcript,
-        viewport,
-        selection,
-        highlight,
-        cursor,
-        &drop,
-        drop.y..(drop.y + drop.h),
-        text,
-        aa,
-        s,
-    );
+    if shown.h > 0 {
+        // The face has no rim while it is still coming up: a rim is the edge of a
+        // finished card, and drawing one early makes the transparent phase read as a
+        // solid line. The bar is painted after this, hiding the card's lower edge.
+        render::fill(
+            buf,
+            w,
+            &shown,
+            render::dim(render::BG_PROMPT, g),
+            shown.y..(shown.y + shown.h),
+        );
+        draw_replies(
+            buf,
+            w,
+            font,
+            transcript,
+            viewport,
+            selection,
+            highlight,
+            cursor,
+            &shown,
+            shown.y..(shown.y + shown.h),
+            g,
+            aa,
+            s,
+        );
+    }
     let bar_tone = if hint.is_empty() {
         render::BG_PROMPT
     } else {
@@ -420,8 +420,8 @@ pub fn draw(
         buf.fill(0);
         return;
     };
-    // A reply card that is appearing or leaving is one droplet growing out of the
-    // bar's top border: the width and height both come from `growth`.
+    // A reply card that is appearing or leaving rises from behind the bar: its top
+    // comes up, it is clipped at the bar, and it fades from transparent to opaque.
     if look.growth < 1.0 && look.state == State::Replies {
         let sep = render::SEPARATION * s;
         let bar = render::Panel {
@@ -3065,7 +3065,7 @@ mod tests {
         assert_ne!(new_content, settled, "the new-content pill is drawn");
         assert_ne!(
             split, settled,
-            "half-grown, the card is a droplet, not the full card"
+            "half-risen, the card is a strip, not the full card"
         );
     }
 

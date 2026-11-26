@@ -102,9 +102,9 @@ The table SHALL be short enough to fit one page with the existing usage text.
 
 ### Requirement: A follow-up retracts the previous answer
 
-Sending a follow-up while an answer is on screen SHALL gather the previous answer's
-card into one rounded droplet that falls onto the bar over 300 ms, leaving no empty
-card behind. The request SHALL start when that retract is over; the new answer's
+Sending a follow-up while an answer is on screen SHALL sink the previous answer's
+card back behind the bar over 300 ms, fading as it goes and leaving no empty card
+behind. The request SHALL start when that retract is over; the new answer's
 growth then opens the box again. With animations off the old text is
 cleared at once and the request starts immediately.
 Typing during the retract SHALL cancel the pending follow-up and leave the old answer
@@ -113,31 +113,30 @@ where it is.
 #### Scenario: A second question
 
 - **WHEN** the first answer is on screen and the user sends a follow-up
-- **THEN** the card gathers into one droplet that falls onto the bar, and the new answer grows out of it
+- **THEN** the card sinks back behind the bar, and the new answer rises out of it
 
 #### Scenario: Typing during the retract
 
 - **WHEN** the user types while the old answer is splitting away
 - **THEN** the pending follow-up is dropped and the old answer stays until the text replaces it
 
-### Requirement: The reply card appears and leaves as a droplet
+### Requirement: The reply card rises from behind the bar
 
-The reply card SHALL grow out of the top border of the bar as one rounded droplet:
-it starts small on the border's centre, swells, and becomes the full card. Its text
-SHALL fade in only once the droplet has made a surface, so opening does not show
-chopped words.
+The reply card SHALL appear by rising from behind the bar: its top edge comes up
+from the bar's top border, the part below that border is clipped, and its opacity
+goes from transparent through half-transparent to fully visible as it rises. The card
+SHALL NOT be drawn below the bar, and no second bar SHALL appear under the bar.
 
-Leaving SHALL be the reverse: the card gathers into one rounded droplet that falls
-onto the bar and disappears into it, with no empty card left. Closing the panel, a
-follow-up's answer and its retract SHALL use this movement. With animations off the
-card appears and goes in one frame.
+Leaving SHALL be the reverse: the card sinks back behind the bar and fades, with no
+empty card left. Closing the panel, a follow-up's answer and its retract SHALL use
+this movement. With animations off the card appears and goes in one frame.
 
 #### Scenario: The first answer
 
 - **WHEN** the first text arrives and the reply card appears
-- **THEN** one rounded droplet rises from the bar's top border, swells, and the text fades in on it
+- **THEN** the card rises from behind the bar, turning opaque as it comes up
 
 #### Scenario: The panel closes
 
 - **WHEN** the panel closes with an answer on screen
-- **THEN** the card gathers into the droplet and it falls onto the bar before the process exits
+- **THEN** the card sinks back behind the bar before the process exits
