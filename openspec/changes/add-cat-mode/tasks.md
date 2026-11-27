@@ -330,7 +330,7 @@ fn the_cat_never_paints_outside_its_window() {
 - `fn mood_of(phase: Phase) -> cat::Mood` and `fn stage_pose(&self, now) -> cat::Pose`,
   pure enough to test.
 
-- [ ] **Step 1: Write the failing test** — the phase mapping:
+- [x] **Step 1: Write the failing test** — the phase mapping:
 
 ```rust
 #[test]
@@ -341,9 +341,9 @@ fn the_cat_answers_what_the_panel_is_doing() {
 }
 ```
 
-- [ ] **Step 2: Run it, watch it fail.**
+- [x] **Step 2: Run it, watch it fail.**
 
-- [ ] **Step 3: Implement** the stage's lifecycle: create it in cat mode once the panel's
+- [x] **Step 3: Implement** the stage's lifecycle: create it in cat mode once the panel's
   output is known (`--output`, or the panel's `wl_surface.enter`), `Layer::Overlay`, the
   same namespace, `KeyboardInteractivity::None`, an empty input region, the panel's buffer
   scale and viewporter; wait for its own configure before the first buffer; anchor
@@ -352,15 +352,15 @@ fn the_cat_answers_what_the_panel_is_doing() {
   and committed after; recompute the rect in `apply_size`/`set_size`/`toggle` and on the
   drag handlers; start the entrance clock at its first commit.
 
-- [ ] **Step 4: Run it by hand.** With `mode = "cat"`, summon: the cat peeks from an edge,
+- [x] **Step 4: Run it by hand.** With `mode = "cat"`, summon: the cat peeks from an edge,
   hops, and its paw sits on the input card's left rim. Move the panel with `Alt+hjkl` and
   resize it with `Ctrl+Alt+-`/`+`: the stage follows. Click where the cat is: the click
   passes through. If `groff` is unavailable, skip the man check.
 
-- [ ] **Step 5: Run.** `cargo test` → the same 282 pass and the two known environment
+- [x] **Step 5: Run.** `cargo test` → the same 282 pass and the two known environment
   failures; `cargo clippy --all-targets -- -D warnings` → clean.
 
-- [ ] **Step 6: Commit.** `jj describe -m "feat: show the cat on its own surface"` then `jj new`.
+- [x] **Step 6: Commit.** `jj describe -m "feat: show the cat on its own surface"` then `jj new`.
 
 ---
 

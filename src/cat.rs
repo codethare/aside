@@ -167,6 +167,16 @@ pub fn pose(
     }
 }
 
+/// The clock and the process: no dependency, and a summon is a fresh roll because the
+/// process exits with the panel.
+pub fn seed() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    nanos ^ (std::process::id() as u64).rotate_left(32)
+}
+
 /// One of four, from a seed. A splitmix step, so neighbouring seeds — the clock's
 /// nanoseconds — do not walk the edges in order.
 pub fn roll_edge(seed: u64) -> Edge {

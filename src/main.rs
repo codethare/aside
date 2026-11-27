@@ -607,6 +607,7 @@ fn run(options: Options) -> Result<(), String> {
         shm,
         qh,
         compositor: compositor.clone(),
+        shell,
         pool,
         buffer: None,
         width: WIDTH,
@@ -658,6 +659,8 @@ fn run(options: Options) -> Result<(), String> {
         panel_output: None,
         painted: false,
         dirty: true,
+        stage: None,
+        answer_end: None,
         caret_drawn: false,
         exit: false,
         layer,
@@ -690,7 +693,7 @@ fn run(options: Options) -> Result<(), String> {
         .roundtrip(&mut state)
         .map_err(|e| format!("cannot list the outputs: {e}"))?;
     trace("output roundtrip done");
-    state.boot(&shell, &compositor, output.as_deref())?;
+    state.boot(&compositor, output.as_deref())?;
     trace("first commit (buffer-less)");
     smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource::new(
         conn.clone(),
@@ -1395,6 +1398,15 @@ fn state_of(phase: Phase) -> panel::State {
     }
 }
 
+/// What the cat is doing while the panel is doing that.
+fn mood_of(phase: Phase) -> cat::Mood {
+    match phase {
+        Phase::Idle => cat::Mood::Idle,
+        Phase::Thinking => cat::Mood::Thinking,
+        Phase::Answering => cat::Mood::Answering,
+    }
+}
+
 /// The shape a phase is drawn as, given the shape already on screen. A request in
 /// flight keeps the box it was asked from: shrinking to the bar and growing back on
 /// every follow-up reads as the panel folding itself shut, and the answer that is
@@ -1808,6 +1820,25 @@ enum Phase {
     Answering,
 }
 
+/// The cat's window: a second layer surface carrying the cat and nothing else. It takes
+/// no keyboard and no click, so every key and every pointer event is still the panel's.
+struct Stage {
+    layer: LayerSurface,
+    buffer: Option<Buffer>,
+    configured: bool,
+    /// Where the window is, and where it is heading: the hop runs between them.
+    place: cat::Stage,
+    landing: cat::Stage,
+    /// The edge the cat came out of.
+    edge: cat::Edge,
+    /// When the window first painted, which starts the entrance.
+    entrance: std::time::Instant,
+    /// The pose on screen and when it began, so a pose's own clock restarts with it.
+    pose: (cat::Pose, std::time::Instant),
+    /// The size last asked for, so a resize is one call and not one per frame.
+    sized: (u32, u32),
+}
+
 struct State {
     registry_state: RegistryState,
     seat_state: SeatState,
@@ -1816,6 +1847,9 @@ struct State {
     qh: QueueHandle<State>,
     /// Kept for the input region: the surface is larger than the cards.
     compositor: CompositorState,
+    /// Kept for the cat's window, which is a second layer surface and is created once the
+    /// panel's output is known.
+    shell: LayerShell,
     pool: SlotPool,
     buffer: Option<Buffer>,
     /// Logical size, as the compositor configured it.
@@ -1852,8 +1886,12 @@ struct State {
     /// refused startup from a session that ended after the panel was on screen.
     painted: bool,
     dirty: bool,
+    /// The cat's window, in the cat mode: its own surface, its own buffer, and where it
+    /// is. `None` in the default mode, and until the panel's output is known.
+    stage: Option<Stage>,
+    /// When the answer ended, which is what brings the paw back.
+    answer_end: Option<std::time::Instant>,
     /// Which look is drawn: the plush panel, or the cat.
-    #[expect(dead_code, reason = "the pad reads it; it lands in the next task")]
     pub skin: Skin,
     /// Whether the last frame drew the caret, so a blink flip is the only thing that
     /// makes the idle loop repaint for it.
@@ -2069,6 +2107,10 @@ impl State {
         self.phase = to;
         self.phase_start = std::time::Instant::now();
         self.waiting_secs = u64::MAX;
+        // A new question takes the paw back out of the answer's ending.
+        if to == Phase::Thinking {
+            self.answer_end = None;
+        }
         self.apply_size();
         self.dirty = true;
     }
@@ -2238,6 +2280,179 @@ impl State {
         self.output_w = Some(w as u32);
         self.output_h = Some(h as u32);
         self.apply_size();
+        // The cat's window needs the panel's output to be on the same screen.
+        self.ensure_stage();
+    }
+
+    /// The panel's place on its output, in the numbers the stage is placed against: the
+    /// surface's logical origin and size, and the input card's height.
+    fn stage_panel(&self) -> Option<cat::Panel> {
+        let output_h = self.output_h?;
+        let (sw, sh) = surface_size((self.width, self.height));
+        let (left, bottom) = self.margins(sw, sh);
+        Some(cat::Panel {
+            x: left,
+            y: output_h as i32 - bottom - sh as i32,
+            w: sw,
+            h: sh,
+            bar_h: panel::bar_height(),
+        })
+    }
+
+    /// The cat's window, created once the panel's output is known: overlay layer, no
+    /// keyboard, an empty input region, the panel's buffer scale. It starts at the edge it
+    /// was rolled onto, and its entrance starts at its first frame.
+    fn ensure_stage(&mut self) {
+        if self.skin != Skin::Cat || self.stage.is_some() {
+            return;
+        }
+        let (Some(panel), Some(output)) = (self.stage_panel(), self.panel_output.clone()) else {
+            return;
+        };
+        let Some(landing) = cat::landing(panel, self.size) else {
+            // No room beside the panel: no cat, and no stage to keep.
+            return;
+        };
+        let surface = self.compositor.create_surface(&self.qh);
+        surface.set_buffer_scale(self.scale as i32);
+        let layer = self.shell.create_layer_surface(
+            &self.qh,
+            surface,
+            Layer::Overlay,
+            Some(APP_ID),
+            Some(&output),
+        );
+        // Anchored top and left only: a margin applies to an anchored edge, and with no
+        // right or bottom anchor the surface keeps its own size and the margins place it.
+        layer.set_anchor(Anchor::TOP | Anchor::LEFT);
+        // The stage never takes the keyboard and never takes a click: the panel keeps
+        // both, and a cat in front of the pad must not swallow the pointer.
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        let region = self.compositor.wl_compositor().create_region(&self.qh, ());
+        layer.set_input_region(Some(&region));
+        region.destroy();
+        layer.set_size(landing.size, landing.size);
+        layer.set_margin(landing.y, 0, 0, landing.x);
+        layer.commit();
+        let now = std::time::Instant::now();
+        self.stage = Some(Stage {
+            layer,
+            buffer: None,
+            configured: false,
+            place: landing,
+            landing,
+            edge: cat::roll_edge(cat::seed()),
+            entrance: now,
+            pose: (cat::Pose::Peek, now),
+            sized: (landing.size, landing.size),
+        });
+    }
+
+    /// Paint the cat's window for this frame: where it is, what it is doing, and the
+    /// bubble's tail while an answer is up.
+    fn draw_stage(&mut self) {
+        let Some(panel) = self.stage_panel() else {
+            return;
+        };
+        let Some(landing) = cat::landing(panel, self.size) else {
+            return;
+        };
+        let (Some(out_w), Some(out_h)) = (self.output_w, self.output_h) else {
+            return;
+        };
+        let s = self.s();
+        let bar_h = panel::bar_height();
+        let now = std::time::Instant::now();
+        let Some(stage) = self.stage.as_mut() else {
+            return;
+        };
+        if !stage.configured {
+            return;
+        }
+        let pose = cat::pose(
+            now.saturating_duration_since(stage.entrance),
+            mood_of(self.phase),
+            now.saturating_duration_since(self.phase_start),
+            self.answer_end.map(|t| now.saturating_duration_since(t)),
+            self.animate,
+        );
+        if pose != stage.pose.0 {
+            stage.pose = (pose, now);
+        }
+        let since = now.saturating_duration_since(stage.pose.1);
+        stage.landing = landing;
+        let peek = cat::peek(stage.edge, (out_w, out_h), panel, self.size).unwrap_or(landing);
+        let place = match pose {
+            cat::Pose::Peek => peek,
+            cat::Pose::Hop => {
+                cat::hop(peek, landing, since.as_millis() as f32 / cat::HOP_MS as f32)
+            }
+            _ => landing,
+        };
+        if place != stage.place || stage.sized != (place.size, place.size) {
+            stage.layer.set_size(place.size, place.size);
+            stage.layer.set_margin(place.y, 0, 0, place.x);
+            stage.sized = (place.size, place.size);
+            stage.place = place;
+        }
+        // The tail hangs off the reply card, so it is there exactly while an answer is.
+        let bubble = self.phase == Phase::Answering;
+        let px = place.size * s;
+        let buffer = match stage.buffer.take() {
+            Some(buffer) => buffer,
+            None => {
+                match self.pool.create_buffer(
+                    px as i32,
+                    px as i32,
+                    px as i32 * 4,
+                    wl_shm::Format::Argb8888,
+                ) {
+                    Ok((buffer, _)) => buffer,
+                    Err(e) => {
+                        eprintln!("aside: cannot allocate the cat's buffer: {e}");
+                        self.exit = true;
+                        return;
+                    }
+                }
+            }
+        };
+        let Some(canvas) = self.pool.canvas(&buffer) else {
+            stage.buffer = Some(buffer);
+            return;
+        };
+        // Every pixel is written: the shm slots rotate, so a partial paint would show
+        // the previous frame through.
+        canvas.fill(0);
+        cat::draw(canvas, px, px, s, bar_h, stage.edge, pose, since, bubble);
+        stage
+            .layer
+            .wl_surface()
+            .damage_buffer(0, 0, px as i32, px as i32);
+        if let Err(e) = buffer.attach_to(stage.layer.wl_surface()) {
+            eprintln!("aside: cannot attach the cat's frame: {e}");
+            self.exit = true;
+            return;
+        }
+        stage.layer.commit();
+        stage.buffer = Some(buffer);
+    }
+
+    /// Whether the cat has a frame of its own to draw: the entrance, and the poses that
+    /// run on their own clock.
+    fn stage_wake(&self) -> Option<Duration> {
+        let stage = self.stage.as_ref()?;
+        let live = match stage.pose.0 {
+            cat::Pose::Peek | cat::Pose::Hop | cat::Pose::Arm => true,
+            cat::Pose::Lick => self.phase == Phase::Thinking,
+            cat::Pose::Speak => {
+                stage.pose.1.elapsed() < Duration::from_millis(cat::SPEAK_MS as u64)
+            }
+            cat::Pose::Extend => {
+                stage.pose.1.elapsed() < Duration::from_millis(cat::EXTEND_MS as u64)
+            }
+            cat::Pose::Waiting => false,
+        };
+        live.then_some(FRAME_WAKE)
     }
 
     fn adopt_font(&mut self) -> Result<(), String> {
@@ -2333,7 +2548,6 @@ impl State {
     /// against the compositor's choice is dropped unused.
     fn boot(
         &mut self,
-        shell: &LayerShell,
         compositor: &CompositorState,
         requested: Option<&str>,
     ) -> Result<(), String> {
@@ -2355,7 +2569,8 @@ impl State {
             // The old surface is about to go: its viewport and fractional object must
             // not outlive it, or the next destination write is a protocol error.
             self.detach_scale_objects();
-            self.layer = make_layer(shell, compositor, &self.qh, Some(&output));
+            let layer = make_layer(&self.shell, compositor, &self.qh, Some(&output));
+            self.layer = layer;
             // Before the first commit: the gap the panel opens at is this output's, and
             // no other output's size may overwrite it later.
             self.panel_output = Some(output.clone());
@@ -2426,6 +2641,7 @@ impl State {
             [
                 moving.then_some(FRAME_WAKE),
                 self.request.is_some().then_some(FRAME_WAKE),
+                self.stage_wake(),
                 self.toast_up().then_some(TOAST_WAKE),
                 self.returned_at.is_some().then_some(FRAME_WAKE),
                 question_wake(self.question.as_ref()),
@@ -3152,6 +3368,10 @@ impl State {
             // A shape change or the rise into place: every frame has to be painted.
             self.dirty = true;
         }
+        if self.stage_wake().is_some() {
+            // The cat has a pose of its own to draw, and it is the only thing moving.
+            self.dirty = true;
+        }
         // A finished shape change hands the surface its new size, once.
         self.settle_morph();
         // The round is over: keys the input method never claimed are the panel's own
@@ -3188,6 +3408,9 @@ impl State {
                 }
                 if !open.running() {
                     let close = open.finish(transcript, font, max_w);
+                    // The cat's paw comes back when the answer ends, whether it ended
+                    // well or not.
+                    self.answer_end = Some(std::time::Instant::now());
                     self.request = None;
                     // A failure gives the question back to the line instead of
                     // drawing it out of the bar; every other ending lets it go.
@@ -3337,6 +3560,9 @@ impl State {
         }
         self.painted = true;
         self.buffer = Some(buffer);
+        // The cat is painted after the panel, in the same frame, so the two surfaces
+        // change together.
+        self.draw_stage();
     }
 
     fn on_key(&mut self, event: &KeyEvent) {
@@ -3815,6 +4041,24 @@ impl LayerShellHandler for State {
         _configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
+        // The cat's window is its own surface, and its own configure is the permission to
+        // attach its buffer; its size is ours either way.
+        if self
+            .stage
+            .as_ref()
+            .is_some_and(|s| s.layer.wl_surface() == _layer.wl_surface())
+        {
+            if let Some(stage) = self.stage.as_mut()
+                && !stage.configured
+            {
+                stage.configured = true;
+                // The entrance starts at the first frame it can draw, not at the moment
+                // the surface was asked for.
+                stage.entrance = std::time::Instant::now();
+            }
+            self.draw();
+            return;
+        }
         trace("layer configure arrived");
         self.configured = true;
         self.configure_wait = None;
@@ -4236,6 +4480,13 @@ impl PointerHandler for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cat_answers_what_the_panel_is_doing() {
+        assert_eq!(mood_of(Phase::Idle), cat::Mood::Idle);
+        assert_eq!(mood_of(Phase::Thinking), cat::Mood::Thinking);
+        assert_eq!(mood_of(Phase::Answering), cat::Mood::Answering);
+    }
 
     #[test]
     fn the_mode_key_picks_the_skin() {
