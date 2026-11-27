@@ -445,7 +445,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
     let pad = std::path::PathBuf::from(format!("{}.cat.panel.ppm", path.display()));
     std::fs::write(&pad, panel::to_ppm(&frame(None, Skin::Cat), w, h))
         .map_err(|e| format!("{}: {e}", pad.display()))?;
-    // The cat's poses, over the card's own tone: a PPM drops alpha, and a black cat on a
+    // The cat's poses, over the card's own tone: a PPM drops alpha, and a light line on a
     // transparent buffer would be invisible in it. This is how the art is looked at.
     let stage = 260u32;
     for (name, pose, since) in [

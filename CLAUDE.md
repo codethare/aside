@@ -72,8 +72,10 @@ change.
    drawn as the cat's paw pad (same box, same text, same keys), the reply is the same
    fixed card with a tail to the cat's mouth and growth out of that mouth, and the cat
    itself is a second layer surface beside the input card that takes no keyboard and no
-   click. Both cards stay one tone and the transcript stays a stack of blocks; nothing
-   else about the panel changes.
+   click, drawn as one-weight line art in the panel's ink (a dark offset beneath it) so
+   its head and body are open, its paw ring touches the card's rim, and the bubble's
+   tail ends on the mouth's point. Both cards stay one tone and the transcript stays a
+   stack of blocks; nothing else about the panel changes.
 5. **Frame cost is per visible row**, never per transcript row. Wrapping happens
    once per delta and once per resize; re-wrapping on every frame is a bug.
 6. **Zero dependencies beyond the seven in `Cargo.toml`.** Ask before adding one;

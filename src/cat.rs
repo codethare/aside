@@ -198,13 +198,18 @@ pub fn roll_edge(seed: u64) -> Edge {
 
 // ---- the drawing ----
 
-/// The cat's inks: a near-black body, a rim that is the panel's own ink dimmed, and the
-/// three things that are not the silhouette — the eyes, the mouth and the tongue.
-const BODY: Bgra = render::bgra(0x0e, 0x0e, 0x13, 0xff);
-const RIM: Bgra = render::bgra(0xa8, 0xa8, 0xc0, 0xc0);
-const EYE: Bgra = render::bgra(0xf4, 0xf4, 0xff, 0xff);
+/// The cat's ink: one light line, with a faint dark copy under it so a light desktop does
+/// not swallow the drawing, and the one warm detail a line cat keeps.
+const INK: Bgra = render::bgra(0xeb, 0xeb, 0xf5, 0xff);
+const SHADOW: Bgra = render::bgra(0x0e, 0x0e, 0x13, 0x66);
 const TONGUE: Bgra = render::bgra(0xd0, 0x6a, 0x84, 0xff);
-const MOUTH: Bgra = render::bgra(0x3a, 0x16, 0x20, 0xff);
+const MOUTH: Bgra = render::bgra(0x0e, 0x0e, 0x13, 0xff);
+
+/// The line's weight, a fraction of the stage so it stays one drawing at every size and
+/// buffer scale.
+fn weight(w: f32) -> f32 {
+    (w * 0.0095).max(1.0)
+}
 
 /// Where the paw meets the pad: the stage's right edge at its vertical centre, which is
 /// the input card's left rim at that card's vertical centre.
@@ -222,13 +227,14 @@ pub fn tail_start(w: u32, h: u32, s: u32, bar_h: u32) -> (u32, u32) {
 /// The head's centre and radius, which the ears, the eyes, the mouth and the tongue are
 /// all placed from. One head, so a pose that moves it moves all of them.
 fn head(w: f32, h: f32) -> (f32, f32, f32) {
-    (0.63 * w, 0.40 * h, 0.155 * w)
+    (0.62 * w, 0.38 * h, 0.16 * w)
 }
 
-/// The mouth: the head's front, low on its face, where a cat's is.
+/// The mouth: on the head's outline at its lower front, so the bubble's card-coloured
+/// tail ends where the cat's line is rather than crossing a transparent head.
 fn mouth(w: f32, h: f32) -> (f32, f32) {
     let (hx, hy, r) = head(w, h);
-    (hx + 0.66 * r, hy + 0.62 * r)
+    (hx + 0.951 * r, hy + 0.309 * r)
 }
 
 /// The mouth in a square window's own px, for a caller that has to place the bubble's
@@ -250,8 +256,6 @@ struct Act {
     tongue: f32,
     /// Whether the tail is up, as it is mid-leap.
     tail_up: bool,
-    /// The body's stretch along its length, 1 for the resting cat.
-    stretch: f32,
 }
 
 impl Act {
@@ -261,12 +265,11 @@ impl Act {
         mouth: 0.0,
         tongue: 0.0,
         tail_up: false,
-        stretch: 1.0,
     };
 }
 
-/// The stage's buffer as a place to put filled shapes. Every shape carries its own edge
-/// coverage: a cat of hard-edged discs reads as a robot.
+/// The stage's buffer as a place to stroke lines. Every stroke carries its own edge
+/// coverage: a line of hard-edged segments reads as a polyline, not a drawing.
 struct Ink<'a> {
     buf: &'a mut [u8],
     w: u32,
@@ -329,7 +332,34 @@ impl Ink<'_> {
         );
     }
 
-    /// A filled triangle, four samples to the pixel: the ears and the bubble's tail.
+    /// A Catmull-Rom curve through `p`, stroked segment by segment with round joins. No
+    /// allocation: a frame's cost is the line's length, not its control points.
+    fn curve(&mut self, p: &[(f32, f32)], width: f32, c: Bgra) {
+        for i in 0..p.len().saturating_sub(1) {
+            let p0 = p[i.saturating_sub(1)];
+            let p1 = p[i];
+            let p2 = p[i + 1];
+            let p3 = p.get(i + 2).copied().unwrap_or(p2);
+            let mut from = p1;
+            for k in 1..=16 {
+                let t = k as f32 / 16.0;
+                let to = catmull(p0, p1, p2, p3, t);
+                self.capsule(from, to, width / 2.0, c);
+                from = to;
+            }
+        }
+    }
+
+    /// One-weight rings: the head and the paw.
+    fn ring(&mut self, cx: f32, cy: f32, r: f32, width: f32, c: Bgra) {
+        let (outer, inner) = (r + width / 2.0, (r - width / 2.0).max(0.0));
+        self.fill(cx - outer, cx + outer, cy - outer, cy + outer, c, |x, y| {
+            let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+            (outer + 0.5 - d).clamp(0.0, 1.0) * (d - inner + 0.5).clamp(0.0, 1.0)
+        });
+    }
+
+    /// A filled triangle, four samples to the pixel: the bubble's tail.
     fn triangle(&mut self, p: [(f32, f32); 3], c: Bgra) {
         let x0 = p.iter().map(|q| q.0).fold(f32::MAX, f32::min);
         let x1 = p.iter().map(|q| q.0).fold(f32::MIN, f32::max);
@@ -371,8 +401,8 @@ pub fn draw(
     let (fw, fh) = (w as f32, h as f32);
     let t = since.as_millis() as f32;
     let mut ink = Ink { buf, w, h };
-    // The bubble's tail goes under the cat: the head covers its point, so it reads as
-    // coming out of the mouth rather than stopping at it.
+    // The bubble's tail goes under the cat: its point ends on the head's line, at the
+    // mouth, so it reads as coming out of the mouth rather than stopping beside it.
     if bubble {
         bubble_tail(&mut ink, fw, fh, s, bar_h);
     }
@@ -384,7 +414,6 @@ pub fn draw(
         Pose::Hop => Act {
             reach: 0.0,
             tail_up: true,
-            stretch: 1.08,
             dip: -0.02,
             ..Act::REST
         },
@@ -414,94 +443,163 @@ pub fn draw(
     cat(&mut ink, fw, fh, act);
 }
 
-/// The cat in one act: the rim pass first, offset up and left, then the body over it, so
-/// the rim survives as the one-pixel light along the edges a light would catch.
+/// The cat in one act: the dark copy first, offset down-right, then the line over it, so
+/// the drawing keeps an edge on a light desktop and stays one light line on a dark one.
 fn cat(ink: &mut Ink, w: f32, h: f32, act: Act) {
-    for (offset, colour) in [((-1.1, -1.1), RIM), ((0.0, 0.0), BODY)] {
-        silhouette(ink, w, h, act, offset, colour);
-    }
-    details(ink, w, h, act);
+    let line = weight(w);
+    let shadow = (0.006 * w, 0.006 * w);
+    outline(ink, w, h, act, shadow, line, SHADOW);
+    outline(ink, w, h, act, (0.0, 0.0), line, INK);
+    details(ink, w, h, act, line);
 }
 
-fn silhouette(ink: &mut Ink, w: f32, h: f32, act: Act, o: (f32, f32), c: Bgra) {
+/// A point on the head's ring, `at` degrees round it, `reach` radii from the centre.
+fn on_head(w: f32, h: f32, dip: f32, at: f32, reach: f32) -> (f32, f32) {
+    let (hx, hy, r) = head(w, h);
+    let a = at.to_radians();
+    (hx + a.cos() * r * reach, hy + dip * h + a.sin() * r * reach)
+}
+
+/// A Catmull-Rom point between `p1` and `p2`, with `p0` and `p3` as its tangents.
+fn catmull(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), t: f32) -> (f32, f32) {
+    let (t2, t3) = (t * t, t * t * t);
+    let at = |a: f32, b: f32, c: f32, d: f32| {
+        0.5 * (2.0 * b
+            + (c - a) * t
+            + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
+            + (3.0 * b - a - 3.0 * c + d) * t3)
+    };
+    (at(p0.0, p1.0, p2.0, p3.0), at(p0.1, p1.1, p2.1, p3.1))
+}
+
+/// The cat's unfilled contours, drawn once with whatever ink and offset the caller wants.
+fn outline(ink: &mut Ink, w: f32, h: f32, act: Act, o: (f32, f32), line: f32, c: Bgra) {
     let (ox, oy) = o;
-    // The body: a loaf, wider than tall, with the head sitting on its front.
-    ink.ellipse(
-        0.36 * w + ox,
-        0.68 * h + oy,
-        0.28 * w * act.stretch,
-        0.205 * h,
-        c,
-    );
-    let (hx, hy, r) = head(w, h);
-    let hy = hy + act.dip * h;
-    ink.disc(hx + ox, hy + oy, r, c);
-    // The ears: two triangles on the crown, tilted out.
-    ink.triangle(
-        [
-            (hx - 0.92 * r + ox, hy - 0.52 * r + oy),
-            (hx - 0.66 * r + ox, hy - 1.34 * r + oy),
-            (hx - 0.24 * r + ox, hy - 0.70 * r + oy),
+    let p = |q: (f32, f32)| (q.0 + ox, q.1 + oy);
+    let dip = act.dip;
+    // The body: one open contour round the back, the rump and the ground, up the chest,
+    // ending on the head's ring so no body line runs inside the head.
+    ink.curve(
+        &[
+            p(on_head(w, h, dip, 155.0, 1.0)),
+            p((0.43 * w, 0.475 * h)),
+            p((0.30 * w, 0.50 * h)),
+            p((0.20 * w, 0.60 * h)),
+            p((0.16 * w, 0.75 * h)),
+            p((0.20 * w, 0.86 * h)),
+            p((0.36 * w, 0.90 * h)),
+            p((0.55 * w, 0.89 * h)),
+            p((0.64 * w, 0.80 * h)),
+            p((0.66 * w, 0.66 * h)),
+            p(on_head(w, h, dip, 55.0, 1.0)),
         ],
+        line,
         c,
     );
-    ink.triangle(
-        [
-            (hx + 0.24 * r + ox, hy - 0.70 * r + oy),
-            (hx + 0.66 * r + ox, hy - 1.34 * r + oy),
-            (hx + 0.92 * r + ox, hy - 0.52 * r + oy),
-        ],
-        c,
-    );
-    // The tail: out of the back, down and round, or straight up mid-leap.
-    let root = (0.16 * w + ox, 0.72 * h + oy);
+    // The tail: out of the rump, curled up; straight up mid-leap.
+    let root = p((0.16 * w, 0.75 * h));
     if act.tail_up {
-        ink.capsule(root, (0.10 * w + ox, 0.30 * h + oy), 0.040 * w, c);
+        ink.curve(
+            &[
+                root,
+                p((0.13 * w, 0.58 * h)),
+                p((0.12 * w, 0.42 * h)),
+                p((0.17 * w, 0.29 * h)),
+            ],
+            line,
+            c,
+        );
     } else {
-        let bend = (0.04 * w + ox, 0.62 * h + oy);
-        ink.capsule(root, bend, 0.042 * w, c);
-        ink.capsule(bend, (0.12 * w + ox, 0.48 * h + oy), 0.036 * w, c);
+        ink.curve(
+            &[
+                root,
+                p((0.055 * w, 0.68 * h)),
+                p((0.035 * w, 0.54 * h)),
+                p((0.10 * w, 0.42 * h)),
+                p((0.19 * w, 0.40 * h)),
+            ],
+            line,
+            c,
+        );
     }
-    // The arm: shoulder to wherever the reach has got to, the paw ending on the pad.
-    let (px, py) = paw(w as u32, h as u32);
-    let shoulder = (0.54 * w + ox, 0.74 * h + oy);
-    let tip = (
-        shoulder.0 + (px as f32 - 0.05 * w - shoulder.0) * act.reach,
-        shoulder.1 + (py as f32 - shoulder.1) * act.reach,
-    );
-    ink.capsule(shoulder, tip, 0.032 * w, c);
-    ink.disc(tip.0, tip.1, 0.048 * w, c);
+    // The head ring, and the ears as open V's standing on it.
+    let (hx, hy, r) = head(w, h);
+    let hy = hy + dip * h;
+    ink.ring(hx + ox, hy + oy, r, line, c);
+    for (base1, peak, base2) in [(205.0, 225.0, 245.0), (295.0, 315.0, 335.0)] {
+        let a = p(on_head(w, h, dip, base1, 1.0));
+        let b = p(on_head(w, h, dip, peak, 1.5));
+        let d = p(on_head(w, h, dip, base2, 1.0));
+        ink.capsule(a, b, line / 2.0, c);
+        ink.capsule(b, d, line / 2.0, c);
+    }
+    // The front leg and its paw: the ring's right edge is the stage's edge.
+    if act.reach > 0.01 {
+        let shoulder = (0.64 * w, 0.76 * h);
+        let centre = (0.95 * w, 0.5 * h);
+        let bend = (0.79 * w, 0.64 * h);
+        let at = |q: (f32, f32)| {
+            (
+                shoulder.0 + (q.0 - shoulder.0) * act.reach,
+                shoulder.1 + (q.1 - shoulder.1) * act.reach,
+            )
+        };
+        let tip = at(centre);
+        // The leg meets the paw ring's near edge; a line into the ring reads as a lollipop.
+        let wrist = (tip.0 - 0.05 * w, tip.1);
+        ink.curve(&[p(shoulder), p(at(bend)), p(wrist)], line, c);
+        ink.ring(tip.0 + ox, tip.1 + oy, 0.05 * w, line, c);
+    }
 }
 
-fn details(ink: &mut Ink, w: f32, h: f32, act: Act) {
+fn details(ink: &mut Ink, w: f32, h: f32, act: Act, line: f32) {
     let (hx, hy, r) = head(w, h);
     let hy = hy + act.dip * h;
-    // The eyes: two bright dots, which is the whole face a silhouette can carry.
-    ink.disc(hx - 0.42 * r, hy - 0.08 * r, 0.115 * r, EYE);
-    ink.disc(hx + 0.42 * r, hy - 0.08 * r, 0.115 * r, EYE);
+    // The eyes: two dots, which is the whole face a line drawing needs.
+    ink.disc(hx - 0.38 * r, hy - 0.12 * r, 0.09 * r, INK);
+    ink.disc(hx + 0.38 * r, hy - 0.12 * r, 0.09 * r, INK);
+    // The nose, and a small w under it: the whole mouth a line cat keeps.
+    let nose = (hx + 0.46 * r, hy + 0.22 * r);
+    ink.disc(nose.0, nose.1, 0.06 * r, INK);
+    let lip = (nose.0, nose.1 + 0.14 * r);
+    ink.capsule(nose, lip, line * 0.5, INK);
+    ink.capsule(lip, (lip.0 - 0.13 * r, lip.1 + 0.06 * r), line * 0.5, INK);
+    ink.capsule(lip, (lip.0 + 0.13 * r, lip.1 + 0.06 * r), line * 0.5, INK);
+    // Two whiskers off the muzzle, a quarter weight so they read as hair.
+    for (from_y, to_x, to_y) in [(0.30, 1.45, 0.14), (0.42, 1.36, 0.58)] {
+        ink.capsule(
+            (hx + 0.72 * r, hy + from_y * r),
+            (hx + to_x * r, hy + to_y * r),
+            line * 0.25,
+            INK,
+        );
+    }
     let (mx, my) = mouth(w, h);
     let my = my + act.dip * h;
     if act.mouth > 0.01 {
         ink.ellipse(
             mx,
-            my + 0.18 * r,
-            0.22 * r + 0.18 * r * act.mouth,
-            0.07 * r + 0.30 * r * act.mouth,
+            my + 0.10 * r,
+            0.10 * r * (0.4 + act.mouth),
+            0.05 * r + 0.20 * r * act.mouth,
             MOUTH,
         );
         // The tongue inside the open mouth, which is what makes it a mouth and not a hole.
         ink.ellipse(
             mx,
-            my + 0.18 * r + 0.22 * r * act.mouth,
-            0.14 * r * act.mouth,
-            0.08 * r * act.mouth,
+            my + 0.10 * r + 0.14 * r * act.mouth,
+            0.07 * r * act.mouth,
+            0.045 * r * act.mouth,
             TONGUE,
         );
     }
     if act.tongue > 0.01 {
-        // Down onto the arm it just extended, which passes under the head.
-        let tip = (mx + 0.12 * r, my + (0.30 + 0.60 * act.tongue) * r);
-        ink.capsule((mx, my), tip, 0.085 * r, TONGUE);
+        // Down toward the arm it just extended, which passes under the head.
+        let tip = (
+            mx + (0.08 + 0.14 * act.tongue) * r,
+            my + (0.22 + 0.48 * act.tongue) * r,
+        );
+        ink.capsule((mx, my), tip, 0.045 * r, TONGUE);
     }
 }
 
@@ -520,36 +618,22 @@ fn peek_pose(ink: &mut Ink, w: f32, h: f32, edge: Edge, t: f32) {
         from.0 + (to.0 - from.0) * rise,
         from.1 + (to.1 - from.1) * rise,
     );
-    for (offset, colour) in [((-1.1, -1.1), RIM), ((0.0, 0.0), BODY)] {
-        let (ox, oy) = offset;
-        ink.disc(cx + ox, cy + oy, r, colour);
-        ink.triangle(
-            [
-                (cx - 0.95 * r + ox, cy - 0.50 * r + oy),
-                (cx - 0.62 * r + ox, cy - 1.55 * r + oy),
-                (cx - 0.18 * r + ox, cy - 0.66 * r + oy),
-            ],
-            colour,
-        );
-        ink.triangle(
-            [
-                (cx + 0.18 * r + ox, cy - 0.66 * r + oy),
-                (cx + 0.62 * r + ox, cy - 1.55 * r + oy),
-                (cx + 0.95 * r + ox, cy - 0.50 * r + oy),
-            ],
-            colour,
-        );
-        // The paw on the edge, reaching over it.
-        let (ax, ay) = match edge {
-            Edge::Bottom => (cx, cy + 0.85 * r),
-            Edge::Top => (cx, cy - 0.85 * r),
-            Edge::Left => (cx - 0.85 * r, cy),
-            Edge::Right => (cx + 0.85 * r, cy),
-        };
-        ink.disc(ax + ox, ay + oy, 0.30 * r, colour);
+    let line = weight(w);
+    let shadow = (0.006 * w, 0.006 * w);
+    for (o, colour) in [(shadow, SHADOW), ((0.0, 0.0), INK)] {
+        let (ox, oy) = o;
+        ink.ring(cx + ox, cy + oy, r, line, colour);
+        for (base1, peak, base2) in [(205.0, 225.0, 245.0), (295.0, 315.0, 335.0)] {
+            let at = |deg: f32, reach: f32| {
+                let a = deg.to_radians();
+                (cx + a.cos() * r * reach + ox, cy + a.sin() * r * reach + oy)
+            };
+            ink.capsule(at(base1, 1.0), at(peak, 1.5), line / 2.0, colour);
+            ink.capsule(at(peak, 1.5), at(base2, 1.0), line / 2.0, colour);
+        }
     }
-    ink.disc(cx - 0.42 * r, cy - 0.08 * r, 0.115 * r, EYE);
-    ink.disc(cx + 0.42 * r, cy - 0.08 * r, 0.115 * r, EYE);
+    ink.disc(cx - 0.38 * r, cy - 0.12 * r, 0.09 * r, INK);
+    ink.disc(cx + 0.38 * r, cy - 0.12 * r, 0.09 * r, INK);
 }
 
 /// The bubble's tail: the card's corner to the mouth, in the card's own fill.
@@ -777,7 +861,11 @@ mod tests {
         let lit = |buf: &[u8]| buf.as_chunks::<4>().0.iter().filter(|p| p[3] > 8).count();
         let ms = Duration::from_millis;
         let waiting = paint(Pose::Waiting, ms(0));
-        assert!(lit(&waiting) > 2000, "the cat is drawn: {}", lit(&waiting));
+        assert!(
+            (500..15000).contains(&lit(&waiting)),
+            "the cat is drawn as a line, not a fill: {}",
+            lit(&waiting)
+        );
         // The peek is a head over an edge, so it covers less of the window than the cat.
         assert!(lit(&paint(Pose::Peek, ms(380))) < lit(&waiting));
         // The lick's tongue is a pixel class of its own: the frames differ.
@@ -791,6 +879,31 @@ mod tests {
             paint(Pose::Speak, ms(100)),
             "the mouth opens"
         );
+    }
+
+    /// The drawing is contours: the body and the head are empty, their lines are not, and
+    /// the paw ring still reaches the stage's edge.
+    #[test]
+    fn the_cat_is_line_art_not_a_silhouette() {
+        let (w, h) = (260u32, 260u32);
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        draw(
+            &mut buf,
+            w,
+            h,
+            1,
+            30,
+            Edge::Bottom,
+            Pose::Waiting,
+            Duration::ZERO,
+            false,
+        );
+        let alpha = |x: u32, y: u32| buf[((y * w + x) * 4 + 3) as usize];
+        assert_eq!(alpha(78, 182), 0, "the body is empty");
+        assert_eq!(alpha(161, 99), 0, "the head is empty");
+        assert!(alpha(94, 234) > 0, "the body's ground line");
+        assert!(alpha(120, 99) > 0, "the head's ring");
+        assert!(alpha(259, 130) > 0, "the paw reaches the pad");
     }
 
     #[test]
