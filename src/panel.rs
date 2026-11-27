@@ -105,6 +105,9 @@ pub struct Look {
     pub growth: f32,
     /// Which look the cards are drawn in: the plush panel, or the cat's pad and bubble.
     pub skin: crate::Skin,
+    /// Where the reply card is pulled from, when it is not its own top border: the cat's
+    /// mouth, in surface px. `None` is the plush card's growth.
+    pub mouth: Option<(f32, f32)>,
 }
 
 impl Look {
@@ -121,6 +124,7 @@ impl Look {
             new_content: false,
             growth: 1.0,
             skin: crate::Skin::Default,
+            mouth: None,
         }
     }
 
@@ -138,6 +142,7 @@ impl Look {
             new_content: false,
             growth: 1.0,
             skin: crate::Skin::Default,
+            mouth: None,
         }
     }
 
@@ -271,6 +276,7 @@ fn draw_split(
     replies: &render::Panel,
     bar: &render::Panel,
     growth: f32,
+    mouth: Option<(f32, f32)>,
     head: Option<f32>,
     _bar_h: u32,
     aa: Subpixel,
@@ -279,11 +285,24 @@ fn draw_split(
     let g = growth.clamp(0.0, 1.25);
     // The card's top edge stays on its own border and the drop hangs from it: the
     // bottom edge descends (and springs a little past its final row), never detaching
-    // from the top. Closing runs the same shape upwards into the border.
-    let shown = render::Panel {
-        y: replies.y,
-        h: (replies.h as f32 * g).round() as u32,
-        ..*replies
+    // from the top. Closing runs the same shape upwards into the border. The cat's
+    // bubble is pulled out of a mouth instead: both edges travel from that point to the
+    // card's own, so what appears first is what is nearest the cat.
+    let shown = match mouth {
+        None => render::Panel {
+            y: replies.y,
+            h: (replies.h as f32 * g).round() as u32,
+            ..*replies
+        },
+        Some((_, my)) => {
+            let top = my + (replies.y as f32 - my) * g;
+            let bottom = my + ((replies.y + replies.h) as f32 - my) * g;
+            render::Panel {
+                y: top.round().max(0.0) as u32,
+                h: (bottom - top).round().max(0.0) as u32,
+                ..*replies
+            }
+        }
     };
     if shown.h > 0 {
         render::body(buf, w, &shown, render::BG_PROMPT);
@@ -451,6 +470,7 @@ pub fn draw(
                 &replies,
                 &bar,
                 look.growth,
+                look.mouth,
                 head,
                 bar_h,
                 aa,
@@ -1853,7 +1873,7 @@ mod tests {
 
     fn scene(font: &PanelFont, w: f32) -> Scene {
         let mut transcript = Transcript::default();
-        transcript.ask("why is the sky blue?", font);
+        transcript.ask("why is the sky blue?", font, false);
         transcript.delta(
             "Rayleigh scattering: shorter wavelengths scatter more, so the sky reads blue.",
             font,
@@ -2634,6 +2654,57 @@ mod tests {
         );
         assert!(start < middle, "the caret follows left: {start} {middle}");
         assert!(middle < end, "and right: {middle} {end}");
+    }
+
+    /// The bubble is pulled out of the cat's mouth: at the start of its growth what is
+    /// painted is around the mouth, not the card's top border.
+    #[test]
+    fn the_bubble_grows_out_of_the_mouth() {
+        let f = font();
+        let scene = scene(&f, 300.0);
+        let (w, h) = sized(&scene, &f);
+        let (bw, bh) = frame(w, h);
+        let paint = |mouth: Option<(f32, f32)>| {
+            let mut buf = vec![0u8; (bw * bh * 4) as usize];
+            let mut look = Look::settled(State::Replies);
+            look.growth = 0.05;
+            look.mouth = mouth;
+            draw(
+                &mut buf,
+                bw,
+                bh,
+                &f,
+                &scene.transcript,
+                &scene.input,
+                None,
+                &scene.viewport,
+                None,
+                None,
+                None,
+                true,
+                "",
+                "",
+                "",
+                look,
+                None,
+                0.0,
+                1,
+            );
+            buf
+        };
+        let first_row = |buf: &[u8]| {
+            (0..bh)
+                .find(|&y| (0..bw).any(|x| buf[((y * bw + x) * 4) as usize + 3] != 0))
+                .expect("something is painted")
+        };
+        let plush = first_row(&paint(None));
+        let mouth_y = (render::SHADOW + h - 4) as f32;
+        let cat = first_row(&paint(Some((0.0, mouth_y))));
+        assert!(
+            plush < render::SHADOW + 4,
+            "the plush card grows from its top border: {plush}"
+        );
+        assert!(cat > plush, "the cat's bubble grows from the mouth: {cat}");
     }
 
     /// The cat mode's input is the same field in a different card: every column that
@@ -3553,7 +3624,7 @@ mod tests {
         let mut scene = scene(&f, 300.0);
         // One answer taller than the box can show: the box is fixed, so this is
         // what makes it scroll. A new turn, so it is the one on screen.
-        scene.transcript.ask("and at dusk?", &f);
+        scene.transcript.ask("and at dusk?", &f, false);
         scene.transcript.delta(
             " The same scattering leaves only the long wavelengths at dusk, which is\
              why the sky reads red, and why the sea reads grey, and why a fire reads\
@@ -3599,7 +3670,7 @@ mod tests {
     fn the_indicator_is_drawn_where_the_pointer_grabs_it() {
         let f = font();
         let mut scene = scene(&f, 300.0);
-        scene.transcript.ask("and at dusk?", &f);
+        scene.transcript.ask("and at dusk?", &f, false);
         scene.transcript.delta(
             " The same scattering leaves only the long wavelengths at dusk, which is\
              why the sky reads red, and why the sea reads grey, and why a fire reads\
@@ -3655,7 +3726,7 @@ mod tests {
     fn a_burst_writes_the_multiplier_on_the_strip() {
         let f = font();
         let mut scene = scene(&f, 300.0);
-        scene.transcript.ask("and at dusk?", &f);
+        scene.transcript.ask("and at dusk?", &f, false);
         // Enough answer to overflow the box several times over, so the thumb is tall:
         // the number's rows are left empty, so the strip needs rows above and below it
         // to be interrupted in the middle.
@@ -3878,7 +3949,7 @@ mod tests {
         let mut scene = scene(&f, 300.0);
         scene.input = Input::default();
         // A new turn, so the long answer is the one on screen.
-        scene.transcript.ask("and at dusk?", &f);
+        scene.transcript.ask("and at dusk?", &f, false);
         scene.transcript.delta(
             " The same scattering leaves only the long wavelengths at dusk, which is\
              why the sky reads red, and why the sea reads grey, and why a fire reads\

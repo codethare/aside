@@ -227,6 +227,12 @@ fn mouth(w: f32, h: f32) -> (f32, f32) {
     (hx + 0.66 * r, hy + 0.62 * r)
 }
 
+/// The mouth in a square window's own px, for a caller that has to place the bubble's
+/// growth origin in another surface's coordinates.
+pub fn mouth_at(size: u32) -> (f32, f32) {
+    mouth(size as f32, size as f32)
+}
+
 /// What one frame of the cat is doing, as numbers the shapes are placed from.
 #[derive(Debug, Clone, Copy)]
 struct Act {

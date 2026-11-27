@@ -416,7 +416,7 @@ fn the_pad_keeps_the_bars_box_and_its_text() {
   with the existing `state_of` delegating to it for `Skin::Default`.
 - Consumes: Task 5's `stage_panel`.
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
 
 ```rust
 // transcript.rs: a turn with nothing drawn yet shows the previous turn.
@@ -455,21 +455,21 @@ fn the_bubble_grows_out_of_the_mouth() {
 }
 ```
 
-- [ ] **Step 2: Run them, watch them fail.**
+- [x] **Step 2: Run them, watch them fail.**
 
-- [ ] **Step 3: Implement.** `Transcript::current_start`: walk back past a current turn
+- [x] **Step 3: Implement.** `Transcript::current_start`: walk back past a current turn
   that has no drawn entry. `Look.mouth` + the clipped growth in `panel::draw`. `state_of`
   gains the skin and the "a previous turn is drawn" fact. On the first text of a request
   the bubble is already there, so its growth does not run again; on `finish_answer` the
   stage's `since_finish` starts, which is what makes the paw come back.
 
-- [ ] **Step 4: Run.** `cargo test` → the known baseline plus PASS for the new tests.
+- [x] **Step 4: Run.** `cargo test` → the known baseline plus PASS for the new tests.
 
-- [ ] **Step 5: By hand.** With `mode = "cat"`: ask, watch the lick, watch the mouth and
+- [x] **Step 5: By hand.** With `mode = "cat"`: ask, watch the lick, watch the mouth and
   the bubble, then ask a second question — the old answer stays in the bubble until the
   new text arrives.
 
-- [ ] **Step 6: Commit.** `jj describe -m "feat: let the cat answer in a bubble"` then `jj new`.
+- [x] **Step 6: Commit.** `jj describe -m "feat: let the cat answer in a bubble"` then `jj new`.
 
 ---
 

@@ -362,11 +362,12 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
     transcript.ask(
         "what does EAGAIN mean when a socket read returns it?",
         &font,
+        false,
     );
     // The previous turn is off screen: only the current one is drawn.
     transcript.delta("Answered, and no longer on screen.", &font, max_w);
     transcript.finish_answer(&font);
-    transcript.ask("and if it never clears?", &font);
+    transcript.ask("and if it never clears?", &font, false);
     transcript.delta(
         "`EAGAIN` means the call would block: the resource is **momentarily \
          unavailable**, not broken.\n\n\
@@ -1847,6 +1848,16 @@ struct Stage {
     sized: (u32, u32),
 }
 
+/// Where the cat is in one frame, and what it is doing.
+#[derive(Debug, Clone, Copy)]
+struct Placed {
+    place: cat::Stage,
+    pose: cat::Pose,
+    since: Duration,
+    /// The mouth in the panel surface's px: the point the bubble is pulled out of.
+    mouth: (f32, f32),
+}
+
 struct State {
     registry_state: RegistryState,
     seat_state: SeatState,
@@ -2356,27 +2367,15 @@ impl State {
         });
     }
 
-    /// Paint the cat's window for this frame: where it is, what it is doing, and the
-    /// bubble's tail while an answer is up.
-    fn draw_stage(&mut self) {
-        let Some(panel) = self.stage_panel() else {
-            return;
-        };
-        let Some(landing) = cat::landing(panel, self.size) else {
-            return;
-        };
-        let (Some(out_w), Some(out_h)) = (self.output_w, self.output_h) else {
-            return;
-        };
+    /// Work out where the cat is in this frame, and put its window there. The panel's
+    /// own frame needs the mouth, which is why this is not part of the painting.
+    fn place_cat(&mut self) -> Option<Placed> {
+        let panel = self.stage_panel()?;
+        let landing = cat::landing(panel, self.size)?;
+        let (out_w, out_h) = (self.output_w?, self.output_h?);
         let s = self.s();
-        let bar_h = panel::bar_height();
         let now = std::time::Instant::now();
-        let Some(stage) = self.stage.as_mut() else {
-            return;
-        };
-        if !stage.configured {
-            return;
-        }
+        let stage = self.stage.as_mut()?;
         let pose = cat::pose(
             now.saturating_duration_since(stage.entrance),
             mood_of(self.phase),
@@ -2403,9 +2402,34 @@ impl State {
             stage.sized = (place.size, place.size);
             stage.place = place;
         }
+        if !stage.configured {
+            return None;
+        }
+        // The mouth in the panel's surface px: the window is placed in logical px, and the
+        // mouth is a fraction of the window's buffer.
+        let (mx, my) = cat::mouth_at(place.size * s);
+        Some(Placed {
+            place,
+            pose,
+            since,
+            mouth: (
+                place.x as f32 * s as f32 + mx,
+                place.y as f32 * s as f32 + my,
+            ),
+        })
+    }
+
+    /// Paint the cat's window for this frame: where it is, what it is doing, and the
+    /// bubble's tail while an answer is up.
+    fn draw_stage(&mut self, placed: &Placed) {
+        let s = self.s();
+        let bar_h = panel::bar_height();
         // The tail hangs off the reply card, so it is there exactly while an answer is.
         let bubble = self.phase == Phase::Answering;
-        let px = place.size * s;
+        let Some(stage) = self.stage.as_mut() else {
+            return;
+        };
+        let px = placed.place.size * s;
         let buffer = match stage.buffer.take() {
             Some(buffer) => buffer,
             None => {
@@ -2431,7 +2455,17 @@ impl State {
         // Every pixel is written: the shm slots rotate, so a partial paint would show
         // the previous frame through.
         canvas.fill(0);
-        cat::draw(canvas, px, px, s, bar_h, stage.edge, pose, since, bubble);
+        cat::draw(
+            canvas,
+            px,
+            px,
+            s,
+            bar_h,
+            stage.edge,
+            placed.pose,
+            placed.since,
+            bubble,
+        );
         stage
             .layer
             .wl_surface()
@@ -2734,7 +2768,7 @@ impl State {
             ..
         } = self;
         let Some(font) = font.as_ref() else { return };
-        transcript.ask(&question, font);
+        transcript.ask(&question, font, self.skin == Skin::Cat);
         // Old turns are dropped before the body is built: a long session must not
         // grow the request or the text kept for it without bound.
         let cut = transcript.enforce_context_cap(transcript::CONTEXT_CAP);
@@ -3482,9 +3516,11 @@ impl State {
             return; // no font yet: nothing to draw and nothing to wait for
         }
         // The shape this frame paints, and how far into it the panel has morphed.
-        let look = self.look();
-        let mut look = look;
+        let cat_place = self.place_cat();
+        let mut look = self.look();
         look.skin = self.skin;
+        // The bubble comes out of the cat's mouth rather than off the bar's top border.
+        look.mouth = cat_place.map(|placed| placed.mouth);
         let selection = self.selection;
         let head = self.head();
         let thumb = self.thumb();
@@ -3572,7 +3608,9 @@ impl State {
         self.buffer = Some(buffer);
         // The cat is painted after the panel, in the same frame, so the two surfaces
         // change together.
-        self.draw_stage();
+        if let Some(placed) = cat_place.as_ref() {
+            self.draw_stage(placed);
+        }
     }
 
     fn on_key(&mut self, event: &KeyEvent) {
@@ -4901,7 +4939,7 @@ mod tests {
         let f = PanelFont::load(font::SIZE).expect("system font available");
         let blocks = layout::Blocks::new(&f);
         let mut t = crate::transcript::Transcript::default();
-        t.ask("q", &f);
+        t.ask("q", &f, false);
         t.delta("- one\n- two\n- three", &f, 400.0);
         t.finish_answer(&f);
         let rows = t.rows(blocks);

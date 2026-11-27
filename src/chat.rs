@@ -365,7 +365,7 @@ mod tests {
         let key = provider::api_key().expect(provider::KEY_VAR);
         let font = PanelFont::load(crate::font::SIZE).expect("font");
         let mut transcript = Transcript::default();
-        transcript.ask("Reply with the single word: pong", &font);
+        transcript.ask("Reply with the single word: pong", &font, false);
         let turns = transcript.request_turns();
         let mut request =
             Request::start(&Config::default(), &key, &turns).expect("the sandbox starts");
@@ -406,7 +406,7 @@ mod tests {
         let mut request =
             Request::start(&Config::default(), "cc_bogus_key_000", &turns).expect("starts");
         let mut transcript = Transcript::default();
-        transcript.ask("hello", &font);
+        transcript.ask("hello", &font, false);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while std::time::Instant::now() < deadline && request.running() {
             request.poll(&mut transcript, &font, 600.0);
@@ -783,7 +783,7 @@ mod tests {
     fn an_error_inside_the_stream_fails_the_exchange_and_keeps_the_text() {
         let font = PanelFont::load(crate::font::SIZE).expect("system font available");
         let mut transcript = Transcript::default();
-        transcript.ask("why", &font);
+        transcript.ask("why", &font, false);
         let mut request = scripted(
             r#"printf 'data: {"choices":[{"delta":{"content":"hello"}}]}\ndata: {"error":{"message":"rate limited"}}\ndata: [DONE]\n'"#,
         );
@@ -811,7 +811,7 @@ mod tests {
     fn a_complete_stream_with_no_text_is_empty() {
         let font = PanelFont::load(crate::font::SIZE).expect("system font available");
         let mut transcript = Transcript::default();
-        transcript.ask("why", &font);
+        transcript.ask("why", &font, false);
         let mut request = scripted(
             r#"printf 'data: {"choices":[{"delta":{"role":"assistant"}}]}\ndata: [DONE]\n'"#,
         );
