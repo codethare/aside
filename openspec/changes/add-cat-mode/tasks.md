@@ -374,7 +374,7 @@ fn the_cat_answers_what_the_panel_is_doing() {
 - Produces: `Look.skin: Skin` and `fn draw_pad(...)` used by `draw_bar` in the cat mode.
 - Consumes: `main::Skin` from Task 1.
 
-- [ ] **Step 1: Write the failing test** — the pad keeps the bar's box:
+- [x] **Step 1: Write the failing test** — the pad keeps the bar's box:
 
 ```rust
 #[test]
@@ -389,15 +389,15 @@ fn the_pad_keeps_the_bars_box_and_its_text() {
 }
 ```
 
-- [ ] **Step 2: Run it, watch it fail.**
+- [x] **Step 2: Run it, watch it fail.**
 
-- [ ] **Step 3: Implement** the pad: the same rounded box, drawn with the palm's shape and
+- [x] **Step 3: Implement** the pad: the same rounded box, drawn with the palm's shape and
   four toe bumps inside the rim at its two ends, the rim lit on the side the cat is on.
   The text, caret, marquee, hint and scroll paths are the bar's, untouched.
 
-- [ ] **Step 4: Run.** `cargo test panel::` → PASS.
+- [x] **Step 4: Run.** `cargo test panel::` → PASS.
 
-- [ ] **Step 5: Commit.** `jj describe -m "feat: draw the input as the cat's paw"` then `jj new`.
+- [x] **Step 5: Commit.** `jj describe -m "feat: draw the input as the cat's paw"` then `jj new`.
 
 ---
 

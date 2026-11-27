@@ -405,7 +405,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
     // when an answer outgrows the box.
     let mut viewport = Viewport::new(panel::transcript_px(ph, &font, 1));
     viewport.follow(transcript.total_height());
-    let frame = |pending: Option<panel::Pending<'_>>| {
+    let frame = |pending: Option<panel::Pending<'_>>, skin: Skin| {
         let mut buf = vec![0u8; (w * h * 4) as usize];
         panel::draw(
             &mut buf,
@@ -423,7 +423,11 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
             "",
             "",
             "",
-            panel::Look::settled(panel::State::Replies),
+            {
+                let mut look = panel::Look::settled(panel::State::Replies);
+                look.skin = skin;
+                look
+            },
             None,
             0.0,
             None,
@@ -435,7 +439,11 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         std::fs::write(path, panel::to_ppm(buf, w, h))
             .map_err(|e| format!("{}: {e}", path.display()))
     };
-    write(path, &frame(None))?;
+    write(path, &frame(None, Skin::Default))?;
+    // The cat mode's pad and bubble: the same field and the same rows, a paw's card.
+    let pad = std::path::PathBuf::from(format!("{}.cat.panel.ppm", path.display()));
+    std::fs::write(&pad, panel::to_ppm(&frame(None, Skin::Cat), w, h))
+        .map_err(|e| format!("{}: {e}", pad.display()))?;
     // The cat's poses, over the card's own tone: a PPM drops alpha, and a black cat on a
     // transparent buffer would be invisible in it. This is how the art is looked at.
     let stage = 260u32;
@@ -489,7 +497,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
             leaving: Some(since),
         };
         let out = std::path::PathBuf::from(format!("{}.{suffix}", path.display()));
-        write(&out, &frame(Some(pending)))?;
+        write(&out, &frame(Some(pending), Skin::Default))?;
     }
     Ok(())
 }
@@ -3475,6 +3483,8 @@ impl State {
         }
         // The shape this frame paints, and how far into it the panel has morphed.
         let look = self.look();
+        let mut look = look;
+        look.skin = self.skin;
         let selection = self.selection;
         let head = self.head();
         let thumb = self.thumb();

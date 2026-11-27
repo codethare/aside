@@ -103,6 +103,8 @@ pub struct Look {
     /// How much of the reply card has risen from behind the bar, 0..1. A transition
     /// draws the card clipped at the bar and fading in; 1 is the settled card.
     pub growth: f32,
+    /// Which look the cards are drawn in: the plush panel, or the cat's pad and bubble.
+    pub skin: crate::Skin,
 }
 
 impl Look {
@@ -118,6 +120,7 @@ impl Look {
             returned: 0.0,
             new_content: false,
             growth: 1.0,
+            skin: crate::Skin::Default,
         }
     }
 
@@ -134,6 +137,7 @@ impl Look {
             returned: 0.0,
             new_content: false,
             growth: 1.0,
+            skin: crate::Skin::Default,
         }
     }
 
@@ -590,6 +594,11 @@ pub fn draw(
         }
     }
     render::body(buf, w, &bar, bar_tone);
+    if look.skin == crate::Skin::Cat {
+        // The input is the cat's paw: the same field in a paw's card, its bumps and its
+        // rim inside the box the text is laid out in.
+        draw_pad(buf, w, h, &bar, s);
+    }
 
     // Scroll position indicator: only while the view has recently moved, and only
     // while the transcript overflows the card.
@@ -678,6 +687,58 @@ pub fn draw(
     }
     if let Some(head) = head {
         render::orbit(buf, w, h, &bar, head, s);
+    }
+}
+
+/// The cat's paw, as the input card: the palm's four bumps inside the rim, and the rim lit
+/// on the side the cat stands on. Nothing of the box moves: the text is laid out in the
+/// same field and only the card around it changes.
+fn draw_pad(buf: &mut [u8], w: u32, h: u32, panel: &render::Panel, s: u32) {
+    let inset = 2 * s;
+    let r = 5 * s;
+    let cy = panel.y + panel.h / 2;
+    let bump = render::dim(render::FG_NORMAL, 0.30);
+    let dy = (panel.h / 2).saturating_sub(r + inset);
+    for cx in [
+        panel.x + inset + r + s,
+        panel.x + panel.w.saturating_sub(inset + r + s),
+    ] {
+        for y in [cy.saturating_sub(dy), cy + dy] {
+            draw_bump(
+                buf,
+                w,
+                cx.saturating_sub(r),
+                y.saturating_sub(r),
+                2 * r,
+                bump,
+            );
+        }
+    }
+    // The rim, and the part of it the cat's own light reaches.
+    let rim = render::Panel {
+        x: panel.x + inset,
+        y: panel.y + inset,
+        w: panel.w.saturating_sub(2 * inset),
+        h: panel.h.saturating_sub(2 * inset),
+        r: panel.r.saturating_sub(inset),
+    };
+    let lit = render::dim(render::FG_NORMAL, 0.45);
+    for (x, y) in render::outline(&rim) {
+        if x <= panel.x + 3 * s {
+            render::rect(buf, w, h, x, y, s, s, lit);
+        }
+    }
+}
+
+/// One round bump of the pad, blended over the card it sits on.
+fn draw_bump(buf: &mut [u8], w: u32, x: u32, y: u32, size: u32, color: Bgra) {
+    let src = render::premul(color);
+    for rel in 0..size {
+        let (x0, x1) = render::rounded_span(size, size, size / 2, rel);
+        for px in x0..x1 {
+            let i = ((y + rel) * w + x + px) as usize * 4;
+            render::over_pm(&mut buf[i..][..4], src, 255);
+        }
     }
 }
 
@@ -2573,6 +2634,56 @@ mod tests {
         );
         assert!(start < middle, "the caret follows left: {start} {middle}");
         assert!(middle < end, "and right: {middle} {end}");
+    }
+
+    /// The cat mode's input is the same field in a different card: every column that
+    /// carries the line carries it in both, at the same place.
+    #[test]
+    fn the_pad_keeps_the_bars_box_and_its_text() {
+        let f = font();
+        let mut scene = scene(&f, 300.0);
+        scene.input.insert("hello pad");
+        let (w, h) = (500u32, height_for(2 * f.row_h, &f, 1));
+        let (bw, bh) = frame(w, h);
+        let paint = |skin: crate::Skin| {
+            let mut buf = vec![0u8; (bw * bh * 4) as usize];
+            let mut look = Look::settled(State::Bar);
+            look.skin = skin;
+            draw(
+                &mut buf,
+                bw,
+                bh,
+                &f,
+                &scene.transcript,
+                &scene.input,
+                None,
+                &scene.viewport,
+                None,
+                None,
+                None,
+                true,
+                "",
+                "",
+                "",
+                look,
+                None,
+                0.0,
+                1,
+            );
+            buf
+        };
+        let bar = paint(crate::Skin::Default);
+        let pad = paint(crate::Skin::Cat);
+        assert_ne!(bar, pad, "the pad is a different card");
+        let lit = |buf: &[u8], x: u32| {
+            (0..h).any(|y| {
+                let px = &buf[at(bw, x, y)..][..4];
+                px[0] as u32 + px[1] as u32 + px[2] as u32 > 400
+            })
+        };
+        for x in (crate::PAD + 1..w - crate::PAD).step_by(3) {
+            assert_eq!(lit(&bar, x), lit(&pad, x), "column {x}");
+        }
     }
 
     /// A question longer than the bar scrolls instead of running off the card, and
