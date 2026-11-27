@@ -62,7 +62,9 @@ instructions = "At most three sentences."    # rule a line, joined in this order
 
 `mode = "cat"` is the same panel staged around a cat drawn in Notion's
 illustration style: a warm off-white marker line with a slight hand-drawn waver,
-flat, with Notion orange on the tongue and the open mouth. It comes out of one of
+flat, with Notion orange on the tongue and the open mouth. Its head is cocked
+toward the panel, the paw reaches on a spring, the lick flicks and pauses, the
+tail curls and sways, and a waiting cat blinks. It comes out of one of
 the screen's four edges, hops to the panel's left side and takes the input on its
 magnified paw, which is the bar drawn as a paw pad. While the request runs it licks
 that paw, and the answer arrives in a bubble that comes out of its mouth and stays

@@ -124,9 +124,9 @@ the stacking of two layer surfaces. Say so instead of implying it works.
 
 `cargo run -- --preview /tmp/aside.ppm` writes the panel, `.cat.panel.ppm` (the pad and
 the bubble), and one `.cat.<pose>.ppm` per pose — `peek`, `hop`, `arm`, `waiting`,
-`lick`, `speak`, `extend`. Convert the PPM to PNG and *look at it*: a silhouette that
-reads in your head does not read at 260 px. The cat in `aside` needed three passes before
-its head sat on its body.
+`blink`, `lick`, `speak`, `extend`. Convert the PPM to PNG and *look at it*: a
+silhouette that reads in your head does not read at 260 px. The cat in `aside` needed
+three passes before its head sat on its body.
 
 ## Red flags
 

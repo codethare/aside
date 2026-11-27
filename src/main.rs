@@ -453,6 +453,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         ("hop", cat::Pose::Hop, 200),
         ("arm", cat::Pose::Arm, 150),
         ("waiting", cat::Pose::Waiting, 0),
+        ("blink", cat::Pose::Waiting, 1_300),
         ("lick", cat::Pose::Lick, 220),
         ("speak", cat::Pose::Speak, 100),
         ("extend", cat::Pose::Extend, 130),
@@ -2532,10 +2533,13 @@ impl State {
         stage.buffer = Some(buffer);
     }
 
-    /// Whether the cat has a frame of its own to draw: the entrance, and the poses that
-    /// run on their own clock.
+    /// Whether the cat has a frame of its own to draw: the entrance, the poses that run on
+    /// their own clock, and a waiting blink sampled by the idle tick.
     fn stage_wake(&self) -> Option<Duration> {
         let stage = self.stage.as_ref()?;
+        if !stage.visible || !stage.configured {
+            return None;
+        }
         let live = match stage.pose.0 {
             cat::Pose::Peek | cat::Pose::Hop | cat::Pose::Arm => true,
             cat::Pose::Lick => self.phase == Phase::Thinking,
@@ -2545,7 +2549,9 @@ impl State {
             cat::Pose::Extend => {
                 stage.pose.1.elapsed() < Duration::from_millis(cat::EXTEND_MS as u64)
             }
-            cat::Pose::Waiting => false,
+            // The waiting cat is still, except for the blink: the idle tick samples the
+            // closed window, so this is four frames a second, not an animation loop.
+            cat::Pose::Waiting => return Some(Duration::from_millis(cat::BLINK_MS as u64)),
         };
         live.then_some(FRAME_WAKE)
     }

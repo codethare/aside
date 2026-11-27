@@ -90,11 +90,12 @@ pub fn peek(edge: Edge, output: (u32, u32), panel: Panel, size: f32) -> Option<S
     Some(Stage { x, y, size: side })
 }
 
-/// The window part way through the hop: the straight line from `from` to `to`, with the
-/// middle lifted out of it, so the cat arcs rather than sliding.
+/// The window part way through the hop: the straight line from `from` to `to`, eased at
+/// both ends, with the middle lifted out of it, so the cat springs rather than sliding.
 pub fn hop(from: Stage, to: Stage, t: f32) -> Stage {
     let t = t.clamp(0.0, 1.0);
-    let lerp = |a: i32, b: i32| (a as f32 + (b - a) as f32 * t).round() as i32;
+    let e = t * t * (3.0 - 2.0 * t);
+    let lerp = |a: i32, b: i32| (a as f32 + (b - a) as f32 * e).round() as i32;
     let lift = (std::f32::consts::PI * t).sin() * 0.35 * from.size as f32;
     Stage {
         x: lerp(from.x, to.x),
@@ -135,6 +136,20 @@ pub const LICK_AFTER_MS: u128 = 300;
 pub const SPEAK_MS: u128 = 200;
 /// The paw's second reach, when the answer ends.
 pub const EXTEND_MS: u128 = 260;
+/// The waiting cat's blink: open at first, then closed for 260 ms every five seconds.
+pub const BLINK_CYCLE_MS: u128 = 5_000;
+pub const BLINK_MS: u128 = 260;
+const BLINK_AT_MS: u128 = 1_200;
+
+/// 1 while the eyes are shut. Two frames per cycle at the idle tick, not an idle loop.
+pub fn blink(since: Duration) -> f32 {
+    let phase = since.as_millis() % BLINK_CYCLE_MS;
+    if (BLINK_AT_MS..BLINK_AT_MS + BLINK_MS).contains(&phase) {
+        1.0
+    } else {
+        0.0
+    }
+}
 
 /// What the cat is doing now. `entrance` is the time since its first frame, `since_mood`
 /// the time since the panel entered that mood, and `since_finish` the time since the
@@ -226,7 +241,7 @@ pub fn tail_start(w: u32, h: u32, s: u32, bar_h: u32) -> (u32, u32) {
 /// The head's centre and radius, which the ears, the eyes, the mouth and the tongue are
 /// all placed from. One head, so a pose that moves it moves all of them.
 fn head(w: f32, h: f32) -> (f32, f32, f32) {
-    (0.62 * w, 0.38 * h, 0.16 * w)
+    (0.65 * w, 0.34 * h, 0.16 * w)
 }
 
 /// The mouth: on the head's outline at its lower front, so the bubble's card-coloured
@@ -249,21 +264,37 @@ struct Act {
     reach: f32,
     /// How far the head has dipped toward the arm, in stage heights.
     dip: f32,
+    /// The head's turn toward the panel, radians. The ears turn about its centre; the
+    /// face turns about the mouth, so the bubble's point never moves.
+    tilt: f32,
     /// How open the mouth is.
     mouth: f32,
     /// How far the tongue is out.
     tongue: f32,
+    /// The tongue's sideways wag, -1..1.
+    tongue_sway: f32,
     /// Whether the tail is up, as it is mid-leap.
     tail_up: bool,
+    /// The tail tip's sideways sway, in stage widths.
+    tail_sway: f32,
+    /// One ear's extra turn, radians.
+    ear: f32,
+    /// 1 for closed eyes.
+    blink: f32,
 }
 
 impl Act {
     const REST: Act = Act {
         reach: 1.0,
         dip: 0.0,
+        tilt: 0.10,
         mouth: 0.0,
         tongue: 0.0,
+        tongue_sway: 0.0,
         tail_up: false,
+        tail_sway: 0.0,
+        ear: 0.0,
+        blink: 0.0,
     };
 }
 
@@ -439,34 +470,79 @@ pub fn draw(
             peek_pose(&mut ink, fw, fh, edge, t / PEEK_MS as f32);
             return;
         }
-        Pose::Hop => Act {
-            reach: 0.0,
-            tail_up: true,
-            dip: -0.02,
-            ..Act::REST
-        },
-        Pose::Arm => Act {
-            reach: ease_out(t / ARM_MS as f32),
-            ..Act::REST
-        },
-        Pose::Waiting => Act::REST,
-        Pose::Lick => {
-            // Two flicks a second, the tongue on the paw it just extended.
-            let phase = (t / 450.0) % 1.0;
+        Pose::Hop => {
+            let t = (t / HOP_MS as f32).clamp(0.0, 1.0);
+            let arc = (std::f32::consts::PI * t).sin();
             Act {
-                dip: 0.03 * (phase * std::f32::consts::PI).sin().abs(),
-                tongue: (phase * std::f32::consts::PI).sin().max(0.0),
+                reach: 0.0,
+                tail_up: true,
+                dip: -0.02 + 0.02 * arc,
+                tilt: 0.06 + 0.05 * arc,
+                tail_sway: 0.005 * (2.2 * std::f32::consts::PI * t).sin(),
+                ear: 0.05 * (3.0 * std::f32::consts::PI * t).sin(),
                 ..Act::REST
             }
         }
-        Pose::Speak => Act {
-            mouth: (t / SPEAK_MS as f32 * std::f32::consts::PI).sin().max(0.0),
+        Pose::Arm => {
+            let t = t / ARM_MS as f32;
+            Act {
+                reach: ease_out_back(t),
+                tilt: 0.10 + 0.04 * (std::f32::consts::PI * t).sin(),
+                tail_sway: 0.006 * (2.0 * std::f32::consts::PI * t).sin(),
+                ear: 0.06 * (2.5 * std::f32::consts::PI * t).sin(),
+                ..Act::REST
+            }
+        }
+        Pose::Waiting => Act {
+            blink: blink(since),
             ..Act::REST
         },
-        Pose::Extend => Act {
-            reach: 1.0 - 0.35 * (t / EXTEND_MS as f32 * std::f32::consts::PI).sin(),
-            ..Act::REST
-        },
+        Pose::Lick => {
+            // A flick and a pause, not a metronome: one tongue motion per 620 ms.
+            let t = since.as_secs_f32();
+            let phase = (t / 0.62) % 1.0;
+            let tongue = if phase < 0.5 {
+                (phase / 0.5 * std::f32::consts::PI).sin()
+            } else {
+                0.0
+            };
+            Act {
+                dip: 0.018 * tongue + 0.008 * (t * 2.3).sin().abs(),
+                tilt: 0.07 + 0.035 * (t * 3.1).sin(),
+                tongue,
+                tongue_sway: (t * 11.0).sin() * tongue,
+                tail_sway: 0.006 * (t * 1.7).sin(),
+                ear: 0.06 * (t * 1.3).sin().max(0.0),
+                ..Act::REST
+            }
+        }
+        Pose::Speak => {
+            let t = (t / SPEAK_MS as f32).clamp(0.0, 1.0);
+            let main = (std::f32::consts::PI * t).sin().max(0.0).powf(0.7);
+            let second = if t > 0.55 {
+                ((t - 0.55) / 0.45 * std::f32::consts::PI).sin() * 0.55
+            } else {
+                0.0
+            };
+            Act {
+                mouth: (main + second).min(1.0),
+                dip: -0.008 * (2.0 * std::f32::consts::PI * t).sin(),
+                tilt: 0.10 + 0.02 * (2.0 * std::f32::consts::PI * t).sin(),
+                tail_sway: 0.005 * (2.0 * std::f32::consts::PI * t).sin(),
+                ..Act::REST
+            }
+        }
+        Pose::Extend => {
+            let t = (t / EXTEND_MS as f32).clamp(0.0, 1.0);
+            Act {
+                reach: 1.0 - 0.30 * (std::f32::consts::PI * t).sin()
+                    + 0.045 * (3.0 * std::f32::consts::PI * t).sin(),
+                tilt: 0.10 + 0.04 * (std::f32::consts::PI * t).sin(),
+                tail_sway: 0.006 * (2.0 * std::f32::consts::PI * t).sin(),
+                ear: 0.05 * (2.0 * std::f32::consts::PI * t).sin(),
+                ..Act::REST
+            }
+        }
     };
     cat(&mut ink, fw, fh, act);
 }
@@ -481,11 +557,24 @@ fn cat(ink: &mut Ink, w: f32, h: f32, act: Act) {
     details(ink, w, h, act, line);
 }
 
-/// A point on the head's ring, `at` degrees round it, `reach` radii from the centre.
-fn on_head(w: f32, h: f32, dip: f32, at: f32, reach: f32) -> (f32, f32) {
+/// Rotate `q` about `pivot`: the ears about the head, the face about the mouth.
+fn spin(q: (f32, f32), pivot: (f32, f32), angle: f32) -> (f32, f32) {
+    let (s, c) = angle.sin_cos();
+    let (x, y) = (q.0 - pivot.0, q.1 - pivot.1);
+    (pivot.0 + x * c - y * s, pivot.1 + x * s + y * c)
+}
+
+/// A point on the head's ring, `at` degrees round it, `reach` radii from the centre, then
+/// turned by `tilt` about that centre so an ear stays on the ring when the head moves.
+fn on_head(w: f32, h: f32, dip: f32, tilt: f32, at: f32, reach: f32) -> (f32, f32) {
     let (hx, hy, r) = head(w, h);
+    let hy = hy + dip * h;
     let a = at.to_radians();
-    (hx + a.cos() * r * reach, hy + dip * h + a.sin() * r * reach)
+    spin(
+        (hx + a.cos() * r * reach, hy + a.sin() * r * reach),
+        (hx, hy),
+        tilt,
+    )
 }
 
 /// A Catmull-Rom point between `p1` and `p2`, with `p0` and `p3` as its tangents.
@@ -505,34 +594,35 @@ fn outline(ink: &mut Ink, w: f32, h: f32, act: Act, o: (f32, f32), line: f32, c:
     let (ox, oy) = o;
     let p = |q: (f32, f32)| (q.0 + ox, q.1 + oy);
     let dip = act.dip;
-    // The body: one open contour round the back, the rump and the ground, up the chest,
-    // ending on the head's ring so no body line runs inside the head.
+    // The body: taller on the chest than the rump, one open contour ending on the head's
+    // ring so no body line runs inside the head.
     ink.curve(
         &[
-            p(on_head(w, h, dip, 155.0, 1.0)),
-            p((0.43 * w, 0.475 * h)),
-            p((0.30 * w, 0.50 * h)),
-            p((0.20 * w, 0.60 * h)),
-            p((0.16 * w, 0.75 * h)),
-            p((0.20 * w, 0.86 * h)),
-            p((0.36 * w, 0.90 * h)),
-            p((0.55 * w, 0.89 * h)),
-            p((0.64 * w, 0.80 * h)),
-            p((0.66 * w, 0.66 * h)),
-            p(on_head(w, h, dip, 55.0, 1.0)),
+            p(on_head(w, h, dip, 0.0, 155.0, 1.0)),
+            p((0.44 * w, 0.43 * h)),
+            p((0.31 * w, 0.47 * h)),
+            p((0.21 * w, 0.58 * h)),
+            p((0.16 * w, 0.74 * h)),
+            p((0.19 * w, 0.86 * h)),
+            p((0.35 * w, 0.91 * h)),
+            p((0.54 * w, 0.90 * h)),
+            p((0.66 * w, 0.82 * h)),
+            p((0.68 * w, 0.68 * h)),
+            p(on_head(w, h, dip, 0.0, 50.0, 1.0)),
         ],
         line,
         c,
     );
-    // The tail: out of the rump, curled up; straight up mid-leap.
-    let root = p((0.16 * w, 0.75 * h));
+    // The tail: out of the rump, a curl with a loop at the tip; straight up mid-leap.
+    let root = p((0.16 * w, 0.74 * h));
+    let sway = act.tail_sway * w;
     if act.tail_up {
         ink.curve(
             &[
                 root,
-                p((0.13 * w, 0.58 * h)),
-                p((0.12 * w, 0.42 * h)),
-                p((0.17 * w, 0.29 * h)),
+                p((0.13 * w + sway * 0.4, 0.58 * h)),
+                p((0.11 * w + sway * 0.8, 0.40 * h)),
+                p((0.16 * w + sway * 1.2, 0.29 * h)),
             ],
             line,
             c,
@@ -541,23 +631,29 @@ fn outline(ink: &mut Ink, w: f32, h: f32, act: Act, o: (f32, f32), line: f32, c:
         ink.curve(
             &[
                 root,
-                p((0.055 * w, 0.68 * h)),
-                p((0.035 * w, 0.54 * h)),
-                p((0.10 * w, 0.42 * h)),
-                p((0.19 * w, 0.40 * h)),
+                p((0.055 * w + sway * 0.3, 0.68 * h)),
+                p((0.035 * w + sway * 0.6, 0.55 * h)),
+                p((0.08 * w + sway, 0.44 * h)),
+                p((0.16 * w + sway * 1.3, 0.45 * h)),
+                p((0.17 * w + sway * 1.5, 0.55 * h)),
+                p((0.10 * w + sway * 1.6, 0.54 * h)),
             ],
             line,
             c,
         );
     }
-    // The head ring, and the ears as open V's standing on it.
+    // The head ring, and the ears as open V's standing on it, turned with the head.
     let (hx, hy, r) = head(w, h);
     let hy = hy + dip * h;
     ink.ring(hx + ox, hy + oy, r, line, c);
-    for (base1, peak, base2) in [(205.0, 225.0, 245.0), (295.0, 315.0, 335.0)] {
-        let a = p(on_head(w, h, dip, base1, 1.0));
-        let b = p(on_head(w, h, dip, peak, 1.5));
-        let d = p(on_head(w, h, dip, base2, 1.0));
+    for (i, (base1, peak, base2)) in [(205.0, 225.0, 245.0), (295.0, 315.0, 335.0)]
+        .into_iter()
+        .enumerate()
+    {
+        let tilt = act.tilt + if i == 1 { act.ear } else { 0.0 };
+        let a = p(on_head(w, h, dip, tilt, base1, 1.0));
+        let b = p(on_head(w, h, dip, tilt, peak, 1.5));
+        let d = p(on_head(w, h, dip, tilt, base2, 1.0));
         ink.capsule(a, b, line / 2.0, c);
         ink.capsule(b, d, line / 2.0, c);
     }
@@ -594,42 +690,12 @@ fn outline(ink: &mut Ink, w: f32, h: f32, act: Act, o: (f32, f32), line: f32, c:
 fn details(ink: &mut Ink, w: f32, h: f32, act: Act, line: f32) {
     let (hx, hy, r) = head(w, h);
     let hy = hy + act.dip * h;
-    // The face: two dot eyes, a flat nose, one smile and two whiskers. Notion's whole face.
-    ink.disc(hx - 0.38 * r, hy - 0.12 * r, 0.09 * r, INK);
-    ink.disc(hx + 0.38 * r, hy - 0.12 * r, 0.09 * r, INK);
-    let nose = (hx + 0.46 * r, hy + 0.22 * r);
-    ink.triangle(
-        [
-            (nose.0 - 0.08 * r, nose.1 - 0.05 * r),
-            (nose.0 + 0.08 * r, nose.1 - 0.05 * r),
-            (nose.0, nose.1 + 0.09 * r),
-        ],
-        INK,
-    );
     let (mx, my) = mouth(w, h);
     let my = my + act.dip * h;
-    // The smile runs into the mouth's corner, so the bubble's tail continues the line.
-    ink.curve(
-        &[
-            (hx + 0.28 * r, hy + 0.40 * r),
-            (hx + 0.52 * r, hy + 0.48 * r),
-            (mx - 0.04 * r, my - 0.03 * r),
-        ],
-        line * 0.5,
-        INK,
-    );
-    // Two whiskers above the smile, a quarter weight so they read as hair.
-    for (from_y, to_x, to_y) in [(0.10, 1.45, 0.00), (0.24, 1.38, 0.34)] {
-        ink.capsule(
-            (hx + 0.68 * r, hy + from_y * r),
-            (hx + to_x * r, hy + to_y * r),
-            line * 0.25,
-            INK,
-        );
-    }
+    face(ink, (hx, hy), r, act.tilt, act.blink, line, (mx, my));
     if act.mouth > 0.01 {
         // The open mouth is the accent itself: a flat orange oval with the line round it.
-        let (cx, cy) = (mx - 0.06 * r, my + 0.02 * r);
+        let (cx, cy) = spin((mx - 0.06 * r, my + 0.02 * r), (mx, my), act.tilt);
         let (rx, ry) = (
             0.10 * r * (0.5 + act.mouth),
             0.05 * r + 0.16 * r * act.mouth,
@@ -640,16 +706,69 @@ fn details(ink: &mut Ink, w: f32, h: f32, act: Act, line: f32) {
     if act.tongue > 0.01 {
         // Down toward the arm it just extended, which passes under the head.
         let tip = (
-            mx + (0.08 + 0.14 * act.tongue) * r,
+            mx + (0.08 + 0.14 * act.tongue + 0.05 * act.tongue_sway) * r,
             my + (0.22 + 0.48 * act.tongue) * r,
         );
         ink.capsule((mx, my), tip, 0.045 * r, TONGUE);
     }
 }
 
-/// The head over the edge, and one paw with it: the cat has not arrived yet.
+/// The face, turned about the mouth: the eyes, nose, smile and whiskers all rotate, and
+/// the smile still ends on the point the bubble's tail uses.
+fn face(
+    ink: &mut Ink,
+    (hx, hy): (f32, f32),
+    r: f32,
+    tilt: f32,
+    blink: f32,
+    line: f32,
+    mouth: (f32, f32),
+) {
+    let f = |q: (f32, f32)| spin(q, mouth, tilt);
+    // The eyes: two dots, or two short strokes while the cat blinks.
+    for dx in [-0.38, 0.38] {
+        if blink > 0.5 {
+            let a = f((hx + (dx - 0.10) * r, hy - 0.12 * r));
+            let b = f((hx + (dx + 0.10) * r, hy - 0.12 * r));
+            ink.capsule(a, b, line * 0.55, INK);
+        } else {
+            let eye = f((hx + dx * r, hy - 0.12 * r));
+            ink.disc(eye.0, eye.1, 0.09 * r, INK);
+        }
+    }
+    // The nose, a small flat triangle.
+    ink.triangle(
+        [
+            f((hx + 0.38 * r, hy + 0.17 * r)),
+            f((hx + 0.54 * r, hy + 0.17 * r)),
+            f((hx + 0.46 * r, hy + 0.31 * r)),
+        ],
+        INK,
+    );
+    // The smile runs into the mouth's corner, so the bubble's tail continues the line.
+    ink.curve(
+        &[
+            f((hx + 0.28 * r, hy + 0.40 * r)),
+            f((hx + 0.52 * r, hy + 0.48 * r)),
+            mouth,
+        ],
+        line * 0.5,
+        INK,
+    );
+    // Two whiskers above the smile, a quarter weight so they read as hair.
+    for (from_y, to_x, to_y) in [(0.10, 1.45, 0.00), (0.24, 1.38, 0.34)] {
+        ink.capsule(
+            f((hx + 0.68 * r, hy + from_y * r)),
+            f((hx + to_x * r, hy + to_y * r)),
+            line * 0.25,
+            INK,
+        );
+    }
+}
+
+/// The head over the edge, and the eyes with it: the cat has not arrived yet.
 fn peek_pose(ink: &mut Ink, w: f32, h: f32, edge: Edge, t: f32) {
-    let rise = ease_out(t.clamp(0.0, 1.0));
+    let rise = ease_out_back(t.clamp(0.0, 1.0));
     let (hx, _, r) = head(w, h);
     let out = 0.20 * w;
     let (from, to) = match edge {
@@ -662,22 +781,36 @@ fn peek_pose(ink: &mut Ink, w: f32, h: f32, edge: Edge, t: f32) {
         from.0 + (to.0 - from.0) * rise,
         from.1 + (to.1 - from.1) * rise,
     );
+    let tilt = 0.10 * rise;
     let line = weight(w);
     let shadow = (0.004 * w, 0.004 * w);
     for (o, colour) in [(shadow, SHADOW), ((0.0, 0.0), INK)] {
         let (ox, oy) = o;
         ink.ring(cx + ox, cy + oy, r, line, colour);
-        for (base1, peak, base2) in [(205.0, 225.0, 245.0), (295.0, 315.0, 335.0)] {
+        for (i, (base1, peak, base2)) in [(205.0, 225.0, 245.0), (295.0, 315.0, 335.0)]
+            .into_iter()
+            .enumerate()
+        {
+            let extra = if i == 1 {
+                0.05 * (t * 3.0 * std::f32::consts::PI).sin()
+            } else {
+                0.0
+            };
             let at = |deg: f32, reach: f32| {
                 let a = deg.to_radians();
-                (cx + a.cos() * r * reach + ox, cy + a.sin() * r * reach + oy)
+                let q = spin(
+                    (cx + a.cos() * r * reach, cy + a.sin() * r * reach),
+                    (cx, cy),
+                    tilt + extra,
+                );
+                (q.0 + ox, q.1 + oy)
             };
             ink.capsule(at(base1, 1.0), at(peak, 1.5), line / 2.0, colour);
             ink.capsule(at(peak, 1.5), at(base2, 1.0), line / 2.0, colour);
         }
     }
-    ink.disc(cx - 0.38 * r, cy - 0.12 * r, 0.09 * r, INK);
-    ink.disc(cx + 0.38 * r, cy - 0.12 * r, 0.09 * r, INK);
+    let mouth = (cx + 0.906 * r, cy + 0.423 * r);
+    face(ink, (cx, cy), r, tilt, 0.0, line, mouth);
 }
 
 /// The bubble's tail: the card's corner to the mouth, in the card's own fill.
@@ -688,10 +821,10 @@ fn bubble_tail(ink: &mut Ink, w: f32, h: f32, s: u32, bar_h: u32) {
     ink.triangle([(cx, cy), (cx, cy + 0.10 * w), (mx, my)], render::BG_PROMPT);
 }
 
-/// A shape's progress as the eye expects it: fast out of the gate, settling at the end.
-fn ease_out(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    1.0 - (1.0 - t) * (1.0 - t)
+/// Ease out with a small overshoot that settles exactly on 1: a reach, not a slide.
+fn ease_out_back(t: f32) -> f32 {
+    let u = t.clamp(0.0, 1.0) - 1.0;
+    1.0 + 1.9 * u * u * u + 0.9 * u * u
 }
 
 #[cfg(test)]
@@ -944,9 +1077,9 @@ mod tests {
         );
         let alpha = |x: u32, y: u32| buf[((y * w + x) * 4 + 3) as usize];
         assert_eq!(alpha(78, 182), 0, "the body is empty");
-        assert_eq!(alpha(161, 99), 0, "the head is empty");
-        assert!(alpha(94, 234) > 0, "the body's ground line");
-        assert!(alpha(120, 99) > 0, "the head's ring");
+        assert_eq!(alpha(169, 88), 0, "the head is empty");
+        assert!(alpha(140, 234) > 0, "the body's ground line");
+        assert!(alpha(127, 88) > 0, "the head's ring");
         assert!(alpha(259, 130) > 0, "the paw reaches the pad");
     }
 
@@ -979,6 +1112,48 @@ mod tests {
             .any(|p| p[3] > 0 && p[0] > 0xc0 && p[1] > 0xc0 && p[2] > 0xc0);
         assert!(orange, "the tongue is Notion orange");
         assert!(ink, "the contour is Notion's off-white ink");
+    }
+
+    /// The blink is a window on the waiting clock, open at the start.
+    #[test]
+    fn the_waiting_cat_blinks_on_its_own_clock() {
+        let ms = Duration::from_millis;
+        assert_eq!(blink(ms(0)), 0.0);
+        assert_eq!(blink(ms(1_300)), 1.0);
+        assert_eq!(blink(ms(2_000)), 0.0);
+        assert_eq!(blink(ms(6_300)), 1.0, "the next cycle's blink");
+    }
+
+    /// The reach overshoots, but never by more than 3 %, and settles exactly on the pad.
+    #[test]
+    fn the_reach_settles_exactly_on_the_pad() {
+        let peak = (0..=100)
+            .map(|i| ease_out_back(i as f32 / 100.0))
+            .fold(0.0, f32::max);
+        assert!(peak > 1.0, "the reach overshoots a little: {peak}");
+        assert!(peak <= 1.03, "the overshoot stays under 3 %: {peak}");
+        assert_eq!(ease_out_back(1.0), 1.0);
+    }
+
+    /// The smile ends on the mouth, so the head's tilt turns the face about a fixed point.
+    #[test]
+    fn the_face_turns_about_the_mouth() {
+        let (w, h) = (260u32, 260u32);
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        draw(
+            &mut buf,
+            w,
+            h,
+            1,
+            30,
+            Edge::Bottom,
+            Pose::Waiting,
+            Duration::from_millis(2_000),
+            false,
+        );
+        let (mx, my) = mouth(w as f32, h as f32);
+        let alpha = buf[((my as u32 * w + mx as u32) * 4 + 3) as usize];
+        assert!(alpha > 0, "the smile ends on the mouth at {mx},{my}");
     }
 
     #[test]
