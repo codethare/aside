@@ -47,17 +47,26 @@ layerrule = no_anim, aside
 ```
 
 Configuration is optional: `~/.config/aside/config.toml` with flat `key = "value"`
-lines, and seven keys — `model`, `base_url`, `proxy`, `font_size`, `font_family`,
-`animations` and `instructions`:
+lines, and eight keys — `model`, `base_url`, `proxy`, `font_size`, `font_family`,
+`animations`, `mode` and `instructions`:
 
 ```toml
 model = "deepseek/deepseek-v4.1-flash"
 font_size = "24"                 # 8 to 72 logical px; the bar follows it
 font_family = "Noto Sans Mono"    # a name nothing provides falls back to the chain
 animations = "true"               # "false" skips the opening, the growth, the closing and the particle exit
+mode = "default"                 # "cat" is the same panel with a cat in it
 instructions = "Answer in Chinese."          # the reader's own constraints: one
 instructions = "At most three sentences."    # rule a line, joined in this order
 ```
+
+`mode = "cat"` is the same panel staged around a black cat. It comes out of one of
+the screen's four edges, hops to the panel's left side and takes the input on its
+magnified paw, which is the bar drawn as a paw pad. While the request runs it licks
+that paw, and the answer arrives in a bubble that comes out of its mouth and stays
+there, with the last answer still in it, until the next answer starts. Every key,
+the scrolling, the selection, the markdown and the clipboard are the same in both
+modes; `"default"` is the panel described above, unchanged.
 
 The configuration is read once at startup: a changed size needs a new run, or
 `--font-size`/`--font-family` on the command line.

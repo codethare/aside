@@ -481,11 +481,11 @@ fn the_bubble_grows_out_of_the_mouth() {
 - Modify: `CLAUDE.md` (rule 4, scoped to the default mode)
 - Modify: `openspec/changes/add-cat-mode/tasks.md` (tick what landed)
 
-- [ ] **Step 1: README.** `mode` in the key list, `mode = "cat"` in the example, and one
+- [x] **Step 1: README.** `mode` in the key list, `mode = "cat"` in the example, and one
   sentence on what the cat mode draws.
-- [ ] **Step 2: The man page.** The same, in the man page's voice.
-- [ ] **Step 3: `CLAUDE.md`.** Rule 4 becomes the default mode's chrome, and one sentence
+- [x] **Step 2: The man page.** The same, in the man page's voice.
+- [x] **Step 3: `CLAUDE.md`.** Rule 4 becomes the default mode's chrome, and one sentence
   names the cat mode's: the stage, the pad, the bubble.
-- [ ] **Step 4: The gate.** `cargo test` (282 pass plus the two known environment
+- [x] **Step 4: The gate.** `cargo test` (282 pass plus the two known environment
   failures), `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`.
-- [ ] **Step 5: Commit.** `jj describe -m "docs: describe the cat mode"` then `jj new`.
+- [x] **Step 5: Commit.** `jj describe -m "docs: describe the cat mode"` then `jj new`.
