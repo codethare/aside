@@ -205,7 +205,7 @@ fn every_edge_is_rolled_and_each_peek_is_flush_with_its_edge() {
   `LICK_AFTER_MS 300`, `SPEAK_MS 200`, `EXTEND_MS 260`.
 - Consumes: nothing from Task 2 but the file.
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
 
 ```rust
 #[test]
@@ -241,16 +241,16 @@ fn animation_off_is_the_landed_cat_in_the_first_frame() {
 }
 ```
 
-- [ ] **Step 2: Run them, watch them fail.**
+- [x] **Step 2: Run them, watch them fail.**
 
-- [ ] **Step 3: Implement** `pose`: `!animate` → `Waiting`; `Mood::Idle` → the entrance
+- [x] **Step 3: Implement** `pose`: `!animate` → `Waiting`; `Mood::Idle` → the entrance
   timeline; `Thinking` → `Lick` once `since_mood >= LICK_AFTER_MS`; `Answering` →
   `Extend` while `since_finish < EXTEND_MS`, else `Speak` while `since_mood < SPEAK_MS`,
   else `Waiting`.
 
-- [ ] **Step 4: Run.** `cargo test cat::` → PASS.
+- [x] **Step 4: Run.** `cargo test cat::` → PASS.
 
-- [ ] **Step 5: Commit.** `jj describe -m "feat: give the cat its poses"` then `jj new`.
+- [x] **Step 5: Commit.** `jj describe -m "feat: give the cat its poses"` then `jj new`.
 
 ---
 

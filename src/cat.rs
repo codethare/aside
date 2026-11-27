@@ -5,6 +5,8 @@
 // The stage's surface is what calls all of this; it lands in a later task.
 #![cfg_attr(not(test), allow(dead_code, reason = "wired to the stage's surface"))]
 
+use std::time::Duration;
+
 use crate::render;
 
 /// Which screen edge the cat comes out of.
@@ -96,6 +98,74 @@ pub fn hop(from: Stage, to: Stage, t: f32) -> Stage {
     }
 }
 
+/// What the panel is doing, as far as the cat is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mood {
+    Idle,
+    Thinking,
+    Answering,
+}
+
+/// What the cat is doing, which is all the painter needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pose {
+    Peek,
+    Hop,
+    Arm,
+    Waiting,
+    Lick,
+    Speak,
+    Extend,
+}
+
+/// The entrance, in the order it is drawn: the head over the edge, the hop, the paw.
+pub const PEEK_MS: u128 = 420;
+pub const HOP_MS: u128 = 400;
+pub const ARM_MS: u128 = 300;
+/// When the entrance is over and the cat is waiting with its paw out.
+pub const ENTER_MS: u128 = PEEK_MS + HOP_MS + ARM_MS;
+/// How long a request runs before the cat licks the paw it just extended.
+pub const LICK_AFTER_MS: u128 = 300;
+/// The mouth's one open and close, at the first text.
+pub const SPEAK_MS: u128 = 200;
+/// The paw's second reach, when the answer ends.
+pub const EXTEND_MS: u128 = 260;
+
+/// What the cat is doing now. `entrance` is the time since its first frame, `since_mood`
+/// the time since the panel entered that mood, and `since_finish` the time since the
+/// answer ended.
+pub fn pose(
+    entrance: Duration,
+    mood: Mood,
+    since_mood: Duration,
+    since_finish: Option<Duration>,
+    animate: bool,
+) -> Pose {
+    let ms = |d: Duration| d.as_millis();
+    // Sending the question ends the entrance where it is: a cat in mid-air has no mouth
+    // to hang a bubble from, and a second clock for a one-second case is not worth it.
+    if !animate || mood != Mood::Idle {
+        return match mood {
+            Mood::Idle => Pose::Waiting,
+            Mood::Thinking if ms(since_mood) >= LICK_AFTER_MS => Pose::Lick,
+            Mood::Thinking => Pose::Waiting,
+            Mood::Answering if since_finish.is_some_and(|d| ms(d) < EXTEND_MS) => Pose::Extend,
+            Mood::Answering if ms(since_mood) < SPEAK_MS => Pose::Speak,
+            Mood::Answering => Pose::Waiting,
+        };
+    }
+    let t = ms(entrance);
+    if t < PEEK_MS {
+        Pose::Peek
+    } else if t < PEEK_MS + HOP_MS {
+        Pose::Hop
+    } else if t < ENTER_MS {
+        Pose::Arm
+    } else {
+        Pose::Waiting
+    }
+}
+
 /// One of four, from a seed. A splitmix step, so neighbouring seeds — the clock's
 /// nanoseconds — do not walk the edges in order.
 pub fn roll_edge(seed: u64) -> Edge {
@@ -174,6 +244,62 @@ mod tests {
             let stage = peek(edge, out, panel, 1.0).expect("room");
             assert_eq!((stage.x, stage.y), want, "{edge:?}");
         }
+    }
+
+    #[test]
+    fn the_entrance_runs_in_order_and_stops_when_the_question_goes() {
+        let ms = Duration::from_millis;
+        assert_eq!(pose(ms(0), Mood::Idle, ms(0), None, true), Pose::Peek);
+        assert_eq!(pose(ms(500), Mood::Idle, ms(0), None, true), Pose::Hop);
+        assert_eq!(pose(ms(900), Mood::Idle, ms(0), None, true), Pose::Arm);
+        assert_eq!(pose(ms(1200), Mood::Idle, ms(0), None, true), Pose::Waiting);
+        // Sent mid-entrance: the cat is where it lands, at once.
+        assert_eq!(
+            pose(ms(500), Mood::Thinking, ms(0), None, true),
+            Pose::Waiting
+        );
+    }
+
+    #[test]
+    fn the_lick_belongs_to_thinking_and_stops_at_the_first_text() {
+        let ms = Duration::from_millis;
+        assert_eq!(
+            pose(ms(2000), Mood::Thinking, ms(100), None, true),
+            Pose::Waiting
+        );
+        assert_eq!(
+            pose(ms(2000), Mood::Thinking, ms(400), None, true),
+            Pose::Lick
+        );
+        assert_eq!(
+            pose(ms(2000), Mood::Answering, ms(0), None, true),
+            Pose::Speak
+        );
+        assert_eq!(
+            pose(ms(2000), Mood::Answering, ms(400), None, true),
+            Pose::Waiting
+        );
+    }
+
+    #[test]
+    fn the_paw_comes_back_after_the_answer() {
+        let ms = Duration::from_millis;
+        assert_eq!(
+            pose(ms(2000), Mood::Answering, ms(400), Some(ms(100)), true),
+            Pose::Extend
+        );
+        assert_eq!(
+            pose(ms(2000), Mood::Answering, ms(400), Some(ms(400)), true),
+            Pose::Waiting
+        );
+    }
+
+    #[test]
+    fn animation_off_is_the_landed_cat_in_the_first_frame() {
+        assert_eq!(
+            pose(Duration::ZERO, Mood::Idle, Duration::ZERO, None, false),
+            Pose::Waiting
+        );
     }
 
     #[test]
