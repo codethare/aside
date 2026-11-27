@@ -68,7 +68,7 @@ pad and the bubble's growth origin are the panel's own drawing under a mode.
   `fn skin(entries: &[(String, String)]) -> Skin`; `State::skin: Skin`.
 - Consumes: nothing.
 
-- [ ] **Step 1: Write the failing test** — in `src/provider.rs`:
+- [x] **Step 1: Write the failing test** — in `src/provider.rs`:
 
 ```rust
 #[test]
@@ -82,16 +82,16 @@ fn mode_is_a_known_key_with_two_values() {
 }
 ```
 
-- [ ] **Step 2: Run it, watch it fail.** `cargo test mode_is_a_known_key -- --nocapture`
+- [x] **Step 2: Run it, watch it fail.** `cargo test mode_is_a_known_key -- --nocapture`
   Expected: FAIL, "unknown key".
 
-- [ ] **Step 3: Implement.** In `parse_config`'s `match key`, beside `"animations"`:
+- [x] **Step 3: Implement.** In `parse_config`'s `match key`, beside `"animations"`:
 `"mode" => match value { "default" | "cat" => {} _ => return Err((line, format!("`mode` must be \"default\" or \"cat\": {value:?}"))) }`. Update the doc comment's key list.
 
-- [ ] **Step 4: Read it.** In `src/main.rs`, `Skin { Default, Cat }`, `fn skin(entries) -> Skin`
+- [x] **Step 4: Read it.** In `src/main.rs`, `Skin { Default, Cat }`, `fn skin(entries) -> Skin`
   (`Cat` only for `mode = "cat"`), stored in `Options.skin` and `State.skin`.
 
-- [ ] **Step 5: Test the reading** — in `src/main.rs`'s tests:
+- [x] **Step 5: Test the reading** — in `src/main.rs`'s tests:
 
 ```rust
 #[test]
@@ -102,9 +102,9 @@ fn the_mode_key_picks_the_skin() {
 }
 ```
 
-- [ ] **Step 6: Run.** `cargo test mode` → PASS. `cargo clippy --all-targets -- -D warnings` → clean.
+- [x] **Step 6: Run.** `cargo test mode` → PASS. `cargo clippy --all-targets -- -D warnings` → clean.
 
-- [ ] **Step 7: Commit.** `jj describe -m "feat: add the cat mode's configuration key"` then `jj new`.
+- [x] **Step 7: Commit.** `jj describe -m "feat: add the cat mode's configuration key"` then `jj new`.
 
 ---
 

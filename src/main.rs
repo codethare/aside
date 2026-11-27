@@ -345,6 +345,7 @@ fn main() {
         listener,
         output: flag("--output"),
         animate,
+        skin: skin(&file),
     }) {
         eprintln!("aside: {e}");
         exit(1);
@@ -461,6 +462,23 @@ pub const CONFIGURE_TIMEOUT_S: u64 = 5;
 
 /// What one run was asked for, so the pieces that build the panel take one argument
 /// rather than five positional ones.
+/// Which look the panel is drawn in. `Default` is the plush panel this crate has always
+/// drawn; `Cat` is the same panel staged around a cat, which is drawn on its own surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Skin {
+    Default,
+    Cat,
+}
+
+/// The look, from the configuration. `parse_config` has already refused every value but
+/// these two, so this is a reading and not a validation.
+fn skin(entries: &[(String, String)]) -> Skin {
+    match entries.iter().find(|(k, _)| k == "mode") {
+        Some((_, v)) if v == "cat" => Skin::Cat,
+        _ => Skin::Default,
+    }
+}
+
 struct Options {
     config: provider::Config,
     key: String,
@@ -469,6 +487,8 @@ struct Options {
     output: Option<String>,
     /// Whether the opening, the growth and the closing are drawn.
     animate: bool,
+    /// The look the panel is drawn in, from `mode`.
+    skin: Skin,
 }
 
 /// The panel's layer surface: overlay layer, our own namespace, no space reserved from
@@ -493,6 +513,7 @@ fn run(options: Options) -> Result<(), String> {
         listener,
         output,
         animate,
+        skin,
     } = options;
     let conn = Connection::connect_to_env().map_err(|e| format!("no Wayland session: {e}"))?;
     trace("wayland connected");
@@ -562,6 +583,7 @@ fn run(options: Options) -> Result<(), String> {
         shape: panel::State::Bar,
         context_cut: false,
         animate,
+        skin,
         mode: Mode::Typing,
         drag: Drag::default(),
         press: None,
@@ -1791,6 +1813,9 @@ struct State {
     /// refused startup from a session that ended after the panel was on screen.
     painted: bool,
     dirty: bool,
+    /// Which look is drawn: the plush panel, or the cat.
+    #[expect(dead_code, reason = "the pad reads it; it lands in the next task")]
+    pub skin: Skin,
     /// Whether the last frame drew the caret, so a blink flip is the only thing that
     /// makes the idle loop repaint for it.
     caret_drawn: bool,
@@ -4172,6 +4197,14 @@ impl PointerHandler for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mode_key_picks_the_skin() {
+        let entry = |v: &str| vec![("mode".to_string(), v.to_string())];
+        assert_eq!(skin(&[]), Skin::Default, "absent is the plush panel");
+        assert_eq!(skin(&entry("cat")), Skin::Cat);
+        assert_eq!(skin(&entry("default")), Skin::Default);
+    }
 
     #[test]
     fn streamed_text_does_not_yank_a_reader_who_scrolled_up() {
