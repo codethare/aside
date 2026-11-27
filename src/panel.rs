@@ -304,6 +304,16 @@ fn draw_split(
             }
         }
     };
+    // A growth origin outside the card — the cat's mouth is beside the panel, and a stage
+    // at the bottom of the screen puts it past the card — must still clip to the card: a
+    // row outside the buffer would be written without a check.
+    let top = shown.y.max(replies.y);
+    let bottom = (shown.y + shown.h).min(replies.y + replies.h);
+    let shown = render::Panel {
+        y: top,
+        h: bottom.saturating_sub(top),
+        ..shown
+    };
     if shown.h > 0 {
         render::body(buf, w, &shown, render::BG_PROMPT);
         draw_replies(
@@ -2654,6 +2664,50 @@ mod tests {
         );
         assert!(start < middle, "the caret follows left: {start} {middle}");
         assert!(middle < end, "and right: {middle} {end}");
+    }
+
+    /// A growth origin below the card — the cat's mouth is beside the panel, and a stage
+    /// at the bottom of the screen puts it past the card — must clip to the card rather
+    /// than paint rows the buffer does not have.
+    #[test]
+    fn a_mouth_below_the_card_cannot_paint_outside_it() {
+        let f = font();
+        let scene = scene(&f, 300.0);
+        let (w, h) = sized(&scene, &f);
+        let (bw, bh) = frame(w, h);
+        let mut buf = vec![0u8; (bw * bh * 4) as usize];
+        let mut look = Look::settled(State::Replies);
+        look.growth = 0.3;
+        look.mouth = Some((0.0, (render::SHADOW + h + 400) as f32));
+        draw(
+            &mut buf,
+            bw,
+            bh,
+            &f,
+            &scene.transcript,
+            &scene.input,
+            None,
+            &scene.viewport,
+            None,
+            None,
+            None,
+            true,
+            "",
+            "",
+            "",
+            look,
+            None,
+            0.0,
+            1,
+        );
+        let last = (0..bh)
+            .rev()
+            .find(|&y| (0..bw).any(|x| buf[((y * bw + x) * 4) as usize + 3] != 0))
+            .expect("the card is painted");
+        assert!(
+            last <= render::SHADOW + h,
+            "nothing below the panel's own rows: {last}"
+        );
     }
 
     /// The bubble is pulled out of the cat's mouth: at the start of its growth what is

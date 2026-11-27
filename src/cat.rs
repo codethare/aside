@@ -56,7 +56,11 @@ fn bar_centre(panel: Panel) -> i32 {
 /// The stage's side: what the size asks for, or the room the panel leaves, whichever is
 /// smaller, and nothing at all under the floor.
 pub fn stage_size(size: f32, room: u32) -> Option<u32> {
-    let side = ((STAGE * size).round().max(0.0) as u32).min(room);
+    let want = ((STAGE * size).round().max(0.0) as u32).min(room);
+    // An even side keeps the window's centre on a whole buffer pixel at every integer
+    // scale, which is what makes the paw, the pad's rim and the bubble's tail one point
+    // rather than three that are a pixel apart.
+    let side = want - want % 2;
     (side >= STAGE_FLOOR).then_some(side)
 }
 
@@ -607,6 +611,40 @@ mod tests {
     fn the_stage_shrinks_to_the_room_before_it_disappears() {
         assert_eq!(stage_size(2.0, 320), Some(320));
         assert_eq!(stage_size(2.0, 179), None);
+    }
+
+    /// An odd side puts the window's centre on half a buffer pixel, and the paw, the pad's
+    /// rim and the bubble's tail stop being one point.
+    #[test]
+    fn the_stage_is_an_even_number_of_pixels() {
+        assert_eq!(stage_size(1.0, 181), Some(180));
+        assert_eq!(stage_size(1.0, 260), Some(260));
+    }
+
+    #[test]
+    fn the_contacts_are_one_point_at_every_scale_and_bar() {
+        for bar_h in [30u32, 31] {
+            for s in [1i32, 2, 3] {
+                let panel = Panel {
+                    x: 614,
+                    y: 400,
+                    w: 692,
+                    h: 300,
+                    bar_h,
+                };
+                let stage = landing(panel, 1.0).expect("room to the left");
+                let bar_centre =
+                    panel.y + panel.h as i32 - render::SHADOW as i32 - bar_h as i32 / 2;
+                assert_eq!(stage.y + stage.size as i32 / 2, bar_centre, "bar {bar_h}");
+                // In the window's own buffer the paw is the row the card's centre is on.
+                let paw_row = (stage.size as i32 * s) / 2;
+                assert_eq!(
+                    stage.y * s + paw_row,
+                    bar_centre * s,
+                    "bar {bar_h} at scale {s}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -173,6 +173,15 @@ impl Transcript {
         self.height = 0;
     }
 
+    /// A kept turn gives up its place the moment something else goes on screen: a failure
+    /// or a note replaces it, and its invisible height goes with it.
+    fn take_kept(&mut self) {
+        if self.keep_previous {
+            self.retire_previous();
+            self.keep_previous = false;
+        }
+    }
+
     /// Retire every turn before the one being answered, and restart the block chain: the
     /// answer that is starting replaces what the bubble was showing.
     fn retire_previous(&mut self) {
@@ -326,6 +335,7 @@ impl Transcript {
     pub fn fail(&mut self, message: &str, font: &PanelFont, max_w: f32) {
         let blocks = Blocks::new(font);
         self.close_open(blocks);
+        self.take_kept();
         let i = self.push(Kind::Error, true, blocks);
         self.entries[i].text.push_str(message);
         self.entries[i].lines.update(message, font, max_w);
@@ -335,6 +345,7 @@ impl Transcript {
     /// Something the panel says about itself.
     pub fn add_note(&mut self, text: &str, font: &PanelFont, max_w: f32) {
         let blocks = Blocks::new(font);
+        self.take_kept();
         let i = self.push(Kind::Note, true, blocks);
         self.entries[i].text.push_str(text);
         self.entries[i].lines.update(text, font, max_w);
@@ -562,6 +573,38 @@ mod tests {
             .iter()
             .map(|r| r.text.to_string())
             .collect()
+    }
+
+    /// A kept turn that ends in a failure gives up its place: the failure is what is on
+    /// screen, at the top of the box, and the answer it replaced takes no room with it.
+    #[test]
+    fn a_failed_kept_turn_starts_where_the_answer_was() {
+        let f = font();
+        let mut t = Transcript::default();
+        t.ask("first", &f, true);
+        t.delta(
+            "an answer long enough to take more than one row in a narrow box",
+            &f,
+            200.0,
+        );
+        t.finish_answer(&f);
+        t.ask("second", &f, true);
+        t.fail("the provider refused the request (401)", &f, 200.0);
+        let rows = t.rows(Blocks::new(&f));
+        assert_eq!(
+            rows.first().map(|r| r.y),
+            Some(0),
+            "the failure starts the box"
+        );
+        assert!(
+            rows.iter().all(|r| r.kind != Kind::Answer),
+            "the answer it replaced is gone"
+        );
+        assert_eq!(
+            t.total_height(),
+            rows.len() as u32 * f.row_h,
+            "and its height went with it"
+        );
     }
 
     /// The cat's bubble keeps the last answer while the next request runs, and gives it

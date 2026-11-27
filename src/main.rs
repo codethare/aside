@@ -1407,6 +1407,30 @@ fn state_of(phase: Phase) -> panel::State {
     }
 }
 
+/// The mouth in the panel surface's buffer px. The window is placed on the output and the
+/// mouth is a fraction of the window; the bubble is painted into the panel's own buffer,
+/// so the two origins have to be subtracted, not conflated.
+fn mouth_in_surface(place: cat::Stage, panel: cat::Panel, s: u32) -> (f32, f32) {
+    let (mx, my) = cat::mouth_at(place.size * s);
+    (
+        (place.x - panel.x) as f32 * s as f32 + mx,
+        (place.y - panel.y) as f32 * s as f32 + my,
+    )
+}
+
+/// Whether the reply card stays on screen through the next request. The cat's bubble does,
+/// so the last answer is there until the new one starts; the plush panel retracts it and
+/// runs the request in the bar.
+fn keeps_bubble(skin: Skin, shape: panel::State, has_answer: bool) -> bool {
+    skin == Skin::Cat && shape == panel::State::Replies && has_answer
+}
+
+/// Whether the cat's buffer still has the frame's dimensions. A resize, a zoom or a new
+/// buffer scale changes them, and the old allocation must not be painted at the new size.
+fn buffer_fits(buffered: (u32, u32), px: u32) -> bool {
+    buffered == (px, px)
+}
+
 /// What the cat is doing while the panel is doing that.
 fn mood_of(phase: Phase) -> cat::Mood {
     match phase {
@@ -1846,6 +1870,12 @@ struct Stage {
     pose: (cat::Pose, std::time::Instant),
     /// The size last asked for, so a resize is one call and not one per frame.
     sized: (u32, u32),
+    /// The buffer's own dimensions, so a resize drops the allocation instead of painting
+    /// it at a size it does not have.
+    buffered: (u32, u32),
+    /// Whether the window is mapped. A panel moved where there is no room for a cat takes
+    /// it off the screen and puts it back when the room returns.
+    visible: bool,
 }
 
 /// Where the cat is in one frame, and what it is doing.
@@ -2364,6 +2394,8 @@ impl State {
             entrance: now,
             pose: (cat::Pose::Peek, now),
             sized: (landing.size, landing.size),
+            buffered: (0, 0),
+            visible: true,
         });
     }
 
@@ -2371,7 +2403,15 @@ impl State {
     /// own frame needs the mouth, which is why this is not part of the painting.
     fn place_cat(&mut self) -> Option<Placed> {
         let panel = self.stage_panel()?;
-        let landing = cat::landing(panel, self.size)?;
+        let landing = cat::landing(panel, self.size);
+        if landing.is_some() && self.stage.is_none() {
+            // The room came back, after a resize or a drag: the cat returns.
+            self.ensure_stage();
+        }
+        let Some(landing) = landing else {
+            self.hide_stage();
+            return None;
+        };
         let (out_w, out_h) = (self.output_w?, self.output_h?);
         let s = self.s();
         let now = std::time::Instant::now();
@@ -2405,18 +2445,27 @@ impl State {
         if !stage.configured {
             return None;
         }
-        // The mouth in the panel's surface px: the window is placed in logical px, and the
-        // mouth is a fraction of the window's buffer.
-        let (mx, my) = cat::mouth_at(place.size * s);
+        stage.visible = true;
         Some(Placed {
             place,
             pose,
             since,
-            mouth: (
-                place.x as f32 * s as f32 + mx,
-                place.y as f32 * s as f32 + my,
-            ),
+            mouth: mouth_in_surface(place, panel, s),
         })
+    }
+
+    /// Take the cat off the screen without giving up its window: the panel has moved
+    /// somewhere the cat no longer fits.
+    fn hide_stage(&mut self) {
+        let Some(stage) = self.stage.as_mut() else {
+            return;
+        };
+        if !stage.visible {
+            return;
+        }
+        stage.layer.wl_surface().attach(None, 0, 0);
+        stage.layer.commit();
+        stage.visible = false;
     }
 
     /// Paint the cat's window for this frame: where it is, what it is doing, and the
@@ -2424,12 +2473,16 @@ impl State {
     fn draw_stage(&mut self, placed: &Placed) {
         let s = self.s();
         let bar_h = panel::bar_height();
-        // The tail hangs off the reply card, so it is there exactly while an answer is.
-        let bubble = self.phase == Phase::Answering;
+        // The tail hangs off the reply card, so it is there exactly while the card is.
+        let bubble = self.shape == panel::State::Replies;
         let Some(stage) = self.stage.as_mut() else {
             return;
         };
         let px = placed.place.size * s;
+        if !buffer_fits(stage.buffered, px) {
+            stage.buffer = None;
+            stage.buffered = (px, px);
+        }
         let buffer = match stage.buffer.take() {
             Some(buffer) => buffer,
             None => {
@@ -2744,7 +2797,10 @@ impl State {
         // A follow-up over a visible answer first lets that answer slide down out of
         // its card. The request starts when the card is clear, so the old text never
         // snaps away and the panel never folds shut in one frame.
-        if self.animate && self.shape == panel::State::Replies && self.transcript.total_height() > 0
+        if !keeps_bubble(self.skin, self.shape, self.transcript.total_height() > 0)
+            && self.animate
+            && self.shape == panel::State::Replies
+            && self.transcript.total_height() > 0
         {
             self.pending_send = Some(question);
             self.retract_at = Some(std::time::Instant::now());
@@ -2793,9 +2849,12 @@ impl State {
         viewport.follow(transcript.total_height());
         *highlight = rows.saturating_sub(1);
         self.morph = None;
-        // The old card has just been retracted: the request now runs in the bar until
-        // its answer grows the box again.
-        self.shape = panel::State::Bar;
+        // The old card has just been retracted: the request now runs in the bar until its
+        // answer grows the box again — unless the cat's bubble is keeping the last answer,
+        // which stays on screen from this frame until the new one starts.
+        if !keeps_bubble(self.skin, self.shape, self.transcript.total_height() > 0) {
+            self.shape = panel::State::Bar;
+        }
         // The lines a selection named are about to be gone.
         self.selection = None;
         self.selecting = false;
@@ -2838,8 +2897,9 @@ impl State {
                     transcript.add_note(&context_cut_note(), font, max_w);
                 }
             }
-            // Cancelling ends the request too: the question is drawn away like any
-            // other, and only after the cancelled text's layout is done.
+            // Cancelling ends the request too: the paw comes back, and the question is
+            // drawn away like any other, only after the cancelled text's layout is done.
+            self.answer_end = Some(std::time::Instant::now());
             end_question(&mut self.question, self.animate, std::time::Instant::now());
             // Cancelling is an ending too: a reader who scrolled up keeps their place.
             if follow_stream(&mut self.viewport, transcript.total_height()) {
@@ -3915,6 +3975,13 @@ impl State {
         }
         self.scale = scale;
         self.sync_viewport();
+        // The cat's window is drawn at the panel's density too, and its buffer was sized
+        // for the old one.
+        if let Some(stage) = self.stage.as_mut() {
+            stage.layer.wl_surface().set_buffer_scale(scale as i32);
+            stage.buffer = None;
+            stage.buffered = (0, 0);
+        }
         // A different density means different glyphs and different wrapping.
         if let Ok(font) = PanelFont::load(self.face_size()) {
             self.font = Some(font);
@@ -4528,6 +4595,38 @@ impl PointerHandler for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mouth_is_the_panels_own_pixel() {
+        // The window is placed on the output; the bubble is painted into the panel's own
+        // buffer. The mouth has to cross that boundary, or the growth starts off-buffer.
+        let panel = cat::Panel {
+            x: 614,
+            y: 400,
+            w: 692,
+            h: 300,
+            bar_h: 30,
+        };
+        let stage = cat::landing(panel, 1.0).expect("room to the left");
+        let (mx, my) = mouth_in_surface(stage, panel, 1);
+        assert!(my > 0.0 && my < 300.0, "inside the panel's buffer: {my}");
+        assert!(mx < 0.0, "and beside it, where the cat is: {mx}");
+    }
+
+    #[test]
+    fn the_bubble_is_kept_only_by_the_cat() {
+        assert!(keeps_bubble(Skin::Cat, panel::State::Replies, true));
+        assert!(!keeps_bubble(Skin::Cat, panel::State::Replies, false));
+        assert!(!keeps_bubble(Skin::Cat, panel::State::Bar, true));
+        assert!(!keeps_bubble(Skin::Default, panel::State::Replies, true));
+    }
+
+    #[test]
+    fn the_stage_buffer_is_dropped_when_the_size_changes() {
+        assert!(buffer_fits((520, 520), 520));
+        assert!(!buffer_fits((260, 260), 520), "a resize needs a new buffer");
+        assert!(!buffer_fits((0, 0), 260), "and the first frame needs one");
+    }
 
     #[test]
     fn the_cat_answers_what_the_panel_is_doing() {
