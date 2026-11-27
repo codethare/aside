@@ -1,6 +1,7 @@
 //! aside - a keyboard-summoned AI chat panel for Wayland that leaves nothing
 //! behind. Behaviour is specified in `openspec/changes/add-aside-chat-panel/specs/`.
 
+mod cat;
 mod chat;
 mod clipboard;
 mod control;

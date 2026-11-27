@@ -129,7 +129,7 @@ fn the_mode_key_picks_the_skin() {
   - `pub fn hop(from: Stage, to: Stage, t: f32) -> Stage`
 - Consumes: `render::SHADOW`, `render::SEPARATION`.
 
-- [ ] **Step 1: Write the failing tests** — the landing identity and the four edges:
+- [x] **Step 1: Write the failing tests** — the landing identity and the four edges:
 
 ```rust
 #[test]
@@ -174,9 +174,9 @@ fn every_edge_is_rolled_and_each_peek_is_flush_with_its_edge() {
 }
 ```
 
-- [ ] **Step 2: Run them, watch them fail.** `cargo test cat::` → FAIL, no such module.
+- [x] **Step 2: Run them, watch them fail.** `cargo test cat::` → FAIL, no such module.
 
-- [ ] **Step 3: Implement** `src/cat.rs` with those items. `landing` computes
+- [x] **Step 3: Implement** `src/cat.rs` with those items. `landing` computes
   `room = panel.x + render::SHADOW as i32` (the output's left edge to the card's left
   edge), `size = stage_size(size, room as u32)?`, `x = panel.x + SHADOW - size`,
   `y = bar_centre - size / 2`. `peek` centres the square on the input card's axis and
@@ -185,9 +185,9 @@ fn every_edge_is_rolled_and_each_peek_is_flush_with_its_edge() {
   folds the seed and takes it modulo four. `seed()` mixes `SystemTime` nanoseconds with
   `std::process::id()` — no dependency.
 
-- [ ] **Step 4: Run.** `cargo test cat::` → PASS.
+- [x] **Step 4: Run.** `cargo test cat::` → PASS.
 
-- [ ] **Step 5: Commit.** `jj describe -m "feat: place the cat's stage beside the pad"` then `jj new`.
+- [x] **Step 5: Commit.** `jj describe -m "feat: place the cat's stage beside the pad"` then `jj new`.
 
 ---
 
