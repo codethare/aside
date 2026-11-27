@@ -436,6 +436,44 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
             .map_err(|e| format!("{}: {e}", path.display()))
     };
     write(path, &frame(None))?;
+    // The cat's poses, over the card's own tone: a PPM drops alpha, and a black cat on a
+    // transparent buffer would be invisible in it. This is how the art is looked at.
+    let stage = 260u32;
+    for (name, pose, since) in [
+        ("peek", cat::Pose::Peek, 380),
+        ("hop", cat::Pose::Hop, 200),
+        ("arm", cat::Pose::Arm, 150),
+        ("waiting", cat::Pose::Waiting, 0),
+        ("lick", cat::Pose::Lick, 220),
+        ("speak", cat::Pose::Speak, 100),
+        ("extend", cat::Pose::Extend, 130),
+    ] {
+        let mut buf = vec![0u8; (stage * stage * 4) as usize];
+        render::rect(
+            &mut buf,
+            stage,
+            stage,
+            0,
+            0,
+            stage,
+            stage,
+            render::BG_PROMPT,
+        );
+        cat::draw(
+            &mut buf,
+            stage,
+            stage,
+            1,
+            panel::bar_height(),
+            cat::Edge::Bottom,
+            pose,
+            Duration::from_millis(since),
+            true,
+        );
+        let out = std::path::PathBuf::from(format!("{}.cat.{name}.ppm", path.display()));
+        std::fs::write(&out, panel::to_ppm(&buf, stage, stage))
+            .map_err(|e| format!("{}: {e}", out.display()))?;
+    }
     // The leaving's two stages, so the break-up and the pull can be looked at without
     // a compositor. The question is wider than the bar, which is where the marquee
     // and the edge choice matter.

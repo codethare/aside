@@ -267,7 +267,7 @@ fn animation_off_is_the_landed_cat_in_the_first_frame() {
   card's height in logical px.
 - Consumes: `render::rect`, `render::bgra`, `render::FG_NORMAL`, `render::SEPARATION`.
 
-- [ ] **Step 1: Write the failing tests** — the three contacts and the window:
+- [x] **Step 1: Write the failing tests** — the three contacts and the window:
 
 ```rust
 #[test]
@@ -295,9 +295,9 @@ fn the_cat_never_paints_outside_its_window() {
 }
 ```
 
-- [ ] **Step 2: Run them, watch them fail.**
+- [x] **Step 2: Run them, watch them fail.**
 
-- [ ] **Step 3: Implement** the painter: `paw(w, h) -> (u32, u32)` and
+- [x] **Step 3: Implement** the painter: `paw(w, h) -> (u32, u32)` and
   `tail_start(w, h, s, bar_h) -> (u32, u32)` as pure functions (the tests pin them); the
   silhouette — body, head, two ears, two eyes, tail — as filled circles and per-row
   spans in `#101014`, with a rim light in `render::FG_NORMAL` along the upper-left edges;
@@ -305,14 +305,14 @@ fn the_cat_never_paints_outside_its_window() {
   in `Speak`; the paw's reach in `Extend`; and, when `bubble`, the tail as a filled
   triangle from `tail_start` toward the mouth.
 
-- [ ] **Step 4: Look at it.** In `preview`, write `cat.<pose>.ppm` for `Peek`, `Hop`,
+- [x] **Step 4: Look at it.** In `preview`, write `cat.<pose>.ppm` for `Peek`, `Hop`,
   `Arm`, `Waiting`, `Lick`, `Speak`. Run
   `cargo run -- --preview /tmp/aside.ppm` and open the six files; the cat must read as a
   cat, and each pose must differ.
 
-- [ ] **Step 5: Run.** `cargo test cat::` → PASS.
+- [x] **Step 5: Run.** `cargo test cat::` → PASS.
 
-- [ ] **Step 6: Commit.** `jj describe -m "feat: draw the cat"` then `jj new`.
+- [x] **Step 6: Commit.** `jj describe -m "feat: draw the cat"` then `jj new`.
 
 ---
 

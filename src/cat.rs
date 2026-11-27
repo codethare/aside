@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use crate::render;
+use crate::render::Bgra;
 
 /// Which screen edge the cat comes out of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -181,6 +182,370 @@ pub fn roll_edge(seed: u64) -> Edge {
     }
 }
 
+// ---- the drawing ----
+
+/// The cat's inks: a near-black body, a rim that is the panel's own ink dimmed, and the
+/// three things that are not the silhouette — the eyes, the mouth and the tongue.
+const BODY: Bgra = render::bgra(0x0e, 0x0e, 0x13, 0xff);
+const RIM: Bgra = render::bgra(0xa8, 0xa8, 0xc0, 0xc0);
+const EYE: Bgra = render::bgra(0xf4, 0xf4, 0xff, 0xff);
+const TONGUE: Bgra = render::bgra(0xd0, 0x6a, 0x84, 0xff);
+const MOUTH: Bgra = render::bgra(0x3a, 0x16, 0x20, 0xff);
+
+/// Where the paw meets the pad: the stage's right edge at its vertical centre, which is
+/// the input card's left rim at that card's vertical centre.
+pub fn paw(w: u32, h: u32) -> (u32, u32) {
+    (w, h / 2)
+}
+
+/// Where the bubble's tail starts: the reply card's bottom-left corner, on the stage's
+/// right edge, `bar_h / 2 + SEPARATION` above the stage's centre.
+pub fn tail_start(w: u32, h: u32, s: u32, bar_h: u32) -> (u32, u32) {
+    let gap = (bar_h as f32 / 2.0 + render::SEPARATION as f32) * s as f32;
+    (w, (h as f32 / 2.0 - gap).max(0.0).round() as u32)
+}
+
+/// The head's centre and radius, which the ears, the eyes, the mouth and the tongue are
+/// all placed from. One head, so a pose that moves it moves all of them.
+fn head(w: f32, h: f32) -> (f32, f32, f32) {
+    (0.63 * w, 0.40 * h, 0.155 * w)
+}
+
+/// The mouth: the head's front, low on its face, where a cat's is.
+fn mouth(w: f32, h: f32) -> (f32, f32) {
+    let (hx, hy, r) = head(w, h);
+    (hx + 0.66 * r, hy + 0.62 * r)
+}
+
+/// What one frame of the cat is doing, as numbers the shapes are placed from.
+#[derive(Debug, Clone, Copy)]
+struct Act {
+    /// How far the arm has reached: 0 at the shoulder, 1 on the pad.
+    reach: f32,
+    /// How far the head has dipped toward the arm, in stage heights.
+    dip: f32,
+    /// How open the mouth is.
+    mouth: f32,
+    /// How far the tongue is out.
+    tongue: f32,
+    /// Whether the tail is up, as it is mid-leap.
+    tail_up: bool,
+    /// The body's stretch along its length, 1 for the resting cat.
+    stretch: f32,
+}
+
+impl Act {
+    const REST: Act = Act {
+        reach: 1.0,
+        dip: 0.0,
+        mouth: 0.0,
+        tongue: 0.0,
+        tail_up: false,
+        stretch: 1.0,
+    };
+}
+
+/// The stage's buffer as a place to put filled shapes. Every shape carries its own edge
+/// coverage: a cat of hard-edged discs reads as a robot.
+struct Ink<'a> {
+    buf: &'a mut [u8],
+    w: u32,
+    h: u32,
+}
+
+impl Ink<'_> {
+    fn px(&mut self, x: i32, y: i32, c: Bgra, cov: f32) {
+        if x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 {
+            return;
+        }
+        let cov = (cov.clamp(0.0, 1.0) * 255.0).round() as u32;
+        if cov == 0 {
+            return;
+        }
+        let i = (y as u32 * self.w + x as u32) as usize * 4;
+        render::over_pm(&mut self.buf[i..][..4], render::premul(c), cov);
+    }
+
+    /// Every pixel of a shape's bounding box, with the coverage `f` gives it.
+    fn fill(&mut self, x0: f32, x1: f32, y0: f32, y1: f32, c: Bgra, f: impl Fn(f32, f32) -> f32) {
+        for y in (y0 - 1.0).floor() as i32..=(y1 + 1.0).ceil() as i32 {
+            for x in (x0 - 1.0).floor() as i32..=(x1 + 1.0).ceil() as i32 {
+                let cov = f(x as f32 + 0.5, y as f32 + 0.5);
+                self.px(x, y, c, cov);
+            }
+        }
+    }
+
+    fn disc(&mut self, cx: f32, cy: f32, r: f32, c: Bgra) {
+        self.fill(cx - r, cx + r, cy - r, cy + r, c, |x, y| {
+            r + 0.5 - ((x - cx).powi(2) + (y - cy).powi(2)).sqrt()
+        });
+    }
+
+    fn ellipse(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, c: Bgra) {
+        let (rx, ry) = (rx.max(0.5), ry.max(0.5));
+        let edge = (rx + ry) / 2.0;
+        self.fill(cx - rx, cx + rx, cy - ry, cy + ry, c, |x, y| {
+            let d = (((x - cx) / rx).powi(2) + ((y - cy) / ry).powi(2)).sqrt();
+            (1.0 - d) * edge + 0.5
+        });
+    }
+
+    /// A thick line with round ends: the arm, the tail, the tongue.
+    fn capsule(&mut self, a: (f32, f32), b: (f32, f32), r: f32, c: Bgra) {
+        let (vx, vy) = (b.0 - a.0, b.1 - a.1);
+        let len2 = (vx * vx + vy * vy).max(1e-6);
+        self.fill(
+            a.0.min(b.0) - r,
+            a.0.max(b.0) + r,
+            a.1.min(b.1) - r,
+            a.1.max(b.1) + r,
+            c,
+            |x, y| {
+                let t = (((x - a.0) * vx + (y - a.1) * vy) / len2).clamp(0.0, 1.0);
+                let (dx, dy) = (x - a.0 - vx * t, y - a.1 - vy * t);
+                r + 0.5 - (dx * dx + dy * dy).sqrt()
+            },
+        );
+    }
+
+    /// A filled triangle, four samples to the pixel: the ears and the bubble's tail.
+    fn triangle(&mut self, p: [(f32, f32); 3], c: Bgra) {
+        let x0 = p.iter().map(|q| q.0).fold(f32::MAX, f32::min);
+        let x1 = p.iter().map(|q| q.0).fold(f32::MIN, f32::max);
+        let y0 = p.iter().map(|q| q.1).fold(f32::MAX, f32::min);
+        let y1 = p.iter().map(|q| q.1).fold(f32::MIN, f32::max);
+        let inside = |x: f32, y: f32| {
+            let side =
+                |a: (f32, f32), b: (f32, f32)| (b.0 - a.0) * (y - a.1) - (b.1 - a.1) * (x - a.0);
+            let (s0, s1, s2) = (side(p[0], p[1]), side(p[1], p[2]), side(p[2], p[0]));
+            (s0 >= 0.0 && s1 >= 0.0 && s2 >= 0.0) || (s0 <= 0.0 && s1 <= 0.0 && s2 <= 0.0)
+        };
+        self.fill(x0, x1, y0, y1, c, |x, y| {
+            let mut hits = 0.0;
+            for (dx, dy) in [(-0.25, -0.25), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25)] {
+                if inside(x + dx, y + dy) {
+                    hits += 0.25;
+                }
+            }
+            hits
+        });
+    }
+}
+
+/// One frame of the cat, in stage-local buffer px. `s` is the buffer scale, `bar_h` the
+/// input card's height in logical px, `edge` the edge the cat came out of, and `since`
+/// the time since its pose began.
+#[allow(clippy::too_many_arguments)] // a window, a pose and the two numbers it is placed by
+pub fn draw(
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    s: u32,
+    bar_h: u32,
+    edge: Edge,
+    pose: Pose,
+    since: Duration,
+    bubble: bool,
+) {
+    let (fw, fh) = (w as f32, h as f32);
+    let t = since.as_millis() as f32;
+    let mut ink = Ink { buf, w, h };
+    // The bubble's tail goes under the cat: the head covers its point, so it reads as
+    // coming out of the mouth rather than stopping at it.
+    if bubble {
+        bubble_tail(&mut ink, fw, fh, s, bar_h);
+    }
+    let act = match pose {
+        Pose::Peek => {
+            peek_pose(&mut ink, fw, fh, edge, t / PEEK_MS as f32);
+            return;
+        }
+        Pose::Hop => Act {
+            reach: 0.0,
+            tail_up: true,
+            stretch: 1.08,
+            dip: -0.02,
+            ..Act::REST
+        },
+        Pose::Arm => Act {
+            reach: ease_out(t / ARM_MS as f32),
+            ..Act::REST
+        },
+        Pose::Waiting => Act::REST,
+        Pose::Lick => {
+            // Two flicks a second, the tongue on the paw it just extended.
+            let phase = (t / 450.0) % 1.0;
+            Act {
+                dip: 0.03 * (phase * std::f32::consts::PI).sin().abs(),
+                tongue: (phase * std::f32::consts::PI).sin().max(0.0),
+                ..Act::REST
+            }
+        }
+        Pose::Speak => Act {
+            mouth: (t / SPEAK_MS as f32 * std::f32::consts::PI).sin().max(0.0),
+            ..Act::REST
+        },
+        Pose::Extend => Act {
+            reach: 1.0 - 0.35 * (t / EXTEND_MS as f32 * std::f32::consts::PI).sin(),
+            ..Act::REST
+        },
+    };
+    cat(&mut ink, fw, fh, act);
+}
+
+/// The cat in one act: the rim pass first, offset up and left, then the body over it, so
+/// the rim survives as the one-pixel light along the edges a light would catch.
+fn cat(ink: &mut Ink, w: f32, h: f32, act: Act) {
+    for (offset, colour) in [((-1.1, -1.1), RIM), ((0.0, 0.0), BODY)] {
+        silhouette(ink, w, h, act, offset, colour);
+    }
+    details(ink, w, h, act);
+}
+
+fn silhouette(ink: &mut Ink, w: f32, h: f32, act: Act, o: (f32, f32), c: Bgra) {
+    let (ox, oy) = o;
+    // The body: a loaf, wider than tall, with the head sitting on its front.
+    ink.ellipse(
+        0.36 * w + ox,
+        0.68 * h + oy,
+        0.28 * w * act.stretch,
+        0.205 * h,
+        c,
+    );
+    let (hx, hy, r) = head(w, h);
+    let hy = hy + act.dip * h;
+    ink.disc(hx + ox, hy + oy, r, c);
+    // The ears: two triangles on the crown, tilted out.
+    ink.triangle(
+        [
+            (hx - 0.92 * r + ox, hy - 0.52 * r + oy),
+            (hx - 0.66 * r + ox, hy - 1.34 * r + oy),
+            (hx - 0.24 * r + ox, hy - 0.70 * r + oy),
+        ],
+        c,
+    );
+    ink.triangle(
+        [
+            (hx + 0.24 * r + ox, hy - 0.70 * r + oy),
+            (hx + 0.66 * r + ox, hy - 1.34 * r + oy),
+            (hx + 0.92 * r + ox, hy - 0.52 * r + oy),
+        ],
+        c,
+    );
+    // The tail: out of the back, down and round, or straight up mid-leap.
+    let root = (0.16 * w + ox, 0.72 * h + oy);
+    if act.tail_up {
+        ink.capsule(root, (0.10 * w + ox, 0.30 * h + oy), 0.040 * w, c);
+    } else {
+        let bend = (0.04 * w + ox, 0.62 * h + oy);
+        ink.capsule(root, bend, 0.042 * w, c);
+        ink.capsule(bend, (0.12 * w + ox, 0.48 * h + oy), 0.036 * w, c);
+    }
+    // The arm: shoulder to wherever the reach has got to, the paw ending on the pad.
+    let (px, py) = paw(w as u32, h as u32);
+    let shoulder = (0.54 * w + ox, 0.74 * h + oy);
+    let tip = (
+        shoulder.0 + (px as f32 - 0.05 * w - shoulder.0) * act.reach,
+        shoulder.1 + (py as f32 - shoulder.1) * act.reach,
+    );
+    ink.capsule(shoulder, tip, 0.032 * w, c);
+    ink.disc(tip.0, tip.1, 0.048 * w, c);
+}
+
+fn details(ink: &mut Ink, w: f32, h: f32, act: Act) {
+    let (hx, hy, r) = head(w, h);
+    let hy = hy + act.dip * h;
+    // The eyes: two bright dots, which is the whole face a silhouette can carry.
+    ink.disc(hx - 0.42 * r, hy - 0.08 * r, 0.115 * r, EYE);
+    ink.disc(hx + 0.42 * r, hy - 0.08 * r, 0.115 * r, EYE);
+    let (mx, my) = mouth(w, h);
+    let my = my + act.dip * h;
+    if act.mouth > 0.01 {
+        ink.ellipse(
+            mx,
+            my + 0.18 * r,
+            0.22 * r + 0.18 * r * act.mouth,
+            0.07 * r + 0.30 * r * act.mouth,
+            MOUTH,
+        );
+        // The tongue inside the open mouth, which is what makes it a mouth and not a hole.
+        ink.ellipse(
+            mx,
+            my + 0.18 * r + 0.22 * r * act.mouth,
+            0.14 * r * act.mouth,
+            0.08 * r * act.mouth,
+            TONGUE,
+        );
+    }
+    if act.tongue > 0.01 {
+        // Down onto the arm it just extended, which passes under the head.
+        let tip = (mx + 0.12 * r, my + (0.30 + 0.60 * act.tongue) * r);
+        ink.capsule((mx, my), tip, 0.085 * r, TONGUE);
+    }
+}
+
+/// The head over the edge, and one paw with it: the cat has not arrived yet.
+fn peek_pose(ink: &mut Ink, w: f32, h: f32, edge: Edge, t: f32) {
+    let rise = ease_out(t.clamp(0.0, 1.0));
+    let (hx, _, r) = head(w, h);
+    let out = 0.20 * w;
+    let (from, to) = match edge {
+        Edge::Bottom => ((hx, h + r + out), (hx, 0.72 * h)),
+        Edge::Top => ((hx, -r - out), (hx, 0.28 * h)),
+        Edge::Left => ((-r - out, 0.5 * h), (0.30 * w, 0.5 * h)),
+        Edge::Right => ((w + r + out, 0.5 * h), (0.70 * w, 0.5 * h)),
+    };
+    let (cx, cy) = (
+        from.0 + (to.0 - from.0) * rise,
+        from.1 + (to.1 - from.1) * rise,
+    );
+    for (offset, colour) in [((-1.1, -1.1), RIM), ((0.0, 0.0), BODY)] {
+        let (ox, oy) = offset;
+        ink.disc(cx + ox, cy + oy, r, colour);
+        ink.triangle(
+            [
+                (cx - 0.95 * r + ox, cy - 0.50 * r + oy),
+                (cx - 0.62 * r + ox, cy - 1.55 * r + oy),
+                (cx - 0.18 * r + ox, cy - 0.66 * r + oy),
+            ],
+            colour,
+        );
+        ink.triangle(
+            [
+                (cx + 0.18 * r + ox, cy - 0.66 * r + oy),
+                (cx + 0.62 * r + ox, cy - 1.55 * r + oy),
+                (cx + 0.95 * r + ox, cy - 0.50 * r + oy),
+            ],
+            colour,
+        );
+        // The paw on the edge, reaching over it.
+        let (ax, ay) = match edge {
+            Edge::Bottom => (cx, cy + 0.85 * r),
+            Edge::Top => (cx, cy - 0.85 * r),
+            Edge::Left => (cx - 0.85 * r, cy),
+            Edge::Right => (cx + 0.85 * r, cy),
+        };
+        ink.disc(ax + ox, ay + oy, 0.30 * r, colour);
+    }
+    ink.disc(cx - 0.42 * r, cy - 0.08 * r, 0.115 * r, EYE);
+    ink.disc(cx + 0.42 * r, cy - 0.08 * r, 0.115 * r, EYE);
+}
+
+/// The bubble's tail: the card's corner to the mouth, in the card's own fill.
+fn bubble_tail(ink: &mut Ink, w: f32, h: f32, s: u32, bar_h: u32) {
+    let (cx, cy) = tail_start(w as u32, h as u32, s, bar_h);
+    let (cx, cy) = (cx as f32, cy as f32);
+    let (mx, my) = mouth(w, h);
+    ink.triangle([(cx, cy), (cx, cy + 0.10 * w), (mx, my)], render::BG_PROMPT);
+}
+
+/// A shape's progress as the eye expects it: fast out of the gate, settling at the end.
+fn ease_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t) * (1.0 - t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +664,78 @@ mod tests {
         assert_eq!(
             pose(Duration::ZERO, Mood::Idle, Duration::ZERO, None, false),
             Pose::Waiting
+        );
+    }
+
+    #[test]
+    fn the_paw_and_the_bubble_tail_land_on_the_contacts() {
+        let (w, h, bar_h) = (260u32, 260u32, 30u32);
+        // The identity holds at every buffer scale: the seam is a point, not a range.
+        for s in [1u32, 2, 3] {
+            assert_eq!(paw(w * s, h * s), (w * s, h * s / 2));
+            let corner = tail_start(w * s, h * s, s, bar_h);
+            assert_eq!(corner.0, w * s);
+            assert!(corner.1 > 0 && corner.1 < h * s / 2, "{corner:?} at s {s}");
+        }
+    }
+
+    #[test]
+    fn the_cat_never_paints_outside_its_window() {
+        let (w, h) = (260u32, 260u32);
+        for pose in [
+            Pose::Peek,
+            Pose::Hop,
+            Pose::Arm,
+            Pose::Waiting,
+            Pose::Lick,
+            Pose::Speak,
+            Pose::Extend,
+        ] {
+            let mut buf = vec![0u8; (w * h * 4) as usize];
+            draw(
+                &mut buf,
+                w,
+                h,
+                1,
+                30,
+                Edge::Bottom,
+                pose,
+                Duration::from_millis(100),
+                false,
+            );
+            // The window's own corners are outside any pose's reach: the buffer is the
+            // clip, so a pose that painted past the edge would land here.
+            for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1)] {
+                let px = &buf[((y * w + x) * 4) as usize..][..4];
+                assert_eq!(px[3], 0, "{pose:?} transparent at {x},{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_pose_paints_something_of_its_own() {
+        let (w, h) = (260u32, 260u32);
+        let paint = |pose, since| {
+            let mut buf = vec![0u8; (w * h * 4) as usize];
+            draw(&mut buf, w, h, 1, 30, Edge::Bottom, pose, since, false);
+            buf
+        };
+        let lit = |buf: &[u8]| buf.as_chunks::<4>().0.iter().filter(|p| p[3] > 8).count();
+        let ms = Duration::from_millis;
+        let waiting = paint(Pose::Waiting, ms(0));
+        assert!(lit(&waiting) > 2000, "the cat is drawn: {}", lit(&waiting));
+        // The peek is a head over an edge, so it covers less of the window than the cat.
+        assert!(lit(&paint(Pose::Peek, ms(380))) < lit(&waiting));
+        // The lick's tongue is a pixel class of its own: the frames differ.
+        assert_ne!(
+            paint(Pose::Lick, ms(0)),
+            paint(Pose::Lick, ms(220)),
+            "the tongue moves"
+        );
+        assert_ne!(
+            paint(Pose::Speak, ms(0)),
+            paint(Pose::Speak, ms(100)),
+            "the mouth opens"
         );
     }
 
