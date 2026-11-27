@@ -213,16 +213,18 @@ pub fn roll_edge(seed: u64) -> Edge {
 
 // ---- the drawing ----
 
-/// Notion's dark-mode drawing: a warm off-white marker line, flat, one orange accent, and
-/// a thin dark underlay so a light desktop does not swallow the line.
-const INK: Bgra = render::bgra(0xe9, 0xe9, 0xe7, 0xff);
-const SHADOW: Bgra = render::bgra(0x19, 0x19, 0x19, 0x4d);
-const TONGUE: Bgra = render::bgra(0xff, 0xa3, 0x44, 0xff);
+/// The mascot's materials: flat cream paper inside a warm near-black line, with one
+/// coral accent. No gradient, no cast shadow, no underlay.
+const INK: Bgra = render::bgra(0x2b, 0x25, 0x20, 0xff);
+const PAPER: Bgra = render::bgra(0xf3, 0xec, 0xdf, 0xff);
+const EYE: Bgra = render::bgra(0xff, 0xfd, 0xf8, 0xff);
+const ACCENT: Bgra = render::bgra(0xef, 0x83, 0x6d, 0xff);
+const BLUSH: Bgra = render::bgra(0xef, 0x83, 0x6d, 0x55);
 
-/// The line's weight: a Notion marker, one fraction of the stage at every size and buffer
-/// scale.
-fn weight(w: f32) -> f32 {
-    (w * 0.012).max(1.5)
+/// The three line roles, as fractions of the stage's side: silhouette, part, detail.
+fn weights(w: f32) -> (f32, f32, f32) {
+    let role = |k: f32, floor: f32| (w * k).max(floor);
+    (role(0.0115, 1.6), role(0.0080, 1.2), role(0.0055, 0.9))
 }
 
 /// Where the paw meets the pad: the stage's right edge at its vertical centre, which is
@@ -281,6 +283,8 @@ struct Act {
     ear: f32,
     /// 1 for closed eyes.
     blink: f32,
+    /// The pupils' sideways look, in head radii: positive toward the panel.
+    gaze: f32,
 }
 
 impl Act {
@@ -295,6 +299,7 @@ impl Act {
         tail_sway: 0.0,
         ear: 0.0,
         blink: 0.0,
+        gaze: 0.04,
     };
 }
 
@@ -440,6 +445,38 @@ impl Ink<'_> {
             hits
         });
     }
+
+    /// A closed polygon, scanline-filled: the body. The ink outline covers the hard edge.
+    fn polygon(&mut self, p: &[(f32, f32)], c: Bgra) {
+        let (mut y0, mut y1) = (f32::MAX, f32::MIN);
+        for q in p {
+            y0 = y0.min(q.1);
+            y1 = y1.max(q.1);
+        }
+        let mut xs = [0.0f32; 64];
+        let first = (y0.ceil().max(0.0)) as i32;
+        let last = (y1.floor().min(self.h as f32 - 1.0)) as i32;
+        for y in first..=last {
+            let yc = y as f32 + 0.5;
+            let mut n = 0;
+            for i in 0..p.len() {
+                let a = p[i];
+                let b = p[(i + 1) % p.len()];
+                if (a.1 <= yc) != (b.1 <= yc) && n < xs.len() {
+                    xs[n] = a.0 + (yc - a.1) * (b.0 - a.0) / (b.1 - a.1);
+                    n += 1;
+                }
+            }
+            xs[..n].sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            for pair in xs[..n].as_chunks::<2>().0 {
+                let x0 = (pair[0].ceil().max(0.0)) as i32;
+                let x1 = (pair[1].floor().min(self.w as f32 - 1.0)) as i32;
+                for x in x0..=x1 {
+                    self.px(x, y, c, 1.0);
+                }
+            }
+        }
+    }
 }
 
 /// One frame of the cat, in stage-local buffer px. `s` is the buffer scale, `bar_h` the
@@ -480,6 +517,7 @@ pub fn draw(
                 tilt: 0.06 + 0.05 * arc,
                 tail_sway: 0.005 * (2.2 * std::f32::consts::PI * t).sin(),
                 ear: 0.05 * (3.0 * std::f32::consts::PI * t).sin(),
+                gaze: 0.02,
                 ..Act::REST
             }
         }
@@ -490,6 +528,7 @@ pub fn draw(
                 tilt: 0.10 + 0.04 * (std::f32::consts::PI * t).sin(),
                 tail_sway: 0.006 * (2.0 * std::f32::consts::PI * t).sin(),
                 ear: 0.06 * (2.5 * std::f32::consts::PI * t).sin(),
+                gaze: 0.08,
                 ..Act::REST
             }
         }
@@ -513,6 +552,7 @@ pub fn draw(
                 tongue_sway: (t * 11.0).sin() * tongue,
                 tail_sway: 0.006 * (t * 1.7).sin(),
                 ear: 0.06 * (t * 1.3).sin().max(0.0),
+                gaze: -0.02 - 0.10 * tongue,
                 ..Act::REST
             }
         }
@@ -529,6 +569,7 @@ pub fn draw(
                 dip: -0.008 * (2.0 * std::f32::consts::PI * t).sin(),
                 tilt: 0.10 + 0.02 * (2.0 * std::f32::consts::PI * t).sin(),
                 tail_sway: 0.005 * (2.0 * std::f32::consts::PI * t).sin(),
+                gaze: 0.05,
                 ..Act::REST
             }
         }
@@ -540,6 +581,7 @@ pub fn draw(
                 tilt: 0.10 + 0.04 * (std::f32::consts::PI * t).sin(),
                 tail_sway: 0.006 * (2.0 * std::f32::consts::PI * t).sin(),
                 ear: 0.05 * (2.0 * std::f32::consts::PI * t).sin(),
+                gaze: 0.08,
                 ..Act::REST
             }
         }
@@ -547,14 +589,162 @@ pub fn draw(
     cat(&mut ink, fw, fh, act);
 }
 
-/// The cat in one act: one thin dark underlay for a light desktop, then Notion's off-white
-/// marker line over it.
+/// The cat in one act, back to front: tail, arm, body, ears, head, paw, face. Every fill is
+/// flat paper; every edge is one of the three ink weights.
 fn cat(ink: &mut Ink, w: f32, h: f32, act: Act) {
-    let line = weight(w);
-    let shadow = (0.004 * w, 0.004 * w);
-    outline(ink, w, h, act, shadow, line, SHADOW);
-    outline(ink, w, h, act, (0.0, 0.0), line, INK);
-    details(ink, w, h, act, line);
+    let (outline, part, detail) = weights(w);
+    let dip = act.dip;
+    let (hx, hy, r) = head(w, h);
+    let hy = hy + dip * h;
+    let (mx, my) = mouth(w, h);
+    let my = my + dip * h;
+
+    // The tail behind the body: a paper stroke inside its ink border.
+    let root = (0.16 * w, 0.74 * h);
+    let sway = act.tail_sway * w;
+    let tail_width = 0.045 * w;
+    if act.tail_up {
+        let p = [
+            root,
+            (0.13 * w + sway * 0.4, 0.58 * h),
+            (0.11 * w + sway * 0.8, 0.40 * h),
+            (0.16 * w + sway * 1.2, 0.29 * h),
+        ];
+        stroke_pair(ink, &p, tail_width, outline);
+    } else {
+        let p = [
+            root,
+            (0.055 * w + sway * 0.3, 0.68 * h),
+            (0.035 * w + sway * 0.6, 0.55 * h),
+            (0.08 * w + sway, 0.44 * h),
+            (0.16 * w + sway * 1.3, 0.45 * h),
+            (0.17 * w + sway * 1.5, 0.55 * h),
+            (0.10 * w + sway * 1.6, 0.54 * h),
+        ];
+        stroke_pair(ink, &p, tail_width, outline);
+    }
+
+    // The front leg, behind the body so the body fill hides the shoulder.
+    let (rx, ry) = (0.052 * w, 0.040 * w);
+    let shoulder = (0.64 * w, 0.76 * h);
+    let rest = (w - rx, 0.5 * h);
+    let bend = (0.79 * w, 0.64 * h);
+    let at = |q: (f32, f32)| {
+        (
+            shoulder.0 + (q.0 - shoulder.0) * act.reach,
+            shoulder.1 + (q.1 - shoulder.1) * act.reach,
+        )
+    };
+    let tip = at(rest);
+    if act.reach > 0.01 {
+        let wrist = (tip.0 - rx, tip.1);
+        stroke_pair(ink, &[shoulder, at(bend), wrist], 0.05 * w, outline);
+    }
+
+    // The body: one filled contour closed under the head, then its open ink outline.
+    let body = body_points(w, h, dip);
+    let mut filled = [(0.0, 0.0); 128];
+    let n = sampled(&body, &mut filled);
+    ink.polygon(&filled[..n], PAPER);
+    ink.curve(&body, outline, INK);
+    // The sitting legs and the grounded paw; tucked while the cat is mid-leap.
+    if !act.tail_up {
+        // The grounded front leg, from the chest to its paw.
+        ink.curve(
+            &[
+                (0.66 * w, 0.70 * h),
+                (0.63 * w, 0.80 * h),
+                (0.60 * w, 0.885 * h),
+            ],
+            detail,
+            INK,
+        );
+        // The folded hind leg, one detail line inside the body.
+        ink.curve(
+            &[
+                (0.24 * w, 0.78 * h),
+                (0.30 * w, 0.83 * h),
+                (0.33 * w, 0.89 * h),
+            ],
+            detail,
+            INK,
+        );
+        // The other front paw, on the ground.
+        let (gx, gy) = (0.60 * w, 0.885 * h);
+        let (grx, gry) = (0.055 * w, 0.030 * h);
+        ink.ellipse(gx, gy, grx, gry, PAPER);
+        ink.ellipse_ring(gx, gy, grx, gry, outline, INK);
+        for side in [-1.0, 1.0] {
+            let x = gx + side * 0.22 * grx;
+            ink.capsule(
+                (x, gy + 0.10 * gry),
+                (x, gy + 0.68 * gry),
+                detail * 0.5,
+                INK,
+            );
+        }
+    }
+
+    // The ears behind the head; the head fill hides their bases.
+    ear(ink, (hx, hy), r, act.tilt, (205.0, 225.0, 245.0), part);
+    ear(
+        ink,
+        (hx, hy),
+        r,
+        act.tilt + act.ear,
+        (295.0, 315.0, 335.0),
+        part,
+    );
+
+    // The head in front of the body and the ears.
+    ink.disc(hx, hy, r, PAPER);
+    ink.ring(hx, hy, r, outline, INK);
+
+    // The mitten paw in front, its right edge at the stage's edge.
+    if act.reach > 0.01 {
+        ink.ellipse(tip.0, tip.1, rx, ry, PAPER);
+        ink.ellipse_ring(tip.0, tip.1, rx, ry, outline, INK);
+        for side in [-1.0, 1.0] {
+            let x = tip.0 + side * 0.22 * rx;
+            ink.capsule(
+                (x, tip.1 - 0.90 * ry),
+                (x, tip.1 - 0.52 * ry),
+                detail * 0.5,
+                INK,
+            );
+        }
+    }
+
+    // The face, and the mouth it answers from.
+    face(
+        ink,
+        (hx, hy),
+        r,
+        act.tilt,
+        act.blink,
+        act.gaze,
+        part,
+        detail,
+        (mx, my),
+    );
+    if act.mouth > 0.01 {
+        let (cx, cy) = spin((mx - 0.12 * r, my + 0.02 * r), (mx, my), act.tilt);
+        let (ex, ey) = (
+            0.09 * r * (0.5 + act.mouth),
+            0.05 * r + 0.13 * r * act.mouth,
+        );
+        ink.ellipse(cx, cy, ex, ey, INK);
+        ink.ellipse(cx, cy + 0.04 * r * act.mouth, ex * 0.55, ey * 0.45, ACCENT);
+        ink.ellipse_ring(cx, cy, ex, ey, part * 0.6, INK);
+    }
+    if act.tongue > 0.01 {
+        let tongue = (
+            mx + (0.06 + 0.12 * act.tongue + 0.05 * act.tongue_sway) * r,
+            my + (0.20 + 0.36 * act.tongue) * r,
+        );
+        ink.capsule((mx, my), tongue, 0.06 * r + detail, INK);
+        ink.capsule((mx, my), tongue, 0.06 * r, ACCENT);
+    }
 }
 
 /// Rotate `q` about `pivot`: the ears about the head, the face about the mouth.
@@ -589,185 +779,149 @@ fn catmull(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), t: f3
     (at(p0.0, p1.0, p2.0, p3.0), at(p0.1, p1.1, p2.1, p3.1))
 }
 
-/// The cat's unfilled contours, drawn once with whatever ink and offset the caller wants.
-fn outline(ink: &mut Ink, w: f32, h: f32, act: Act, o: (f32, f32), line: f32, c: Bgra) {
-    let (ox, oy) = o;
-    let p = |q: (f32, f32)| (q.0 + ox, q.1 + oy);
-    let dip = act.dip;
-    // The body: taller on the chest than the rump, one open contour ending on the head's
-    // ring so no body line runs inside the head.
-    ink.curve(
-        &[
-            p(on_head(w, h, dip, 0.0, 155.0, 1.0)),
-            p((0.44 * w, 0.43 * h)),
-            p((0.31 * w, 0.47 * h)),
-            p((0.21 * w, 0.58 * h)),
-            p((0.16 * w, 0.74 * h)),
-            p((0.19 * w, 0.86 * h)),
-            p((0.35 * w, 0.91 * h)),
-            p((0.54 * w, 0.90 * h)),
-            p((0.66 * w, 0.82 * h)),
-            p((0.68 * w, 0.68 * h)),
-            p(on_head(w, h, dip, 0.0, 50.0, 1.0)),
-        ],
-        line,
-        c,
-    );
-    // The tail: out of the rump, a curl with a loop at the tip; straight up mid-leap.
-    let root = p((0.16 * w, 0.74 * h));
-    let sway = act.tail_sway * w;
-    if act.tail_up {
-        ink.curve(
-            &[
-                root,
-                p((0.13 * w + sway * 0.4, 0.58 * h)),
-                p((0.11 * w + sway * 0.8, 0.40 * h)),
-                p((0.16 * w + sway * 1.2, 0.29 * h)),
-            ],
-            line,
-            c,
-        );
-    } else {
-        ink.curve(
-            &[
-                root,
-                p((0.055 * w + sway * 0.3, 0.68 * h)),
-                p((0.035 * w + sway * 0.6, 0.55 * h)),
-                p((0.08 * w + sway, 0.44 * h)),
-                p((0.16 * w + sway * 1.3, 0.45 * h)),
-                p((0.17 * w + sway * 1.5, 0.55 * h)),
-                p((0.10 * w + sway * 1.6, 0.54 * h)),
-            ],
-            line,
-            c,
-        );
-    }
-    // The head ring, and the ears as open V's standing on it, turned with the head.
-    let (hx, hy, r) = head(w, h);
-    let hy = hy + dip * h;
-    ink.ring(hx + ox, hy + oy, r, line, c);
-    for (i, (base1, peak, base2)) in [(205.0, 225.0, 245.0), (295.0, 315.0, 335.0)]
-        .into_iter()
-        .enumerate()
-    {
-        let tilt = act.tilt + if i == 1 { act.ear } else { 0.0 };
-        let a = p(on_head(w, h, dip, tilt, base1, 1.0));
-        let b = p(on_head(w, h, dip, tilt, peak, 1.5));
-        let d = p(on_head(w, h, dip, tilt, base2, 1.0));
-        ink.capsule(a, b, line / 2.0, c);
-        ink.capsule(b, d, line / 2.0, c);
-    }
-    // The front leg and its mitten paw: the mitten's right edge is the stage's edge.
-    if act.reach > 0.01 {
-        let shoulder = (0.64 * w, 0.76 * h);
-        let (rx, ry) = (0.052 * w, 0.040 * w);
-        let centre = (w - rx, 0.5 * h);
-        let bend = (0.79 * w, 0.64 * h);
-        let at = |q: (f32, f32)| {
-            (
-                shoulder.0 + (q.0 - shoulder.0) * act.reach,
-                shoulder.1 + (q.1 - shoulder.1) * act.reach,
-            )
-        };
-        let tip = at(centre);
-        // The leg meets the mitten's near edge; a line into the paw reads as a lollipop.
-        let wrist = (tip.0 - rx, tip.1);
-        ink.curve(&[p(shoulder), p(at(bend)), p(wrist)], line, c);
-        ink.ellipse_ring(tip.0 + ox, tip.1 + oy, rx, ry, line, c);
-        // Two toe strokes cross the mitten's top: a paw, not an egg.
-        for side in [-1.0, 1.0] {
-            let x = tip.0 + side * 0.22 * rx;
-            ink.capsule(
-                (x + ox, tip.1 - 0.90 * ry + oy),
-                (x + ox, tip.1 - 0.52 * ry + oy),
-                line * 0.5,
-                c,
-            );
+/// Sample a Catmull-Rom contour into `out` without allocating. The caller supplies the
+/// fixed array: the body is filled from this polyline and the ink line is stroked over it.
+fn sampled(points: &[(f32, f32)], out: &mut [(f32, f32)]) -> usize {
+    let mut n = 0;
+    for i in 0..points.len().saturating_sub(1) {
+        let p0 = points[i.saturating_sub(1)];
+        let p1 = points[i];
+        let p2 = points[i + 1];
+        let p3 = points.get(i + 2).copied().unwrap_or(p2);
+        for k in 0..10 {
+            if n < out.len() {
+                out[n] = catmull(p0, p1, p2, p3, k as f32 / 10.0);
+                n += 1;
+            }
         }
     }
+    if let Some(last) = points.last()
+        && n < out.len()
+    {
+        out[n] = *last;
+        n += 1;
+    }
+    n
 }
 
-fn details(ink: &mut Ink, w: f32, h: f32, act: Act, line: f32) {
-    let (hx, hy, r) = head(w, h);
-    let hy = hy + act.dip * h;
-    let (mx, my) = mouth(w, h);
-    let my = my + act.dip * h;
-    face(ink, (hx, hy), r, act.tilt, act.blink, line, (mx, my));
-    if act.mouth > 0.01 {
-        // The open mouth is the accent itself: a flat orange oval with the line round it.
-        let (cx, cy) = spin((mx - 0.06 * r, my + 0.02 * r), (mx, my), act.tilt);
-        let (rx, ry) = (
-            0.10 * r * (0.5 + act.mouth),
-            0.05 * r + 0.16 * r * act.mouth,
-        );
-        ink.ellipse(cx, cy, rx, ry, TONGUE);
-        ink.ellipse_ring(cx, cy, rx, ry, line * 0.5, INK);
-    }
-    if act.tongue > 0.01 {
-        // Down toward the arm it just extended, which passes under the head.
-        let tip = (
-            mx + (0.08 + 0.14 * act.tongue + 0.05 * act.tongue_sway) * r,
-            my + (0.22 + 0.48 * act.tongue) * r,
-        );
-        ink.capsule((mx, my), tip, 0.045 * r, TONGUE);
-    }
+/// The body's contour: taller on the chest than the rump, open where the head's fill
+/// closes it.
+fn body_points(w: f32, h: f32, dip: f32) -> [(f32, f32); 11] {
+    [
+        on_head(w, h, dip, 0.0, 155.0, 1.0),
+        (0.44 * w, 0.43 * h),
+        (0.31 * w, 0.47 * h),
+        (0.21 * w, 0.58 * h),
+        (0.16 * w, 0.74 * h),
+        (0.19 * w, 0.86 * h),
+        (0.35 * w, 0.91 * h),
+        (0.54 * w, 0.90 * h),
+        (0.66 * w, 0.82 * h),
+        (0.68 * w, 0.68 * h),
+        on_head(w, h, dip, 0.0, 50.0, 1.0),
+    ]
 }
 
-/// The face, turned about the mouth: the eyes, nose, smile and whiskers all rotate, and
-/// the smile still ends on the point the bubble's tail uses.
+/// One paper stroke inside one ink border: the tail and the arm.
+fn stroke_pair(ink: &mut Ink, p: &[(f32, f32)], width: f32, outline: f32) {
+    ink.curve(p, width + 2.0 * outline, INK);
+    ink.curve(p, width, PAPER);
+}
+
+/// A flat paper ear with a coral inner and two ink edges. The head fill hides its base.
+fn ear(ink: &mut Ink, centre: (f32, f32), r: f32, tilt: f32, angles: (f32, f32, f32), part: f32) {
+    let at = |deg: f32, reach: f32| {
+        let a = deg.to_radians();
+        spin(
+            (
+                centre.0 + a.cos() * r * reach,
+                centre.1 + a.sin() * r * reach,
+            ),
+            centre,
+            tilt,
+        )
+    };
+    let a = at(angles.0, 1.0);
+    let b = at(angles.1, 1.5);
+    let d = at(angles.2, 1.0);
+    ink.triangle([a, b, d], PAPER);
+    let c = ((a.0 + b.0 + d.0) / 3.0, (a.1 + b.1 + d.1) / 3.0);
+    let inner = |q: (f32, f32)| (c.0 + (q.0 - c.0) * 0.52, c.1 + (q.1 - c.1) * 0.52);
+    ink.triangle([inner(a), inner(b), inner(d)], ACCENT);
+    ink.capsule(a, b, part / 2.0, INK);
+    ink.capsule(b, d, part / 2.0, INK);
+}
+
+/// The face, turned about the mouth: big eye whites, pupils that look with the pose, a
+/// coral nose and blush, an ink smile that ends at the mouth, and whiskers.
+#[allow(clippy::too_many_arguments)] // the head, its three line roles and the mouth point
 fn face(
     ink: &mut Ink,
     (hx, hy): (f32, f32),
     r: f32,
     tilt: f32,
     blink: f32,
-    line: f32,
+    gaze: f32,
+    part: f32,
+    detail: f32,
     mouth: (f32, f32),
 ) {
     let f = |q: (f32, f32)| spin(q, mouth, tilt);
-    // The eyes: two dots, or two short strokes while the cat blinks.
     for dx in [-0.38, 0.38] {
+        let (ex, ey) = (hx + dx * r, hy - 0.12 * r);
         if blink > 0.5 {
-            let a = f((hx + (dx - 0.10) * r, hy - 0.12 * r));
-            let b = f((hx + (dx + 0.10) * r, hy - 0.12 * r));
-            ink.capsule(a, b, line * 0.55, INK);
+            let a = f((ex - 0.22 * r, ey));
+            let b = f((ex, ey + 0.10 * r));
+            let d = f((ex + 0.22 * r, ey));
+            ink.curve(&[a, b, d], part, INK);
         } else {
-            let eye = f((hx + dx * r, hy - 0.12 * r));
-            ink.disc(eye.0, eye.1, 0.09 * r, INK);
+            let c = f((ex, ey));
+            ink.ellipse(c.0, c.1, 0.22 * r, 0.27 * r, EYE);
+            ink.ellipse_ring(c.0, c.1, 0.22 * r, 0.27 * r, part, INK);
+            let (px, py) = (c.0 + gaze * r, c.1 + 0.02 * r);
+            ink.ellipse(px, py, 0.08 * r, 0.16 * r, INK);
+            ink.disc(px - 0.025 * r, py - 0.06 * r, 0.03 * r, EYE);
         }
     }
-    // The nose, a small flat triangle.
-    ink.triangle(
-        [
-            f((hx + 0.38 * r, hy + 0.17 * r)),
-            f((hx + 0.54 * r, hy + 0.17 * r)),
-            f((hx + 0.46 * r, hy + 0.31 * r)),
-        ],
-        INK,
-    );
+    // The blush sits behind the nose and the whiskers.
+    for dx in [-0.56, 0.56] {
+        let b = f((hx + dx * r, hy + 0.42 * r));
+        ink.ellipse(b.0, b.1, 0.15 * r, 0.08 * r, BLUSH);
+    }
+    // The nose, a small coral triangle with a hairline ink edge.
+    let nose = [
+        f((hx + 0.36 * r, hy + 0.20 * r)),
+        f((hx + 0.56 * r, hy + 0.20 * r)),
+        f((hx + 0.46 * r, hy + 0.34 * r)),
+    ];
+    ink.triangle(nose, ACCENT);
+    for (a, b) in [(nose[0], nose[1]), (nose[1], nose[2]), (nose[2], nose[0])] {
+        ink.capsule(a, b, detail * 0.5, INK);
+    }
     // The smile runs into the mouth's corner, so the bubble's tail continues the line.
     ink.curve(
         &[
-            f((hx + 0.28 * r, hy + 0.40 * r)),
-            f((hx + 0.52 * r, hy + 0.48 * r)),
+            f((hx + 0.46 * r, hy + 0.34 * r)),
+            f((hx + 0.58 * r, hy + 0.42 * r)),
             mouth,
         ],
-        line * 0.5,
+        detail,
         INK,
     );
-    // Two whiskers above the smile, a quarter weight so they read as hair.
-    for (from_y, to_x, to_y) in [(0.10, 1.45, 0.00), (0.24, 1.38, 0.34)] {
+    // Two whiskers on the panel side; the far side is left clean.
+    for (from_x, from_y, to_x, to_y) in [(0.72, 0.28, 1.38, 0.08), (0.70, 0.38, 1.34, 0.52)] {
         ink.capsule(
-            f((hx + 0.68 * r, hy + from_y * r)),
+            f((hx + from_x * r, hy + from_y * r)),
             f((hx + to_x * r, hy + to_y * r)),
-            line * 0.25,
+            detail,
             INK,
         );
     }
 }
 
-/// The head over the edge, and the eyes with it: the cat has not arrived yet.
+/// The head over the edge, and the face with it: the cat has not arrived yet.
 fn peek_pose(ink: &mut Ink, w: f32, h: f32, edge: Edge, t: f32) {
+    let (outline, part, detail) = weights(w);
     let rise = ease_out_back(t.clamp(0.0, 1.0));
     let (hx, _, r) = head(w, h);
     let out = 0.20 * w;
@@ -782,35 +936,13 @@ fn peek_pose(ink: &mut Ink, w: f32, h: f32, edge: Edge, t: f32) {
         from.1 + (to.1 - from.1) * rise,
     );
     let tilt = 0.10 * rise;
-    let line = weight(w);
-    let shadow = (0.004 * w, 0.004 * w);
-    for (o, colour) in [(shadow, SHADOW), ((0.0, 0.0), INK)] {
-        let (ox, oy) = o;
-        ink.ring(cx + ox, cy + oy, r, line, colour);
-        for (i, (base1, peak, base2)) in [(205.0, 225.0, 245.0), (295.0, 315.0, 335.0)]
-            .into_iter()
-            .enumerate()
-        {
-            let extra = if i == 1 {
-                0.05 * (t * 3.0 * std::f32::consts::PI).sin()
-            } else {
-                0.0
-            };
-            let at = |deg: f32, reach: f32| {
-                let a = deg.to_radians();
-                let q = spin(
-                    (cx + a.cos() * r * reach, cy + a.sin() * r * reach),
-                    (cx, cy),
-                    tilt + extra,
-                );
-                (q.0 + ox, q.1 + oy)
-            };
-            ink.capsule(at(base1, 1.0), at(peak, 1.5), line / 2.0, colour);
-            ink.capsule(at(peak, 1.5), at(base2, 1.0), line / 2.0, colour);
-        }
-    }
+    let twitch = 0.05 * (t * 3.0 * std::f32::consts::PI).sin();
+    ear(ink, (cx, cy), r, tilt, (205.0, 225.0, 245.0), part);
+    ear(ink, (cx, cy), r, tilt + twitch, (295.0, 315.0, 335.0), part);
+    ink.disc(cx, cy, r, PAPER);
+    ink.ring(cx, cy, r, outline, INK);
     let mouth = (cx + 0.906 * r, cy + 0.423 * r);
-    face(ink, (cx, cy), r, tilt, 0.0, line, mouth);
+    face(ink, (cx, cy), r, tilt, 0.0, 0.10, part, detail, mouth);
 }
 
 /// The bubble's tail: the card's corner to the mouth, in the card's own fill.
@@ -1039,8 +1171,8 @@ mod tests {
         let ms = Duration::from_millis;
         let waiting = paint(Pose::Waiting, ms(0));
         assert!(
-            (500..15000).contains(&lit(&waiting)),
-            "the cat is drawn as a line, not a fill: {}",
+            (18_000..50_000).contains(&lit(&waiting)),
+            "the cat is a filled mascot: {}",
             lit(&waiting)
         );
         // The peek is a head over an edge, so it covers less of the window than the cat.
@@ -1058,10 +1190,10 @@ mod tests {
         );
     }
 
-    /// The drawing is contours: the body and the head are empty, their lines are not, and
-    /// the paw ring still reaches the stage's edge.
+    /// The mascot is flat paper inside ink: interiors are paper, edges are ink, and the
+    /// paw ring still reaches the stage's edge.
     #[test]
-    fn the_cat_is_line_art_not_a_silhouette() {
+    fn the_cat_is_a_flat_paper_mascot() {
         let (w, h) = (260u32, 260u32);
         let mut buf = vec![0u8; (w * h * 4) as usize];
         draw(
@@ -1075,17 +1207,19 @@ mod tests {
             Duration::ZERO,
             false,
         );
-        let alpha = |x: u32, y: u32| buf[((y * w + x) * 4 + 3) as usize];
-        assert_eq!(alpha(78, 182), 0, "the body is empty");
-        assert_eq!(alpha(169, 88), 0, "the head is empty");
-        assert!(alpha(140, 234) > 0, "the body's ground line");
-        assert!(alpha(127, 88) > 0, "the head's ring");
-        assert!(alpha(259, 130) > 0, "the paw reaches the pad");
+        let px = |x: u32, y: u32| &buf[((y * w + x) * 4) as usize..][..4];
+        let paper = |p: &[u8]| p[3] == 255 && p[2] > 0xe0 && p[1] > 0xd0;
+        let ink = |p: &[u8]| p[3] > 0 && p[2] < 0x60;
+        assert!(paper(px(78, 182)), "the body is paper");
+        assert!(paper(px(169, 88)), "the head is paper");
+        assert!(ink(px(140, 234)), "the body's ground line is ink");
+        assert!(ink(px(127, 88)), "the head's ring is ink");
+        assert!(ink(px(259, 130)), "the paw's ring reaches the pad");
     }
 
-    /// Notion's one warm accent is the tongue, and the contour stays the off-white ink.
+    /// The palette is paper, ink and one coral accent, and nothing else.
     #[test]
-    fn the_tongue_carries_the_one_accent() {
+    fn the_cat_uses_paper_ink_and_one_accent() {
         let (w, h) = (260u32, 260u32);
         let mut buf = vec![0u8; (w * h * 4) as usize];
         draw(
@@ -1099,19 +1233,25 @@ mod tests {
             Duration::from_millis(220),
             false,
         );
-        // BGRA: the accent is #ffa344, the ink #e9e9e7.
-        let orange = buf
+        // BGRA: paper #f3ecdf, ink #2b2520, accent #ef836d.
+        let paper = buf
             .as_chunks::<4>()
             .0
             .iter()
-            .any(|p| p[3] > 0 && p[0] < 0x80 && p[1] > 0x80 && p[2] > 0xd0);
+            .any(|p| p[3] == 255 && p[2] > 0xe0 && p[1] > 0xd0);
         let ink = buf
             .as_chunks::<4>()
             .0
             .iter()
-            .any(|p| p[3] > 0 && p[0] > 0xc0 && p[1] > 0xc0 && p[2] > 0xc0);
-        assert!(orange, "the tongue is Notion orange");
-        assert!(ink, "the contour is Notion's off-white ink");
+            .any(|p| p[3] > 0 && p[2] < 0x60);
+        let accent = buf
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|p| p[3] > 0 && p[0] < 0x90 && p[1] > 0x70 && p[2] > 0xd0);
+        assert!(paper, "the body is paper");
+        assert!(ink, "the outline is warm ink");
+        assert!(accent, "the tongue is the coral accent");
     }
 
     /// The blink is a window on the waiting clock, open at the start.
@@ -1152,8 +1292,11 @@ mod tests {
             false,
         );
         let (mx, my) = mouth(w as f32, h as f32);
-        let alpha = buf[((my as u32 * w + mx as u32) * 4 + 3) as usize];
-        assert!(alpha > 0, "the smile ends on the mouth at {mx},{my}");
+        let p = &buf[((my as u32 * w + mx as u32) * 4) as usize..][..4];
+        assert!(
+            p[3] > 0 && p[2] < 0x80,
+            "the smile ends in ink on the mouth at {mx},{my}"
+        );
     }
 
     #[test]
