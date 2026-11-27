@@ -60,14 +60,15 @@ instructions = "Answer in Chinese."          # the reader's own constraints: one
 instructions = "At most three sentences."    # rule a line, joined in this order
 ```
 
-`mode = "cat"` is the same panel staged around a cat drawn as one-weight line art
-in the panel's ink. It comes out of one of the screen's four edges, hops to the
-panel's left side and takes the input on its magnified paw, which is the bar drawn
-as a paw pad. While the request runs it licks that paw, and the answer arrives in a
-bubble that comes out of its mouth and stays there, with the last answer still in
-it, until the next answer starts. Every key, the scrolling, the selection, the
-markdown and the clipboard are the same in both modes; `"default"` is the panel
-described above, unchanged.
+`mode = "cat"` is the same panel staged around a cat drawn in Notion's
+illustration style: a warm off-white marker line with a slight hand-drawn waver,
+flat, with Notion orange on the tongue and the open mouth. It comes out of one of
+the screen's four edges, hops to the panel's left side and takes the input on its
+magnified paw, which is the bar drawn as a paw pad. While the request runs it licks
+that paw, and the answer arrives in a bubble that comes out of its mouth and stays
+there, with the last answer still in it, until the next answer starts. Every key,
+the scrolling, the selection, the markdown and the clipboard are the same in both
+modes; `"default"` is the panel described above, unchanged.
 
 The configuration is read once at startup: a changed size needs a new run, or
 `--font-size`/`--font-family` on the command line.
