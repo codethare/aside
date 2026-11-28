@@ -450,6 +450,18 @@ impl PanelFont {
     }
 }
 
+/// The system's font database, read once. `load_system_fonts` opens every installed
+/// font's header, and the size keys read a face twice per press: paying for the scan
+/// there would stall the event loop on a machine with many fonts.
+fn database() -> &'static fontdb::Database {
+    static DB: std::sync::OnceLock<fontdb::Database> = std::sync::OnceLock::new();
+    DB.get_or_init(|| {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        db
+    })
+}
+
 /// The chain: the candidate paths that exist, plus a CJK face from the font
 /// database if none of the candidates is one.
 ///
@@ -462,12 +474,10 @@ fn chain(family: Option<&str>) -> Vec<(PathBuf, u32)> {
     // The configured family first, whatever else the known paths hold: it is what
     // the user asked for, and the rest of the chain is the fallback for the
     // scripts it cannot draw.
-    if let Some(family) = family.filter(|f| !f.trim().is_empty()) {
-        let mut db = fontdb::Database::new();
-        db.load_system_fonts();
-        if let Some(found) = query_path(&db, family) {
-            out.push(found);
-        }
+    if let Some(family) = family.filter(|f| !f.trim().is_empty())
+        && let Some(found) = query_path(database(), family)
+    {
+        out.push(found);
     }
     for c in CANDIDATES {
         let path = PathBuf::from(c.path);
@@ -529,13 +539,12 @@ fn mono_chain() -> Vec<(PathBuf, u32)> {
 
 /// The font database's idea of monospace, or `None` when it has none.
 fn mono_path() -> Option<(PathBuf, u32)> {
-    let mut db = fontdb::Database::new();
-    db.load_system_fonts();
+    let db = database();
     let id = db.query(&fontdb::Query {
         families: &[fontdb::Family::Monospace],
         ..Default::default()
     })?;
-    face_path(&db, id)
+    face_path(db, id)
 }
 
 /// Whether a chain entry came from a CJK candidate. Kept by path rather than by
@@ -562,8 +571,7 @@ fn index_for_family(path: &Path, family: &str) -> Option<u32> {
 /// CJK-preferring ordered list from the font database (primary candidate first),
 /// including the Nerd Font PUA face, used when the known paths do not exist.
 fn system_chain() -> Vec<(PathBuf, u32)> {
-    let mut db = fontdb::Database::new();
-    db.load_system_fonts();
+    let db = database();
     // CJK list: mutual alternates, not complements. One face covers all CJK +
     // kana glyphs, and SC/TC/JP are usually faces of the same ~20MB TTC — so
     // take the first hit and stop.
@@ -577,12 +585,12 @@ fn system_chain() -> Vec<(PathBuf, u32)> {
     const SANS: &[&str] = &["Noto Sans", "DejaVu Sans", "Liberation Sans"];
     let mut out = Vec::new();
     for fam in SANS {
-        if let Some(found) = query_path(&db, fam) {
+        if let Some(found) = query_path(db, fam) {
             out.push(found);
         }
     }
     for fam in CJK {
-        if let Some(found) = query_path(&db, fam) {
+        if let Some(found) = query_path(db, fam) {
             out.push(found);
             break;
         }
@@ -595,7 +603,7 @@ fn system_chain() -> Vec<(PathBuf, u32)> {
             .families
             .iter()
             .any(|f| f.0.to_ascii_lowercase().contains("nerd font"))
-            && let Some(found) = face_path(&db, face.id)
+            && let Some(found) = face_path(db, face.id)
         {
             out.push(found);
             break;
@@ -624,7 +632,7 @@ fn system_chain() -> Vec<(PathBuf, u32)> {
         "Noto Emoji",
     ];
     for fam in SCRIPTS {
-        if let Some(found) = query_path(&db, fam) {
+        if let Some(found) = query_path(db, fam) {
             out.push(found);
         }
     }
@@ -632,7 +640,7 @@ fn system_chain() -> Vec<(PathBuf, u32)> {
         // Give up on family preference: just take the first face so the panel
         // still renders.
         if let Some(face) = db.faces().next()
-            && let Some(found) = face_path(&db, face.id)
+            && let Some(found) = face_path(db, face.id)
         {
             out.push(found);
         }
@@ -734,6 +742,15 @@ mod tests {
         db.faces()
             .find(|f| f.index == index)
             .and_then(|f| f.families.first().map(|(name, _)| name.clone()))
+    }
+
+    /// The scan is the expensive part: one instance per run, whatever asks for it.
+    #[test]
+    fn the_font_database_is_loaded_once() {
+        assert!(
+            std::ptr::eq(database(), database()),
+            "every caller shares one loaded database"
+        );
     }
 
     #[test]

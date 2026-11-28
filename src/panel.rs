@@ -1,20 +1,19 @@
 //! Paints the panel: two cards of one glass chrome, the replies above and the
 //! input bar below them.
 //!
-//! Frame and geometry come from `wlmenu` unchanged: the panel floats inside a
-//! 24 px shadow margin, its body is premultiplied translucent glass with a
-//! hairline border, and the bar is the same band it draws (a 4 px
-//! `LABEL_ACCENT` rail, an 8 px gap, a 1 px divider at 25 % alpha). The bar is
-//! the first row, because a top-anchored layer surface can only grow downwards.
-//! The thinking state is a third drawing path, a circle with four blinking
-//! squares.
+//! Frame and geometry are `plush`'s chrome: the panel floats inside a 26 px shadow
+//! margin, its body is premultiplied translucent glass with a lit rim and a dark band
+//! one pixel inside it, and both cards take that same tone. The surface is anchored
+//! bottom-left, so the bar keeps its place on screen and the replies grow upwards out
+//! of it. A request in flight runs a light round the bar's rim; a question still out
+//! scrolls across it, then comes apart into particles.
 
 use std::time::Duration;
 
 use crate::font::PanelFont;
 use crate::layout::{self, Blocks, Input, MAX_ROWS, Style, Viewport};
 use crate::render::{self, Bgra, Subpixel};
-use crate::transcript::{Kind, Row, Transcript};
+use crate::transcript::{Row, Transcript};
 use crate::{DECOMPOSE, EXTRACT, MARQUEE_HOLD, MARQUEE_SPEED};
 
 /// A question that is already out. The bar shows it instead of the input line, at a
@@ -1462,8 +1461,8 @@ fn draw_row(
     let mono = mono_ref.as_deref();
     if let RowMark::Band((from, to)) = mark {
         let text = row.text;
-        let start = left + row_advance(font, row, byte_at(text, from), mono) as u32;
-        let end = left + row_advance(font, row, byte_at(text, to), mono) as u32;
+        let start = left + row_advance(font, row, layout::byte_index(text, from), mono) as u32;
+        let end = left + row_advance(font, row, layout::byte_index(text, to), mono) as u32;
         if end > start {
             render::rect(
                 buf,
@@ -1480,7 +1479,7 @@ fn draw_row(
     if let Some(ch) = cursor {
         // One pixel wide and as tall as the line: a caret in the text, not a box
         // around it.
-        let x = left + row_advance(font, row, byte_at(row.text, ch), mono) as u32;
+        let x = left + row_advance(font, row, layout::byte_index(row.text, ch), mono) as u32;
         render::rect(
             buf,
             w,
@@ -1514,7 +1513,7 @@ fn draw_row(
                 x,
                 base,
                 &row.text[at..start],
-                render::dim(ink_of(Style::Plain, row.kind, marked), fade),
+                render::dim(ink_of(Style::Plain, marked), fade),
                 (limit - x).max(0.0),
                 rows.clone(),
                 aa,
@@ -1530,7 +1529,7 @@ fn draw_row(
                 x,
                 base,
                 &row.text[start..end],
-                render::dim(ink_of(span.style, row.kind, marked), fade),
+                render::dim(ink_of(span.style, marked), fade),
                 (limit - x).max(0.0),
                 rows.clone(),
                 aa,
@@ -1547,7 +1546,7 @@ fn draw_row(
             x,
             base,
             &row.text[at..],
-            render::dim(ink_of(Style::Plain, row.kind, marked), fade),
+            render::dim(ink_of(Style::Plain, marked), fade),
             (limit - x).max(0.0),
             rows,
             aa,
@@ -1567,12 +1566,12 @@ fn face_of<'a>(font: &'a PanelFont, mono: Option<&'a PanelFont>, style: Style) -
 
 /// A span's ink. `marked` is the keyboard's line or a pointer's selection, which take
 /// one ink so the mark reads as one piece.
-fn ink_of(style: Style, kind: Kind, marked: bool) -> Bgra {
+fn ink_of(style: Style, marked: bool) -> Bgra {
     if marked {
         return render::FG_SEL;
     }
     match style {
-        Style::Plain | Style::Em | Style::Link => colours(kind),
+        Style::Plain | Style::Em | Style::Link => render::FG_NORMAL,
         // Strong and code are the brighter ink; emphasis keeps its own weight because
         // the chain has no slanted face to give it.
         Style::Strong | Style::Code => render::FG_PROMPT,
@@ -1604,20 +1603,6 @@ fn row_advance(font: &PanelFont, row: &Row<'_>, byte: usize, mono: Option<&Panel
         width += render::advance(font, &row.text[at..byte]);
     }
     width
-}
-
-/// The byte offset of character `index` in `text`: the selection counts characters,
-/// the painter counts bytes.
-fn byte_at(text: &str, index: usize) -> usize {
-    text.char_indices()
-        .nth(index)
-        .map_or(text.len(), |(byte, _)| byte)
-}
-
-/// A reply's ink: the secondary one for what the model said, so a failure or a
-/// note reads as the panel's own voice without changing tone.
-fn colours(_kind: Kind) -> Bgra {
-    render::FG_NORMAL
 }
 
 /// The rows the scroll indicator's track spans, in buffer pixels, inside a panel `h`
@@ -1730,6 +1715,7 @@ pub fn to_ppm(buf: &[u8], w: u32, h: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transcript::Kind;
 
     /// The panel's own `draw` with no burst, so every frame here but the capsule's own
     /// test is the strip: a burst is one argument the rest of the suite does not name.

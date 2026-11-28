@@ -59,7 +59,7 @@ use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 
 use chat::{Close, Request};
 use font::PanelFont;
-use layout::{Input, Viewport};
+use layout::{Input, Viewport, byte_index};
 use transcript::Transcript;
 
 /// Content inset inside the panel (logical px).
@@ -391,7 +391,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
     let (pw, ph) = (
         WIDTH,
         panel::height_for(
-            room_for_replies(Some(FALLBACK_OUTPUT_H), SIZE_RESET),
+            room_for_replies(Some(FALLBACK_OUTPUT_H), 0, SIZE_RESET),
             &font,
             1,
         ),
@@ -612,6 +612,7 @@ fn run(options: Options) -> Result<(), String> {
         highlight: 0,
         viewport: Viewport::new(0),
         request: None,
+        pasting: None,
         ime: ime::Ime::default(),
         seat: None,
         ime_manager,
@@ -859,14 +860,6 @@ fn base_gap(output_h: Option<u32>) -> i32 {
     output_h.unwrap_or(FALLBACK_OUTPUT_H) as i32 * EDGE_SHARE / 100
 }
 
-/// The byte offset of character `index` in `text`: a selection counts characters,
-/// a slice counts bytes.
-fn byte_index(text: &str, index: usize) -> usize {
-    text.char_indices()
-        .nth(index)
-        .map_or(text.len(), |(byte, _)| byte)
-}
-
 /// How many lines a selection covers: the rows from its first end to its last.
 /// What a copy takes from the visible rows: the pointer's characters, or the whole
 /// highlighted line. A table row is copied once per logical row as TSV, so the
@@ -1028,34 +1021,35 @@ fn size_cap(output_h: Option<u32>, output_w: Option<u32>) -> f32 {
     cap.max(*SIZE_RANGE.start())
 }
 
-fn size_for(phase: Phase, output_h: Option<u32>, size: f32) -> (u32, u32) {
+fn size_for(phase: Phase, output_h: Option<u32>, drag: i32, size: f32) -> (u32, u32) {
     let bar = panel::bar_height();
     let width = box_width(size);
     match phase {
         Phase::Idle | Phase::Thinking => (width, bar),
-        // Fixed: the room the replies are given, and nothing about how much text
-        // they hold, so the panel does not resize as an answer arrives or as it is
-        // moved. The replies scroll inside it. A bigger box is more room, not bigger
-        // glyphs.
+        // The room the replies are given, and nothing about how much text they hold,
+        // so the panel does not resize as an answer arrives; the box does follow the
+        // gap the panel has been dragged to, because that gap is the room it has. The
+        // replies scroll inside it. A bigger box is more room, not bigger glyphs.
         Phase::Answering => (
             width,
-            bar + render::SEPARATION + room_for_replies(output_h, size),
+            bar + render::SEPARATION + room_for_replies(output_h, drag, size),
         ),
     }
 }
 
 /// The size a shape change is painted at: the larger of its two shapes, so the
 /// surface is resized once per transition and never per frame.
-fn morph_size(from: Phase, to: Phase, output_h: Option<u32>, size: f32) -> (u32, u32) {
-    let (fw, fh) = size_for(from, output_h, size);
-    let (tw, th) = size_for(to, output_h, size);
+fn morph_size(from: Phase, to: Phase, output_h: Option<u32>, drag: i32, size: f32) -> (u32, u32) {
+    let (fw, fh) = size_for(from, output_h, drag, size);
+    let (tw, th) = size_for(to, output_h, drag, size);
     (fw.max(tw), fh.max(th))
 }
 
-/// How tall the replies card always is: the anchored gap, clamped by the room left
-/// above the bar and by the 64 rows the frame may draw.
-fn room_for_replies(output_h: Option<u32>, size: f32) -> u32 {
-    let gap = edge_gap(output_h, 0);
+/// How tall the replies card is: the gap under the bar as it is now — the anchored one,
+/// or the one a drag left — clamped by the room above the bar and by the 64 rows the
+/// frame may draw.
+fn room_for_replies(output_h: Option<u32>, drag: i32, size: f32) -> u32 {
+    let gap = edge_gap(output_h, drag);
     let rows = layout::MAX_ROWS as u32 * panel::bar_height();
     reply_cap(output_h, gap, size).min(rows)
 }
@@ -1272,6 +1266,15 @@ fn font_step(current: f32, up: bool) -> f32 {
     let range = font::SIZE_RANGE;
     let next = if up { current + 2.0 } else { current - 2.0 };
     next.clamp(*range.start() as f32, *range.end() as f32)
+}
+
+/// The face the panel draws with at `next`, and the size the rest of the panel derives
+/// from it: the two change together, or not at all. A failed read leaves the panel
+/// drawing what it has rather than a box the old text no longer fits.
+fn face_at(next: f32, scale: u32) -> Option<PanelFont> {
+    let font = PanelFont::load(next * scale.max(1) as f32).ok()?;
+    font::resize(next);
+    Some(font)
 }
 
 /// How far the panel's box grows at a time: one keypress, one wheel notch, and the
@@ -1885,6 +1888,8 @@ struct State {
     highlight: usize,
     viewport: Viewport,
     request: Option<Request>,
+    /// A clipboard read running on a thread, until it answers.
+    pasting: Option<std::sync::mpsc::Receiver<Result<clipboard::Paste, String>>>,
     ime: ime::Ime,
     /// The seat the text-input object was created against, once one appears.
     seat: Option<wl_seat::WlSeat>,
@@ -1907,10 +1912,14 @@ impl State {
     /// resized once per transition rather than per frame.
     fn target_size(&self) -> (u32, u32) {
         match self.morph.filter(|_| self.morphing()) {
-            Some(m) => morph_size(m.from, m.to, self.output_h, self.size),
+            Some(m) => morph_size(m.from, m.to, self.output_h, self.drag.bottom, self.size),
             None => match self.shape {
-                panel::State::Bar => size_for(Phase::Thinking, self.output_h, self.size),
-                panel::State::Replies => size_for(Phase::Answering, self.output_h, self.size),
+                panel::State::Bar => {
+                    size_for(Phase::Thinking, self.output_h, self.drag.bottom, self.size)
+                }
+                panel::State::Replies => {
+                    size_for(Phase::Answering, self.output_h, self.drag.bottom, self.size)
+                }
             },
         }
     }
@@ -2211,14 +2220,13 @@ impl State {
         if next == old {
             return;
         }
-        // The face first: a machine that lost the font between the two reads keeps the
-        // size it is already drawing at instead of going blank.
-        let Ok(font) = PanelFont::load(self.face_size()) else {
-            return;
-        };
+        // The face first: a machine that lost the font keeps the size it is already
+        // drawing at instead of going blank.
         // shortcut: the face is read on the event loop, a few ms on a keypress; doing it
         // on a thread would draw the old metrics at the new bar height for a frame.
-        font::resize(next);
+        let Some(font) = face_at(next, self.s()) else {
+            return;
+        };
         // The indicator's own face follows the text's size; losing it costs the number,
         // not the panel.
         self.label_font = PanelFont::load(self.face_size() * LABEL_SHARE).ok();
@@ -2362,6 +2370,7 @@ impl State {
             [
                 moving.then_some(FRAME_WAKE),
                 self.request.is_some().then_some(FRAME_WAKE),
+                self.pasting.is_some().then_some(FRAME_WAKE),
                 self.toast_up().then_some(TOAST_WAKE),
                 self.returned_at.is_some().then_some(FRAME_WAKE),
                 question_wake(self.question.as_ref()),
@@ -2967,8 +2976,23 @@ impl State {
     /// `Alt+C`: the only path to the clipboard, and it copies one line.
     /// `Ctrl+V`: the clipboard comes in once, at the caret, and stays only in the
     /// input line. A failure is shown in the transcript, not swallowed.
+    ///
+    /// The read runs on its own thread: a clipboard owner that stops writing would
+    /// otherwise hold the event loop, and with it the panel's frames and its `Esc`.
     fn paste_clipboard(&mut self) {
-        match clipboard::paste() {
+        if self.pasting.is_some() {
+            return; // one read at a time: a second press is a repeat, not a queue
+        }
+        let (send, pasting) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(clipboard::paste());
+        });
+        self.pasting = Some(pasting);
+    }
+
+    /// What one finished clipboard read does to the line, when it lands.
+    fn pasted(&mut self, result: Result<clipboard::Paste, String>) {
+        match result {
             Ok(pasted) => {
                 let fit = self.input.insert(&pasted.text);
                 if pasted.text.is_empty() {
@@ -3034,6 +3058,18 @@ impl State {
             ));
         }
         self.refresh_waiting_label();
+        if let Some(pasting) = self.pasting.as_ref() {
+            match pasting.try_recv() {
+                Ok(result) => {
+                    self.pasting = None;
+                    self.pasted(result);
+                }
+                // Still reading: a frame keeps the loop coming back for it.
+                Err(std::sync::mpsc::TryRecvError::Empty) => self.dirty = true,
+                // The thread went away without an answer: there is nothing to show.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.pasting = None,
+            }
+        }
         if let Some(start) = self.retract_at {
             self.dirty = true;
             if start.elapsed() >= Duration::from_millis(RETRACT_MS) {
@@ -4354,36 +4390,36 @@ mod tests {
     fn the_three_states_have_the_spec_s_sizes() {
         let bar = panel::bar_height();
         assert_eq!(bar, 30, "row_h_for(20) is 30 at 1x");
-        assert_eq!(size_for(Phase::Idle, Some(1080), SIZE_RESET), (640, bar));
+        assert_eq!(size_for(Phase::Idle, Some(1080), 0, SIZE_RESET), (640, bar));
         // Thinking is the bar: the field a question was typed in stays, and only
         // its rim lights up.
         assert_eq!(
-            size_for(Phase::Thinking, Some(1080), SIZE_RESET),
+            size_for(Phase::Thinking, Some(1080), 0, SIZE_RESET),
             (640, bar),
             "a running request keeps the bar"
         );
-        // Answering: the bar, the 16 px between the cards, and a fixed room for the
-        // replies. No term for the text, so it is the same size for one line and for
-        // a thousand, and a move does not change it.
-        let room = room_for_replies(Some(1080), SIZE_RESET);
+        // Answering: the bar, the 16 px between the cards, and the room the replies
+        // are given. No term for the text, so it is the same size for one line and for
+        // a thousand; the room is the gap under the bar, which a drag moves.
+        let room = room_for_replies(Some(1080), 0, SIZE_RESET);
         assert_eq!(room, 410, "38 % of 1080");
         let answering = (640, bar + render::SEPARATION + room);
         assert_eq!(
-            size_for(Phase::Answering, Some(1080), SIZE_RESET),
+            size_for(Phase::Answering, Some(1080), 0, SIZE_RESET),
             answering
         );
         // Before the output reports, a 1080-pixel one is assumed.
-        assert_eq!(size_for(Phase::Answering, None, SIZE_RESET), answering);
+        assert_eq!(size_for(Phase::Answering, None, 0, SIZE_RESET), answering);
         // A tiny output cannot make the room negative.
         assert_eq!(
-            size_for(Phase::Answering, Some(10), SIZE_RESET).1,
+            size_for(Phase::Answering, Some(10), 0, SIZE_RESET).1,
             bar + render::SEPARATION
         );
         // The row cap bounds the box as well as the viewport: past ~5000 px the gap
         // alone would allow more rows than a frame may draw.
         let tall = Some(8000u32);
         assert_eq!(
-            room_for_replies(tall, SIZE_RESET),
+            room_for_replies(tall, 0, SIZE_RESET),
             layout::MAX_ROWS as u32 * bar,
             "never more than the rows the frame may draw"
         );
@@ -4403,7 +4439,7 @@ mod tests {
             // A drag moves the gap, and with it the cap.
             assert_eq!(edge_gap(Some(output), 100), gap + 100);
             // The box is the gap, whatever the transcript holds.
-            let (_, h) = size_for(Phase::Answering, Some(output), SIZE_RESET);
+            let (_, h) = size_for(Phase::Answering, Some(output), 0, SIZE_RESET);
             assert_eq!(
                 h,
                 panel::bar_height() + render::SEPARATION + gap,
@@ -4914,7 +4950,7 @@ mod tests {
                 (*SIZE_RANGE.start()..=*SIZE_RANGE.end()).contains(&cap),
                 "the cap is inside the range: {cap}"
             );
-            let (bw, bh) = size_for(Phase::Answering, Some(h), cap);
+            let (bw, bh) = size_for(Phase::Answering, Some(h), 0, cap);
             let surface = surface_size((bw, bh));
             let bottom = bottom_margin(Some(h), 0);
             assert!(
@@ -4939,7 +4975,7 @@ mod tests {
             );
             let past = (cap + 0.05).min(*SIZE_RANGE.end());
             if past > cap {
-                let (bw2, bh2) = size_for(Phase::Answering, Some(h), past);
+                let (bw2, bh2) = size_for(Phase::Answering, Some(h), 0, past);
                 let over = surface_size((bw2, bh2));
                 // Past the cap the factor has stopped meaning anything on the axis that
                 // binds: either that side is pinned, or the surface leaves the output.
@@ -4979,16 +5015,16 @@ mod tests {
         assert_eq!(box_width(1.5), 960, "the box widens");
 
         // The bar is the font's height whatever the box is doing.
-        assert_eq!(size_for(Phase::Idle, Some(1080), 1.5).1, bar);
+        assert_eq!(size_for(Phase::Idle, Some(1080), 0, 1.5).1, bar);
 
-        let (width, small) = size_for(Phase::Answering, Some(1080), 1.0);
-        let (wide, big) = size_for(Phase::Answering, Some(1080), 1.5);
+        let (width, small) = size_for(Phase::Answering, Some(1080), 0, 1.0);
+        let (wide, big) = size_for(Phase::Answering, Some(1080), 0, 1.5);
         assert_eq!(width, WIDTH);
         assert_eq!(wide, 960);
         assert!(big > small, "a bigger box shows more rows: {small} / {big}");
 
         // ...and never past the output, however big it is asked to be.
-        let (_, capped) = size_for(Phase::Answering, Some(400), 2.0);
+        let (_, capped) = size_for(Phase::Answering, Some(400), 0, 2.0);
         assert!(capped <= 400, "the box stays on the output: {capped}");
 
         // The shadow margin belongs to the chrome, not to the box.
@@ -5128,6 +5164,14 @@ mod tests {
         assert!(
             reply_cap(Some(1080), edge_gap(Some(1080), 100), SIZE_RESET)
                 > reply_cap(Some(1080), edge_gap(Some(1080), -100), SIZE_RESET)
+        );
+        // And the box the panel takes follows the drag: high enough that the room above
+        // the bar is the tighter limit, the replies get less than the anchored gap.
+        let anchored = size_for(Phase::Answering, Some(1080), 0, SIZE_RESET).1;
+        let high = size_for(Phase::Answering, Some(1080), 500, SIZE_RESET).1;
+        assert!(
+            high < anchored,
+            "a dragged-up panel has a shorter box: {high} / {anchored}"
         );
     }
 
@@ -5536,22 +5580,22 @@ mod tests {
     /// given for its duration.
     #[test]
     fn a_transition_runs_on_the_larger_shape() {
-        let (bw, bh) = size_for(Phase::Idle, Some(1080), SIZE_RESET);
-        let (_, th) = size_for(Phase::Thinking, Some(1080), SIZE_RESET);
-        let (aw, ah) = size_for(Phase::Answering, Some(1080), SIZE_RESET);
+        let (bw, bh) = size_for(Phase::Idle, Some(1080), 0, SIZE_RESET);
+        let (_, th) = size_for(Phase::Thinking, Some(1080), 0, SIZE_RESET);
+        let (aw, ah) = size_for(Phase::Answering, Some(1080), 0, SIZE_RESET);
         // Bar to ball: the ball is narrow but taller than the bar's band.
         assert_eq!(
-            morph_size(Phase::Idle, Phase::Thinking, Some(1080), SIZE_RESET),
+            morph_size(Phase::Idle, Phase::Thinking, Some(1080), 0, SIZE_RESET),
             (bw, th)
         );
         // Ball to panel: the panel is the larger one in both directions.
         assert_eq!(
-            morph_size(Phase::Thinking, Phase::Answering, Some(1080), SIZE_RESET),
+            morph_size(Phase::Thinking, Phase::Answering, Some(1080), 0, SIZE_RESET),
             (aw, ah)
         );
         // A no-op change is the shape itself.
         assert_eq!(
-            morph_size(Phase::Idle, Phase::Idle, Some(1080), SIZE_RESET),
+            morph_size(Phase::Idle, Phase::Idle, Some(1080), 0, SIZE_RESET),
             (bw, bh)
         );
     }
@@ -5708,23 +5752,28 @@ mod tests {
         assert_eq!(&text[byte_index(text, from)..byte_index(text, to)], "文a");
     }
 
+    /// Two tests move the process-wide size, so they take turns rather than reading
+    /// each other's value.
+    static FONT_SIZE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A configured size reaches the panel's own geometry: the bar, the box under it
     /// and the row cap are all expressed in rows of the configured text.
     #[test]
     fn the_panel_follows_the_configured_font_size() {
+        let _guard = FONT_SIZE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let size = font::size();
         assert_eq!(size, font::SIZE, "no configuration in a test run");
         let bar = panel::bar_height();
         assert_eq!(bar, font::row_h_for(size), "the bar is one row of the text");
-        let (_, h) = size_for(Phase::Answering, Some(1080), SIZE_RESET);
+        let (_, h) = size_for(Phase::Answering, Some(1080), 0, SIZE_RESET);
         assert_eq!(
             h,
-            bar + render::SEPARATION + room_for_replies(Some(1080), SIZE_RESET)
+            bar + render::SEPARATION + room_for_replies(Some(1080), 0, SIZE_RESET)
         );
         // The room is the gap clamped by the rows a frame may draw, so a very tall
         // output stops at the row cap rather than at the gap.
         assert_eq!(
-            room_for_replies(Some(3000), SIZE_RESET),
+            room_for_replies(Some(3000), 0, SIZE_RESET),
             (layout::MAX_ROWS as u32 * bar).min(reply_cap(
                 Some(3000),
                 edge_gap(Some(3000), 0),
@@ -5733,6 +5782,26 @@ mod tests {
             "the row cap is expressed in rows of this size"
         );
         assert!(font::row_h_for(30.0) > bar, "a larger size is a taller row");
+    }
+
+    /// The size keys read the face at the size they are about to draw it at: the box,
+    /// the bar, the clickable cards and the glyphs all derive from `font::size`, so a
+    /// face built before that size is stored would leave the panel one step behind for
+    /// the rest of the run — a bar taller than the text it holds, or shorter.
+    #[test]
+    fn the_face_is_read_at_the_size_it_will_be_drawn_at() {
+        let _guard = FONT_SIZE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original = font::size();
+        let next = original + 2.0;
+        let face = face_at(next, 1).expect("the system font reads");
+        assert_eq!(face.size, next, "the face is the size asked for");
+        assert_eq!(
+            font::size(),
+            next,
+            "and the panel derives its bar and box from that same size"
+        );
+        assert_eq!(face.row_h, font::row_h_for(next), "one row of that size");
+        font::resize(original);
     }
 
     #[test]

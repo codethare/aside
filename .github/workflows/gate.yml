@@ -23,4 +23,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
+        env:
+          # The sandbox's DNS/TLS check needs a network; the runner has one.
+          ASIDE_NET: "1"
         run: cargo test

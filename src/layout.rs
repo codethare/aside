@@ -261,6 +261,15 @@ impl Viewport {
     }
 }
 
+/// The byte offset of character `index` in `text`: a selection counts characters, a
+/// slice counts bytes. The painter and the copy both ask here, so the characters one
+/// marks are the characters the other takes.
+pub fn byte_index(text: &str, index: usize) -> usize {
+    text.char_indices()
+        .nth(index)
+        .map_or(text.len(), |(byte, _)| byte)
+}
+
 /// The most bytes a question may hold. A pasted selection is read up to this
 /// many bytes and no further, so one `Ctrl+V` cannot grow the panel, or the
 /// request body it becomes, without bound.
