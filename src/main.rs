@@ -970,14 +970,17 @@ fn over_replies(panel_h: u32, y: f64) -> bool {
 
 /// The tallest the replies may get: the gap below the bar, or the room left above
 /// it when the panel has been dragged so high that the gap is most of the screen.
-fn reply_cap(output_h: Option<u32>, gap: u32, size: f32) -> u32 {
+fn reply_cap(output_h: Option<u32>, drag: i32, size: f32) -> u32 {
     let h = output_h.unwrap_or(FALLBACK_OUTPUT_H);
-    // What is left above the bar once the bar and the gap between the cards are
-    // on screen: the box may be asked to grow past it, and it stops here instead of
-    // leaving the output.
+    // The room the design gives the replies: the gap at the anchored place. The gap
+    // the panel was dragged to is not part of this term, or dragging the panel down
+    // would shrink the box the answer is read in to a strip.
+    let design = (base_gap(output_h).max(0) as f32 * REPLY_SHARE as f32 * size) as u32;
+    // What is left above the bar where the panel now is: dragged high enough, this is
+    // the tighter limit, and the box stops here instead of leaving the output.
     let chrome = panel::bar_height() + render::SEPARATION;
-    let room = h.saturating_sub(gap + render::SHADOW + chrome);
-    ((gap as f32 * REPLY_SHARE as f32 * size) as u32).min(room)
+    let above = h.saturating_sub(edge_gap(output_h, drag) + render::SHADOW + chrome);
+    design.min(above)
 }
 
 /// Horizontal margin that centres the surface on the output.
@@ -1045,13 +1048,12 @@ fn morph_size(from: Phase, to: Phase, output_h: Option<u32>, drag: i32, size: f3
     (fw.max(tw), fh.max(th))
 }
 
-/// How tall the replies card is: the gap under the bar as it is now — the anchored one,
-/// or the one a drag left — clamped by the room above the bar and by the 64 rows the
-/// frame may draw.
+/// How tall the replies card is: the room the design gives them, capped by the space
+/// above the bar on the screen — never the gap the panel was dragged to, so moving it
+/// does not resize the answer's box — and by the 64 rows a frame may draw.
 fn room_for_replies(output_h: Option<u32>, drag: i32, size: f32) -> u32 {
-    let gap = edge_gap(output_h, drag);
     let rows = layout::MAX_ROWS as u32 * panel::bar_height();
-    reply_cap(output_h, gap, size).min(rows)
+    reply_cap(output_h, drag, size).min(rows)
 }
 
 /// A clock reading for the panel's own transitions, in milliseconds. With the
@@ -4451,8 +4453,9 @@ mod tests {
         assert_eq!(bottom_margin(Some(10), 0), 0);
         // Dragged so high that the gap is most of the screen: the room above the
         // bar clamps the cap instead, and the panel still fits.
-        let gap = edge_gap(Some(1080), 500);
-        let cap = reply_cap(Some(1080), gap, SIZE_RESET);
+        let drag = 500;
+        let gap = edge_gap(Some(1080), drag);
+        let cap = reply_cap(Some(1080), drag, SIZE_RESET);
         let chrome = panel::bar_height() + render::SEPARATION;
         assert_eq!(
             cap,
@@ -5158,21 +5161,24 @@ mod tests {
                 "drag {drag} disagrees with its margin"
             );
         }
-        // A drag up grows the gap, and with it the cap; a drag down shrinks both.
+        // A drag up past the point where the room above the bar binds shortens the box;
+        // a drag down never does — the box is the design's room, not a distance that
+        // closes as the panel nears the bottom edge.
         let base = bottom_margin(Some(1080), 0);
         assert_eq!(bottom_margin(Some(1080), -100), base - 100);
-        assert!(
-            reply_cap(Some(1080), edge_gap(Some(1080), 100), SIZE_RESET)
-                > reply_cap(Some(1080), edge_gap(Some(1080), -100), SIZE_RESET)
-        );
-        // And the box the panel takes follows the drag: high enough that the room above
-        // the bar is the tighter limit, the replies get less than the anchored gap.
         let anchored = size_for(Phase::Answering, Some(1080), 0, SIZE_RESET).1;
         let high = size_for(Phase::Answering, Some(1080), 500, SIZE_RESET).1;
         assert!(
             high < anchored,
-            "a dragged-up panel has a shorter box: {high} / {anchored}"
+            "dragged up it is clamped: {high} / {anchored}"
         );
+        for drag in [-50, -300, -1000] {
+            assert_eq!(
+                size_for(Phase::Answering, Some(1080), drag, SIZE_RESET).1,
+                anchored,
+                "drag {drag} keeps the box"
+            );
+        }
     }
 
     #[test]
@@ -5774,11 +5780,7 @@ mod tests {
         // output stops at the row cap rather than at the gap.
         assert_eq!(
             room_for_replies(Some(3000), 0, SIZE_RESET),
-            (layout::MAX_ROWS as u32 * bar).min(reply_cap(
-                Some(3000),
-                edge_gap(Some(3000), 0),
-                SIZE_RESET
-            )),
+            (layout::MAX_ROWS as u32 * bar).min(reply_cap(Some(3000), 0, SIZE_RESET)),
             "the row cap is expressed in rows of this size"
         );
         assert!(font::row_h_for(30.0) > bar, "a larger size is a taller row");
