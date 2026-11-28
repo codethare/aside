@@ -1,7 +1,6 @@
 //! aside - a keyboard-summoned AI chat panel for Wayland that leaves nothing
 //! behind. Behaviour is specified in `openspec/changes/add-aside-chat-panel/specs/`.
 
-mod cat;
 mod chat;
 mod clipboard;
 mod control;
@@ -346,7 +345,6 @@ fn main() {
         listener,
         output: flag("--output"),
         animate,
-        skin: skin(&file),
     }) {
         eprintln!("aside: {e}");
         exit(1);
@@ -362,12 +360,11 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
     transcript.ask(
         "what does EAGAIN mean when a socket read returns it?",
         &font,
-        false,
     );
     // The previous turn is off screen: only the current one is drawn.
     transcript.delta("Answered, and no longer on screen.", &font, max_w);
     transcript.finish_answer(&font);
-    transcript.ask("and if it never clears?", &font, false);
+    transcript.ask("and if it never clears?", &font);
     transcript.delta(
         "`EAGAIN` means the call would block: the resource is **momentarily \
          unavailable**, not broken.\n\n\
@@ -406,7 +403,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
     // when an answer outgrows the box.
     let mut viewport = Viewport::new(panel::transcript_px(ph, &font, 1));
     viewport.follow(transcript.total_height());
-    let frame = |pending: Option<panel::Pending<'_>>, skin: Skin| {
+    let frame = |pending: Option<panel::Pending<'_>>| {
         let mut buf = vec![0u8; (w * h * 4) as usize];
         panel::draw(
             &mut buf,
@@ -424,11 +421,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
             "",
             "",
             "",
-            {
-                let mut look = panel::Look::settled(panel::State::Replies);
-                look.skin = skin;
-                look
-            },
+            panel::Look::settled(panel::State::Replies),
             None,
             0.0,
             None,
@@ -440,50 +433,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
         std::fs::write(path, panel::to_ppm(buf, w, h))
             .map_err(|e| format!("{}: {e}", path.display()))
     };
-    write(path, &frame(None, Skin::Default))?;
-    // The cat mode's pad and bubble: the same field and the same rows, a paw's card.
-    let pad = std::path::PathBuf::from(format!("{}.cat.panel.ppm", path.display()));
-    std::fs::write(&pad, panel::to_ppm(&frame(None, Skin::Cat), w, h))
-        .map_err(|e| format!("{}: {e}", pad.display()))?;
-    // The cat's poses, over the card's own tone: a PPM drops alpha, and a light line on a
-    // transparent buffer would be invisible in it. This is how the art is looked at.
-    let stage = 260u32;
-    for (name, pose, since) in [
-        ("peek", cat::Pose::Peek, 380),
-        ("hop", cat::Pose::Hop, 200),
-        ("arm", cat::Pose::Arm, 150),
-        ("waiting", cat::Pose::Waiting, 0),
-        ("blink", cat::Pose::Waiting, 1_300),
-        ("lick", cat::Pose::Lick, 220),
-        ("speak", cat::Pose::Speak, 100),
-        ("extend", cat::Pose::Extend, 130),
-    ] {
-        let mut buf = vec![0u8; (stage * stage * 4) as usize];
-        render::rect(
-            &mut buf,
-            stage,
-            stage,
-            0,
-            0,
-            stage,
-            stage,
-            render::BG_PROMPT,
-        );
-        cat::draw(
-            &mut buf,
-            stage,
-            stage,
-            1,
-            panel::bar_height(),
-            cat::Edge::Bottom,
-            pose,
-            Duration::from_millis(since),
-            true,
-        );
-        let out = std::path::PathBuf::from(format!("{}.cat.{name}.ppm", path.display()));
-        std::fs::write(&out, panel::to_ppm(&buf, stage, stage))
-            .map_err(|e| format!("{}: {e}", out.display()))?;
-    }
+    write(path, &frame(None))?;
     // The leaving's two stages, so the break-up and the pull can be looked at without
     // a compositor. The question is wider than the bar, which is where the marquee
     // and the edge choice matter.
@@ -499,7 +449,7 @@ fn preview(path: &std::path::Path) -> Result<(), String> {
             leaving: Some(since),
         };
         let out = std::path::PathBuf::from(format!("{}.{suffix}", path.display()));
-        write(&out, &frame(Some(pending), Skin::Default))?;
+        write(&out, &frame(Some(pending)))?;
     }
     Ok(())
 }
@@ -511,23 +461,6 @@ pub const CONFIGURE_TIMEOUT_S: u64 = 5;
 
 /// What one run was asked for, so the pieces that build the panel take one argument
 /// rather than five positional ones.
-/// Which look the panel is drawn in. `Default` is the plush panel this crate has always
-/// drawn; `Cat` is the same panel staged around a cat, which is drawn on its own surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Skin {
-    Default,
-    Cat,
-}
-
-/// The look, from the configuration. `parse_config` has already refused every value but
-/// these two, so this is a reading and not a validation.
-fn skin(entries: &[(String, String)]) -> Skin {
-    match entries.iter().find(|(k, _)| k == "mode") {
-        Some((_, v)) if v == "cat" => Skin::Cat,
-        _ => Skin::Default,
-    }
-}
-
 struct Options {
     config: provider::Config,
     key: String,
@@ -536,8 +469,6 @@ struct Options {
     output: Option<String>,
     /// Whether the opening, the growth and the closing are drawn.
     animate: bool,
-    /// The look the panel is drawn in, from `mode`.
-    skin: Skin,
 }
 
 /// The panel's layer surface: overlay layer, our own namespace, no space reserved from
@@ -562,7 +493,6 @@ fn run(options: Options) -> Result<(), String> {
         listener,
         output,
         animate,
-        skin,
     } = options;
     let conn = Connection::connect_to_env().map_err(|e| format!("no Wayland session: {e}"))?;
     trace("wayland connected");
@@ -617,7 +547,6 @@ fn run(options: Options) -> Result<(), String> {
         shm,
         qh,
         compositor: compositor.clone(),
-        shell,
         pool,
         buffer: None,
         width: WIDTH,
@@ -633,7 +562,6 @@ fn run(options: Options) -> Result<(), String> {
         shape: panel::State::Bar,
         context_cut: false,
         animate,
-        skin,
         mode: Mode::Typing,
         drag: Drag::default(),
         press: None,
@@ -669,8 +597,6 @@ fn run(options: Options) -> Result<(), String> {
         panel_output: None,
         painted: false,
         dirty: true,
-        stage: None,
-        answer_end: None,
         caret_drawn: false,
         exit: false,
         layer,
@@ -703,7 +629,7 @@ fn run(options: Options) -> Result<(), String> {
         .roundtrip(&mut state)
         .map_err(|e| format!("cannot list the outputs: {e}"))?;
     trace("output roundtrip done");
-    state.boot(&compositor, output.as_deref())?;
+    state.boot(&shell, &compositor, output.as_deref())?;
     trace("first commit (buffer-less)");
     smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource::new(
         conn.clone(),
@@ -1408,39 +1334,6 @@ fn state_of(phase: Phase) -> panel::State {
     }
 }
 
-/// The mouth in the panel surface's buffer px. The window is placed on the output and the
-/// mouth is a fraction of the window; the bubble is painted into the panel's own buffer,
-/// so the two origins have to be subtracted, not conflated.
-fn mouth_in_surface(place: cat::Stage, panel: cat::Panel, s: u32) -> (f32, f32) {
-    let (mx, my) = cat::mouth_at(place.size * s);
-    (
-        (place.x - panel.x) as f32 * s as f32 + mx,
-        (place.y - panel.y) as f32 * s as f32 + my,
-    )
-}
-
-/// Whether the reply card stays on screen through the next request. The cat's bubble does,
-/// so the last answer is there until the new one starts; the plush panel retracts it and
-/// runs the request in the bar.
-fn keeps_bubble(skin: Skin, shape: panel::State, has_answer: bool) -> bool {
-    skin == Skin::Cat && shape == panel::State::Replies && has_answer
-}
-
-/// Whether the cat's buffer still has the frame's dimensions. A resize, a zoom or a new
-/// buffer scale changes them, and the old allocation must not be painted at the new size.
-fn buffer_fits(buffered: (u32, u32), px: u32) -> bool {
-    buffered == (px, px)
-}
-
-/// What the cat is doing while the panel is doing that.
-fn mood_of(phase: Phase) -> cat::Mood {
-    match phase {
-        Phase::Idle => cat::Mood::Idle,
-        Phase::Thinking => cat::Mood::Thinking,
-        Phase::Answering => cat::Mood::Answering,
-    }
-}
-
 /// The shape a phase is drawn as, given the shape already on screen. A request in
 /// flight keeps the box it was asked from: shrinking to the bar and growing back on
 /// every follow-up reads as the panel folding itself shut, and the answer that is
@@ -1854,41 +1747,6 @@ enum Phase {
     Answering,
 }
 
-/// The cat's window: a second layer surface carrying the cat and nothing else. It takes
-/// no keyboard and no click, so every key and every pointer event is still the panel's.
-struct Stage {
-    layer: LayerSurface,
-    buffer: Option<Buffer>,
-    configured: bool,
-    /// Where the window is, and where it is heading: the hop runs between them.
-    place: cat::Stage,
-    landing: cat::Stage,
-    /// The edge the cat came out of.
-    edge: cat::Edge,
-    /// When the window first painted, which starts the entrance.
-    entrance: std::time::Instant,
-    /// The pose on screen and when it began, so a pose's own clock restarts with it.
-    pose: (cat::Pose, std::time::Instant),
-    /// The size last asked for, so a resize is one call and not one per frame.
-    sized: (u32, u32),
-    /// The buffer's own dimensions, so a resize drops the allocation instead of painting
-    /// it at a size it does not have.
-    buffered: (u32, u32),
-    /// Whether the window is mapped. A panel moved where there is no room for a cat takes
-    /// it off the screen and puts it back when the room returns.
-    visible: bool,
-}
-
-/// Where the cat is in one frame, and what it is doing.
-#[derive(Debug, Clone, Copy)]
-struct Placed {
-    place: cat::Stage,
-    pose: cat::Pose,
-    since: Duration,
-    /// The mouth in the panel surface's px: the point the bubble is pulled out of.
-    mouth: (f32, f32),
-}
-
 struct State {
     registry_state: RegistryState,
     seat_state: SeatState,
@@ -1897,9 +1755,6 @@ struct State {
     qh: QueueHandle<State>,
     /// Kept for the input region: the surface is larger than the cards.
     compositor: CompositorState,
-    /// Kept for the cat's window, which is a second layer surface and is created once the
-    /// panel's output is known.
-    shell: LayerShell,
     pool: SlotPool,
     buffer: Option<Buffer>,
     /// Logical size, as the compositor configured it.
@@ -1936,13 +1791,6 @@ struct State {
     /// refused startup from a session that ended after the panel was on screen.
     painted: bool,
     dirty: bool,
-    /// The cat's window, in the cat mode: its own surface, its own buffer, and where it
-    /// is. `None` in the default mode, and until the panel's output is known.
-    stage: Option<Stage>,
-    /// When the answer ended, which is what brings the paw back.
-    answer_end: Option<std::time::Instant>,
-    /// Which look is drawn: the plush panel, or the cat.
-    pub skin: Skin,
     /// Whether the last frame drew the caret, so a blink flip is the only thing that
     /// makes the idle loop repaint for it.
     caret_drawn: bool,
@@ -2157,10 +2005,6 @@ impl State {
         self.phase = to;
         self.phase_start = std::time::Instant::now();
         self.waiting_secs = u64::MAX;
-        // A new question takes the paw back out of the answer's ending.
-        if to == Phase::Thinking {
-            self.answer_end = None;
-        }
         self.apply_size();
         self.dirty = true;
     }
@@ -2330,230 +2174,6 @@ impl State {
         self.output_w = Some(w as u32);
         self.output_h = Some(h as u32);
         self.apply_size();
-        // The cat's window needs the panel's output to be on the same screen.
-        self.ensure_stage();
-    }
-
-    /// The panel's place on its output, in the numbers the stage is placed against: the
-    /// surface's logical origin and size, and the input card's height.
-    fn stage_panel(&self) -> Option<cat::Panel> {
-        let output_h = self.output_h?;
-        let (sw, sh) = surface_size((self.width, self.height));
-        let (left, bottom) = self.margins(sw, sh);
-        Some(cat::Panel {
-            x: left,
-            y: output_h as i32 - bottom - sh as i32,
-            w: sw,
-            h: sh,
-            bar_h: panel::bar_height(),
-        })
-    }
-
-    /// The cat's window, created once the panel's output is known: overlay layer, no
-    /// keyboard, an empty input region, the panel's buffer scale. It starts at the edge it
-    /// was rolled onto, and its entrance starts at its first frame.
-    fn ensure_stage(&mut self) {
-        if self.skin != Skin::Cat || self.stage.is_some() {
-            return;
-        }
-        let (Some(panel), Some(output)) = (self.stage_panel(), self.panel_output.clone()) else {
-            return;
-        };
-        let Some(landing) = cat::landing(panel, self.size) else {
-            // No room beside the panel: no cat, and no stage to keep.
-            return;
-        };
-        let surface = self.compositor.create_surface(&self.qh);
-        surface.set_buffer_scale(self.scale as i32);
-        let layer = self.shell.create_layer_surface(
-            &self.qh,
-            surface,
-            Layer::Overlay,
-            Some(APP_ID),
-            Some(&output),
-        );
-        // Anchored top and left only: a margin applies to an anchored edge, and with no
-        // right or bottom anchor the surface keeps its own size and the margins place it.
-        layer.set_anchor(Anchor::TOP | Anchor::LEFT);
-        // The stage never takes the keyboard and never takes a click: the panel keeps
-        // both, and a cat in front of the pad must not swallow the pointer.
-        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        let region = self.compositor.wl_compositor().create_region(&self.qh, ());
-        layer.set_input_region(Some(&region));
-        region.destroy();
-        layer.set_size(landing.size, landing.size);
-        layer.set_margin(landing.y, 0, 0, landing.x);
-        layer.commit();
-        let now = std::time::Instant::now();
-        self.stage = Some(Stage {
-            layer,
-            buffer: None,
-            configured: false,
-            place: landing,
-            landing,
-            edge: cat::roll_edge(cat::seed()),
-            entrance: now,
-            pose: (cat::Pose::Peek, now),
-            sized: (landing.size, landing.size),
-            buffered: (0, 0),
-            visible: true,
-        });
-    }
-
-    /// Work out where the cat is in this frame, and put its window there. The panel's
-    /// own frame needs the mouth, which is why this is not part of the painting.
-    fn place_cat(&mut self) -> Option<Placed> {
-        let panel = self.stage_panel()?;
-        let landing = cat::landing(panel, self.size);
-        if landing.is_some() && self.stage.is_none() {
-            // The room came back, after a resize or a drag: the cat returns.
-            self.ensure_stage();
-        }
-        let Some(landing) = landing else {
-            self.hide_stage();
-            return None;
-        };
-        let (out_w, out_h) = (self.output_w?, self.output_h?);
-        let s = self.s();
-        let now = std::time::Instant::now();
-        let stage = self.stage.as_mut()?;
-        let pose = cat::pose(
-            now.saturating_duration_since(stage.entrance),
-            mood_of(self.phase),
-            now.saturating_duration_since(self.phase_start),
-            self.answer_end.map(|t| now.saturating_duration_since(t)),
-            self.animate,
-        );
-        if pose != stage.pose.0 {
-            stage.pose = (pose, now);
-        }
-        let since = now.saturating_duration_since(stage.pose.1);
-        stage.landing = landing;
-        let peek = cat::peek(stage.edge, (out_w, out_h), panel, self.size).unwrap_or(landing);
-        let place = match pose {
-            cat::Pose::Peek => peek,
-            cat::Pose::Hop => {
-                cat::hop(peek, landing, since.as_millis() as f32 / cat::HOP_MS as f32)
-            }
-            _ => landing,
-        };
-        if place != stage.place || stage.sized != (place.size, place.size) {
-            stage.layer.set_size(place.size, place.size);
-            stage.layer.set_margin(place.y, 0, 0, place.x);
-            stage.sized = (place.size, place.size);
-            stage.place = place;
-        }
-        if !stage.configured {
-            return None;
-        }
-        stage.visible = true;
-        Some(Placed {
-            place,
-            pose,
-            since,
-            mouth: mouth_in_surface(place, panel, s),
-        })
-    }
-
-    /// Take the cat off the screen without giving up its window: the panel has moved
-    /// somewhere the cat no longer fits.
-    fn hide_stage(&mut self) {
-        let Some(stage) = self.stage.as_mut() else {
-            return;
-        };
-        if !stage.visible {
-            return;
-        }
-        stage.layer.wl_surface().attach(None, 0, 0);
-        stage.layer.commit();
-        stage.visible = false;
-    }
-
-    /// Paint the cat's window for this frame: where it is, what it is doing, and the
-    /// bubble's tail while an answer is up.
-    fn draw_stage(&mut self, placed: &Placed) {
-        let s = self.s();
-        let bar_h = panel::bar_height();
-        // The tail hangs off the reply card, so it is there exactly while the card is.
-        let bubble = self.shape == panel::State::Replies;
-        let Some(stage) = self.stage.as_mut() else {
-            return;
-        };
-        let px = placed.place.size * s;
-        if !buffer_fits(stage.buffered, px) {
-            stage.buffer = None;
-            stage.buffered = (px, px);
-        }
-        let buffer = match stage.buffer.take() {
-            Some(buffer) => buffer,
-            None => {
-                match self.pool.create_buffer(
-                    px as i32,
-                    px as i32,
-                    px as i32 * 4,
-                    wl_shm::Format::Argb8888,
-                ) {
-                    Ok((buffer, _)) => buffer,
-                    Err(e) => {
-                        eprintln!("aside: cannot allocate the cat's buffer: {e}");
-                        self.exit = true;
-                        return;
-                    }
-                }
-            }
-        };
-        let Some(canvas) = self.pool.canvas(&buffer) else {
-            stage.buffer = Some(buffer);
-            return;
-        };
-        // Every pixel is written: the shm slots rotate, so a partial paint would show
-        // the previous frame through.
-        canvas.fill(0);
-        cat::draw(
-            canvas,
-            px,
-            px,
-            s,
-            bar_h,
-            stage.edge,
-            placed.pose,
-            placed.since,
-            bubble,
-        );
-        stage
-            .layer
-            .wl_surface()
-            .damage_buffer(0, 0, px as i32, px as i32);
-        if let Err(e) = buffer.attach_to(stage.layer.wl_surface()) {
-            eprintln!("aside: cannot attach the cat's frame: {e}");
-            self.exit = true;
-            return;
-        }
-        stage.layer.commit();
-        stage.buffer = Some(buffer);
-    }
-
-    /// Whether the cat has a frame of its own to draw: the entrance, the poses that run on
-    /// their own clock, and a waiting blink sampled by the idle tick.
-    fn stage_wake(&self) -> Option<Duration> {
-        let stage = self.stage.as_ref()?;
-        if !stage.visible || !stage.configured {
-            return None;
-        }
-        let live = match stage.pose.0 {
-            cat::Pose::Peek | cat::Pose::Hop | cat::Pose::Arm => true,
-            cat::Pose::Lick => self.phase == Phase::Thinking,
-            cat::Pose::Speak => {
-                stage.pose.1.elapsed() < Duration::from_millis(cat::SPEAK_MS as u64)
-            }
-            cat::Pose::Extend => {
-                stage.pose.1.elapsed() < Duration::from_millis(cat::EXTEND_MS as u64)
-            }
-            // The waiting cat is still, except for the blink: the idle tick samples the
-            // closed window, so this is four frames a second, not an animation loop.
-            cat::Pose::Waiting => return Some(Duration::from_millis(cat::BLINK_MS as u64)),
-        };
-        live.then_some(FRAME_WAKE)
     }
 
     fn adopt_font(&mut self) -> Result<(), String> {
@@ -2649,6 +2269,7 @@ impl State {
     /// against the compositor's choice is dropped unused.
     fn boot(
         &mut self,
+        shell: &LayerShell,
         compositor: &CompositorState,
         requested: Option<&str>,
     ) -> Result<(), String> {
@@ -2670,8 +2291,7 @@ impl State {
             // The old surface is about to go: its viewport and fractional object must
             // not outlive it, or the next destination write is a protocol error.
             self.detach_scale_objects();
-            let layer = make_layer(&self.shell, compositor, &self.qh, Some(&output));
-            self.layer = layer;
+            self.layer = make_layer(shell, compositor, &self.qh, Some(&output));
             // Before the first commit: the gap the panel opens at is this output's, and
             // no other output's size may overwrite it later.
             self.panel_output = Some(output.clone());
@@ -2742,7 +2362,6 @@ impl State {
             [
                 moving.then_some(FRAME_WAKE),
                 self.request.is_some().then_some(FRAME_WAKE),
-                self.stage_wake(),
                 self.toast_up().then_some(TOAST_WAKE),
                 self.returned_at.is_some().then_some(FRAME_WAKE),
                 question_wake(self.question.as_ref()),
@@ -2803,10 +2422,7 @@ impl State {
         // A follow-up over a visible answer first lets that answer slide down out of
         // its card. The request starts when the card is clear, so the old text never
         // snaps away and the panel never folds shut in one frame.
-        if !keeps_bubble(self.skin, self.shape, self.transcript.total_height() > 0)
-            && self.animate
-            && self.shape == panel::State::Replies
-            && self.transcript.total_height() > 0
+        if self.animate && self.shape == panel::State::Replies && self.transcript.total_height() > 0
         {
             self.pending_send = Some(question);
             self.retract_at = Some(std::time::Instant::now());
@@ -2830,7 +2446,7 @@ impl State {
             ..
         } = self;
         let Some(font) = font.as_ref() else { return };
-        transcript.ask(&question, font, self.skin == Skin::Cat);
+        transcript.ask(&question, font);
         // Old turns are dropped before the body is built: a long session must not
         // grow the request or the text kept for it without bound.
         let cut = transcript.enforce_context_cap(transcript::CONTEXT_CAP);
@@ -2855,12 +2471,9 @@ impl State {
         viewport.follow(transcript.total_height());
         *highlight = rows.saturating_sub(1);
         self.morph = None;
-        // The old card has just been retracted: the request now runs in the bar until its
-        // answer grows the box again — unless the cat's bubble is keeping the last answer,
-        // which stays on screen from this frame until the new one starts.
-        if !keeps_bubble(self.skin, self.shape, self.transcript.total_height() > 0) {
-            self.shape = panel::State::Bar;
-        }
+        // The old card has just been retracted: the request now runs in the bar until
+        // its answer grows the box again.
+        self.shape = panel::State::Bar;
         // The lines a selection named are about to be gone.
         self.selection = None;
         self.selecting = false;
@@ -2903,9 +2516,8 @@ impl State {
                     transcript.add_note(&context_cut_note(), font, max_w);
                 }
             }
-            // Cancelling ends the request too: the paw comes back, and the question is
-            // drawn away like any other, only after the cancelled text's layout is done.
-            self.answer_end = Some(std::time::Instant::now());
+            // Cancelling ends the request too: the question is drawn away like any
+            // other, and only after the cancelled text's layout is done.
             end_question(&mut self.question, self.animate, std::time::Instant::now());
             // Cancelling is an ending too: a reader who scrolled up keeps their place.
             if follow_stream(&mut self.viewport, transcript.total_height()) {
@@ -3476,10 +3088,6 @@ impl State {
             // A shape change or the rise into place: every frame has to be painted.
             self.dirty = true;
         }
-        if self.stage_wake().is_some() {
-            // The cat has a pose of its own to draw, and it is the only thing moving.
-            self.dirty = true;
-        }
         // A finished shape change hands the surface its new size, once.
         self.settle_morph();
         // The round is over: keys the input method never claimed are the panel's own
@@ -3516,9 +3124,6 @@ impl State {
                 }
                 if !open.running() {
                     let close = open.finish(transcript, font, max_w);
-                    // The cat's paw comes back when the answer ends, whether it ended
-                    // well or not.
-                    self.answer_end = Some(std::time::Instant::now());
                     self.request = None;
                     // A failure gives the question back to the line instead of
                     // drawing it out of the bar; every other ending lets it go.
@@ -3582,11 +3187,7 @@ impl State {
             return; // no font yet: nothing to draw and nothing to wait for
         }
         // The shape this frame paints, and how far into it the panel has morphed.
-        let cat_place = self.place_cat();
-        let mut look = self.look();
-        look.skin = self.skin;
-        // The bubble comes out of the cat's mouth rather than off the bar's top border.
-        look.mouth = cat_place.map(|placed| placed.mouth);
+        let look = self.look();
         let selection = self.selection;
         let head = self.head();
         let thumb = self.thumb();
@@ -3672,11 +3273,6 @@ impl State {
         }
         self.painted = true;
         self.buffer = Some(buffer);
-        // The cat is painted after the panel, in the same frame, so the two surfaces
-        // change together.
-        if let Some(placed) = cat_place.as_ref() {
-            self.draw_stage(placed);
-        }
     }
 
     fn on_key(&mut self, event: &KeyEvent) {
@@ -3981,13 +3577,6 @@ impl State {
         }
         self.scale = scale;
         self.sync_viewport();
-        // The cat's window is drawn at the panel's density too, and its buffer was sized
-        // for the old one.
-        if let Some(stage) = self.stage.as_mut() {
-            stage.layer.wl_surface().set_buffer_scale(scale as i32);
-            stage.buffer = None;
-            stage.buffered = (0, 0);
-        }
         // A different density means different glyphs and different wrapping.
         if let Ok(font) = PanelFont::load(self.face_size()) {
             self.font = Some(font);
@@ -4162,24 +3751,6 @@ impl LayerShellHandler for State {
         _configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
-        // The cat's window is its own surface, and its own configure is the permission to
-        // attach its buffer; its size is ours either way.
-        if self
-            .stage
-            .as_ref()
-            .is_some_and(|s| s.layer.wl_surface() == _layer.wl_surface())
-        {
-            if let Some(stage) = self.stage.as_mut()
-                && !stage.configured
-            {
-                stage.configured = true;
-                // The entrance starts at the first frame it can draw, not at the moment
-                // the surface was asked for.
-                stage.entrance = std::time::Instant::now();
-            }
-            self.draw();
-            return;
-        }
         trace("layer configure arrived");
         self.configured = true;
         self.configure_wait = None;
@@ -4603,53 +4174,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_mouth_is_the_panels_own_pixel() {
-        // The window is placed on the output; the bubble is painted into the panel's own
-        // buffer. The mouth has to cross that boundary, or the growth starts off-buffer.
-        let panel = cat::Panel {
-            x: 614,
-            y: 400,
-            w: 692,
-            h: 300,
-            bar_h: 30,
-        };
-        let stage = cat::landing(panel, 1.0).expect("room to the left");
-        let (mx, my) = mouth_in_surface(stage, panel, 1);
-        assert!(my > 0.0 && my < 300.0, "inside the panel's buffer: {my}");
-        assert!(mx < 0.0, "and beside it, where the cat is: {mx}");
-    }
-
-    #[test]
-    fn the_bubble_is_kept_only_by_the_cat() {
-        assert!(keeps_bubble(Skin::Cat, panel::State::Replies, true));
-        assert!(!keeps_bubble(Skin::Cat, panel::State::Replies, false));
-        assert!(!keeps_bubble(Skin::Cat, panel::State::Bar, true));
-        assert!(!keeps_bubble(Skin::Default, panel::State::Replies, true));
-    }
-
-    #[test]
-    fn the_stage_buffer_is_dropped_when_the_size_changes() {
-        assert!(buffer_fits((520, 520), 520));
-        assert!(!buffer_fits((260, 260), 520), "a resize needs a new buffer");
-        assert!(!buffer_fits((0, 0), 260), "and the first frame needs one");
-    }
-
-    #[test]
-    fn the_cat_answers_what_the_panel_is_doing() {
-        assert_eq!(mood_of(Phase::Idle), cat::Mood::Idle);
-        assert_eq!(mood_of(Phase::Thinking), cat::Mood::Thinking);
-        assert_eq!(mood_of(Phase::Answering), cat::Mood::Answering);
-    }
-
-    #[test]
-    fn the_mode_key_picks_the_skin() {
-        let entry = |v: &str| vec![("mode".to_string(), v.to_string())];
-        assert_eq!(skin(&[]), Skin::Default, "absent is the plush panel");
-        assert_eq!(skin(&entry("cat")), Skin::Cat);
-        assert_eq!(skin(&entry("default")), Skin::Default);
-    }
-
-    #[test]
     fn streamed_text_does_not_yank_a_reader_who_scrolled_up() {
         let mut v = Viewport::new(120);
         v.clamp(1200);
@@ -5044,7 +4568,7 @@ mod tests {
         let f = PanelFont::load(font::SIZE).expect("system font available");
         let blocks = layout::Blocks::new(&f);
         let mut t = crate::transcript::Transcript::default();
-        t.ask("q", &f, false);
+        t.ask("q", &f);
         t.delta("- one\n- two\n- three", &f, 400.0);
         t.finish_answer(&f);
         let rows = t.rows(blocks);

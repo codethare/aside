@@ -1,6 +1,6 @@
 ---
 name: add-a-panel-mode
-description: Use when adding another look or chrome to the aside panel — a new `mode` value beside `default` and `cat`, or a change to how a mode is drawn, staged, or switched. Also use when a mode's layer surface, its coordinates, or its buffers are involved.
+description: Use when adding another look or chrome to the aside panel — a new `mode` value beside `default`, or a change to how a mode is drawn, staged, or switched. Also use when a mode's layer surface, its coordinates, or its buffers are involved.
 ---
 
 # Adding a mode to `aside`
@@ -19,7 +19,7 @@ new look is a new value, never an edit to `default`.
 1. **Open an OpenSpec change** under `openspec/changes/<kebab-name>/` with
    `openspec new change <name>`. The behaviour lands in `specs/` before any code: a
    delta on `chat-panel` for anything the panel draws, and a new capability (for
-   example `cat-stage`) for anything that owns its own surface or its own animation.
+   example `<mode>-stage`) for anything that owns its own surface or its own animation.
 2. **Design first, and get it approved.** `design.md` carries: intent, goals,
    non-goals, the constraints you found in the code, two or three approaches with what
    each costs, the one you picked and why, and a *landing identity* — the geometry the
@@ -44,7 +44,7 @@ new look is a new value, never an edit to `default`.
 | `src/provider.rs` | the key's validation in `parse_config`, with its line number |
 | `src/main.rs` | `Skin`, `skin()`, `Options.skin`, `State.skin`; the surface lifecycle; the pose clock |
 | `src/panel.rs` | `Look.skin` (the cards) and `Look.mouth` (where a card grows from) |
-| `src/cat.rs` | the mode's own geometry, poses and painter, if it has them |
+| `src/<mode>.rs` | the mode's own geometry, poses and painter, if it has them |
 | `src/transcript.rs` | only if the mode keeps a turn on screen longer than the plush panel does |
 | `README.md`, `docs/aside.1`, `CLAUDE.md` rule 4 | the key, the look, and the chrome rule's scope |
 
@@ -88,7 +88,7 @@ believing a shape survives a phase change.
 ### Reconcile a surface's existence, not only its place
 
 A window that is placed every frame must also be *unmapped* when it no longer fits
-(`hide_stage`) and *re-created* when the room comes back. Otherwise the cat is left
+(`hide_stage`) and *re-created* when the room comes back. Otherwise the stage is left
 standing where it no longer belongs, and never returns after the panel is dragged clear.
 
 ## The gate, and this machine's four non-failures
@@ -122,11 +122,8 @@ the stacking of two layer surfaces. Say so instead of implying it works.
 
 ## The art loop
 
-`cargo run -- --preview /tmp/aside.ppm` writes the panel, `.cat.panel.ppm` (the pad and
-the bubble), and one `.cat.<pose>.ppm` per pose — `peek`, `hop`, `arm`, `waiting`,
-`blink`, `lick`, `speak`, `extend`. Convert the PPM to PNG and *look at it*: a
-silhouette that reads in your head does not read at 260 px. The cat in `aside` needed
-three passes before its head sat on its body.
+`cargo run -- --preview /tmp/aside.ppm` writes the panel's frames. Convert the PPM to
+PNG and *look at it*: a silhouette that reads in your head does not read at 260 px.
 
 ## Red flags
 

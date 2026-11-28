@@ -56,9 +56,6 @@ pub struct Transcript {
     entries: Vec<Entry>,
     /// Index of the answer being streamed into, if any.
     open: Option<usize>,
-    /// Whether the turn just asked keeps the one before it on screen until its own answer
-    /// starts. The cat's bubble says it; the plush box empties at once.
-    keep_previous: bool,
     /// Height of the blocks on screen, gaps included. Empty blocks take no room.
     height: u32,
 }
@@ -133,26 +130,11 @@ impl Transcript {
 
     /// Index of the first entry that is on screen: the turn the last question
     /// opened. Everything before it is kept for the request and laid out never.
-    /// Index of the first entry on screen: the current turn's, or — while the turn that
-    /// was just asked has nothing to show yet — the turn before it, so a bubble that is
-    /// already up keeps what it said until the new answer starts.
     fn current_start(&self) -> usize {
-        let current = self
-            .entries
+        self.entries
             .iter()
             .rposition(|e| e.kind == Kind::Question)
-            .map_or(0, |i| i + 1);
-        let empty = self.entries[current..].iter().all(|e| e.lines.len() == 0);
-        if self.keep_previous && empty && current > 1 {
-            // The question just asked is the last one in the slice: the turn before it
-            // starts after the question before that.
-            self.entries[..current - 1]
-                .iter()
-                .rposition(|e| e.kind == Kind::Question)
-                .map_or(0, |i| i + 1)
-        } else {
-            current
-        }
+            .map_or(0, |i| i + 1)
     }
 
     /// Drop the layout of a turn that is no longer on screen, keeping its text:
@@ -171,32 +153,6 @@ impl Transcript {
         let start = self.entries.len();
         Self::retire(&mut self.entries, start);
         self.height = 0;
-    }
-
-    /// A kept turn gives up its place the moment something else goes on screen: a failure
-    /// or a note replaces it, and its invisible height goes with it.
-    fn take_kept(&mut self) {
-        if self.keep_previous {
-            self.retire_previous();
-            self.keep_previous = false;
-        }
-    }
-
-    /// Retire every turn before the one being answered, and restart the block chain: the
-    /// answer that is starting replaces what the bubble was showing.
-    fn retire_previous(&mut self) {
-        let start = self
-            .entries
-            .iter()
-            .rposition(|e| e.kind == Kind::Question)
-            .map_or(0, |i| i + 1);
-        Self::retire(&mut self.entries, start);
-        self.height = 0;
-        // The open answer was placed under the turn that has just gone: it starts the
-        // chain now.
-        if let Some(i) = self.open {
-            self.entries[i].y = 0;
-        }
     }
 
     /// Lay every entry out again: a resize changes the width, and the wrap is a
@@ -235,19 +191,15 @@ impl Transcript {
     /// Record a question and open an answer for it, so a delta has somewhere to
     /// go. The question is kept for the next request and laid out never: only the
     /// reply is on screen.
-    pub fn ask(&mut self, question: &str, font: &PanelFont, keep_previous: bool) {
+    pub fn ask(&mut self, question: &str, font: &PanelFont) {
         let blocks = Blocks::new(font);
         // A previous answer that never finished is closed before a new question:
         // two open answers would have no defined meaning, and closing it first is
         // what gives it its last row before the answer is placed under it.
         self.close_open(blocks);
-        // Only the turn being asked is on screen: the previous one keeps its text for the
-        // request and gives up its layout, so the block chain restarts — unless the caller
-        // wants it kept, which the cat's bubble does until the new answer starts.
-        self.keep_previous = keep_previous;
-        if !keep_previous {
-            self.retire_current();
-        }
+        // Only the turn being asked is on screen: the previous one keeps its text
+        // for the request and gives up its layout, so the block chain restarts.
+        self.retire_current();
         let user = self.push(Kind::Question, true, blocks);
         self.entries[user].text.push_str(question);
         self.open = Some(self.push(Kind::Answer, false, blocks));
@@ -258,11 +210,6 @@ impl Transcript {
     pub fn delta(&mut self, text: &str, font: &PanelFont, max_w: f32) -> bool {
         let Some(i) = self.open else { return false };
         let blocks = Blocks::new(font);
-        // The first text of the turn is the frame the turn it replaced gives up its place.
-        if self.keep_previous && self.entries[i].text.is_empty() {
-            self.retire_previous();
-            self.keep_previous = false;
-        }
         let entry = &mut self.entries[i];
         if entry.truncated {
             return false; // the cap is reached and already marked
@@ -335,7 +282,6 @@ impl Transcript {
     pub fn fail(&mut self, message: &str, font: &PanelFont, max_w: f32) {
         let blocks = Blocks::new(font);
         self.close_open(blocks);
-        self.take_kept();
         let i = self.push(Kind::Error, true, blocks);
         self.entries[i].text.push_str(message);
         self.entries[i].lines.update(message, font, max_w);
@@ -345,7 +291,6 @@ impl Transcript {
     /// Something the panel says about itself.
     pub fn add_note(&mut self, text: &str, font: &PanelFont, max_w: f32) {
         let blocks = Blocks::new(font);
-        self.take_kept();
         let i = self.push(Kind::Note, true, blocks);
         self.entries[i].text.push_str(text);
         self.entries[i].lines.update(text, font, max_w);
@@ -575,69 +520,17 @@ mod tests {
             .collect()
     }
 
-    /// A kept turn that ends in a failure gives up its place: the failure is what is on
-    /// screen, at the top of the box, and the answer it replaced takes no room with it.
-    #[test]
-    fn a_failed_kept_turn_starts_where_the_answer_was() {
-        let f = font();
-        let mut t = Transcript::default();
-        t.ask("first", &f, true);
-        t.delta(
-            "an answer long enough to take more than one row in a narrow box",
-            &f,
-            200.0,
-        );
-        t.finish_answer(&f);
-        t.ask("second", &f, true);
-        t.fail("the provider refused the request (401)", &f, 200.0);
-        let rows = t.rows(Blocks::new(&f));
-        assert_eq!(
-            rows.first().map(|r| r.y),
-            Some(0),
-            "the failure starts the box"
-        );
-        assert!(
-            rows.iter().all(|r| r.kind != Kind::Answer),
-            "the answer it replaced is gone"
-        );
-        assert_eq!(
-            t.total_height(),
-            rows.len() as u32 * f.row_h,
-            "and its height went with it"
-        );
-    }
-
-    /// The cat's bubble keeps the last answer while the next request runs, and gives it
-    /// up on the frame the new answer starts.
-    #[test]
-    fn a_kept_turn_shows_the_last_one_until_the_new_answer() {
-        let f = font();
-        let mut t = Transcript::default();
-        t.ask("first", &f, true);
-        t.delta("an answer", &f, 400.0);
-        t.finish_answer(&f);
-        assert_eq!(text_of(&t, &f), ["an answer"]);
-        t.ask("second", &f, true);
-        assert_eq!(text_of(&t, &f), ["an answer"], "the last answer stays");
-        t.delta("new text", &f, 400.0);
-        assert_eq!(text_of(&t, &f), ["new text"], "and the new one replaces it");
-        // The plush panel's box empties at once, which is what it did before.
-        t.finish_answer(&f);
-        t.ask("third", &f, false);
-        assert!(text_of(&t, &f).is_empty(), "nothing is kept by default");
-    }
-
     /// The answers are the only rows on screen: a question is kept for the next
     /// request and drawn nowhere.
     #[test]
     fn the_answers_are_the_only_rows() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("why", &f, false);
+        t.ask("why", &f);
         t.delta("because", &f, 400.0);
         t.finish_answer(&f);
         assert_eq!(text_of(&t, &f), ["because"], "the first answer, alone");
-        t.ask("and?", &f, false);
+        t.ask("and?", &f);
         t.delta("this too", &f, 400.0);
         t.finish_answer(&f);
         // The box holds the current turn only: the first answer is kept for the
@@ -661,10 +554,10 @@ mod tests {
     fn the_request_carries_the_finished_turns_in_order() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("first", &f, false);
+        t.ask("first", &f);
         t.delta("answer one", &f, 400.0);
         t.finish_answer(&f);
-        t.ask("second", &f, false);
+        t.ask("second", &f);
         let turns = t.request_turns();
         assert_eq!(turns.len(), 3, "the open question is included");
         assert_eq!(turns[0].role, Role::User);
@@ -678,14 +571,14 @@ mod tests {
     fn a_cancelled_answer_is_shown_but_never_sent_back() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("first", &f, false);
+        t.ask("first", &f);
         t.delta("half an ans", &f, 400.0);
         t.cancel("cancelled", &f, 400.0);
         // While it is the current turn, the half answer and its note are on screen.
         let rows = text_of(&t, &f);
         assert!(rows.contains(&"half an ans".to_string()), "still visible");
         assert!(rows.contains(&"cancelled".to_string()));
-        t.ask("second", &f, false);
+        t.ask("second", &f);
         t.delta("full answer", &f, 400.0);
         t.finish_answer(&f);
         // The new turn is what the box holds now.
@@ -712,7 +605,7 @@ mod tests {
     fn an_answer_that_never_ended_is_not_sent_after_the_stream_dies() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("q", &f, false);
+        t.ask("q", &f);
         t.delta("partial", &f, 400.0);
         t.fail("connection lost", &f, 400.0);
         let turns = t.request_turns();
@@ -725,10 +618,10 @@ mod tests {
     fn a_failed_turn_is_dropped_when_the_next_question_arrives() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("failed question", &f, false);
+        t.ask("failed question", &f);
         t.delta("half an ans", &f, 400.0);
         t.fail("connection lost", &f, 400.0);
-        t.ask("second", &f, false);
+        t.ask("second", &f);
         let turns = t.request_turns();
         assert_eq!(
             turns.len(),
@@ -742,9 +635,9 @@ mod tests {
     fn an_empty_complete_answer_completes_no_turn() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("empty answer", &f, false);
+        t.ask("empty answer", &f);
         t.finish_answer(&f); // [DONE] with no text
-        t.ask("second", &f, false);
+        t.ask("second", &f);
         let turns = t.request_turns();
         assert_eq!(turns.len(), 1, "{turns:?}");
         assert_eq!(turns[0].text, "second");
@@ -772,7 +665,7 @@ mod tests {
         let f = font();
         let blocks = Blocks::new(&f);
         let mut t = Transcript::default();
-        t.ask("why", &f, false);
+        t.ask("why", &f);
         t.delta(
             "because the sky scatters short wavelengths more than long ones",
             &f,
@@ -815,7 +708,7 @@ mod tests {
     fn an_empty_answer_occupies_nothing() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("why", &f, false);
+        t.ask("why", &f);
         assert_eq!(t.total_height(), 0, "a question alone takes no room");
         assert_eq!(t.total_rows(), 0, "and no rows to draw");
         t.delta("x", &f, 400.0);
@@ -833,7 +726,7 @@ mod tests {
         let f = font();
         let blocks = Blocks::new(&f);
         let mut t = Transcript::default();
-        t.ask("first", &f, false);
+        t.ask("first", &f);
         t.delta(
             "an answer long enough to wrap at a narrow width, twice over",
             &f,
@@ -841,7 +734,7 @@ mod tests {
         );
         t.finish_answer(&f);
         assert!(t.total_rows() > 2, "the first turn wrapped");
-        t.ask("second", &f, false);
+        t.ask("second", &f);
         // Nothing of the first turn is laid out now, and the new answer starts at 0.
         assert_eq!(t.total_rows(), 0, "the new turn has no text yet");
         assert_eq!(t.total_height(), 0);
@@ -873,7 +766,7 @@ mod tests {
         let f = font();
         let blocks = Blocks::new(&f);
         let mut t = Transcript::default();
-        t.ask("why", &f, false);
+        t.ask("why", &f);
         t.delta(
             "a first answer long enough to wrap at a narrow width",
             &f,
@@ -908,7 +801,7 @@ mod tests {
         let f = font();
         let blocks = Blocks::new(&f);
         let mut t = Transcript::default();
-        t.ask("q", &f, false);
+        t.ask("q", &f);
         // Two rows of one list: markdown's soft break would join them into one
         // paragraph, and a list is what keeps them tight and separate.
         t.delta("- alpha beta\n- gamma delta", &f, 400.0);
@@ -940,7 +833,7 @@ mod tests {
 
         // CJK: one character is one word.
         let mut c = Transcript::default();
-        c.ask("q", &f, false);
+        c.ask("q", &f);
         c.delta("\u{4e2d}\u{6587}\u{6d4b}\u{8bd5}", &f, 400.0);
         c.finish_answer(&f);
         // Columns are characters, not bytes: a three-byte ideograph is one column,
@@ -960,7 +853,7 @@ mod tests {
         let f = font();
         let blocks = Blocks::new(&f);
         let mut t = Transcript::default();
-        t.ask("why", &f, false);
+        t.ask("why", &f);
         t.delta("because", &f, 400.0);
         t.finish_answer(&f);
         t.fail("and then it broke", &f, 400.0);
@@ -979,7 +872,7 @@ mod tests {
         let f = font();
         let blocks = Blocks::new(&f);
         let mut t = Transcript::default();
-        t.ask("why", &f, false);
+        t.ask("why", &f);
         t.delta("because", &f, 400.0);
         t.finish_answer(&f);
         let rows = t.rows(blocks);
@@ -999,7 +892,7 @@ mod tests {
     fn a_reply_larger_than_the_cap_is_cut_and_marked() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("q", &f, false);
+        t.ask("q", &f);
         // 100 KiB in 1 KiB deltas: more than the cap, and streamed in pieces.
         let chunk = "x".repeat(1024);
         for _ in 0..100 {
@@ -1024,11 +917,11 @@ mod tests {
         let f = font();
         let mut t = Transcript::default();
         for i in 0..6 {
-            t.ask(&format!("question {i}"), &f, false);
+            t.ask(&format!("question {i}"), &f);
             t.delta(&"x".repeat(100), &f, 400.0);
             t.finish_answer(&f);
         }
-        t.ask("newest", &f, false);
+        t.ask("newest", &f);
         let before: usize = t.request_turns().iter().map(|x| x.text.len()).sum();
         assert!(before > 250, "{before}");
         assert!(t.enforce_context_cap(250), "something was dropped");
@@ -1050,7 +943,7 @@ mod tests {
     fn the_newest_question_is_never_dropped_by_the_cap() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("keep me", &f, false);
+        t.ask("keep me", &f);
         assert!(!t.enforce_context_cap(0), "there is no older turn to drop");
         assert_eq!(t.request_turns()[0].text, "keep me");
     }
@@ -1059,10 +952,10 @@ mod tests {
     fn the_cap_does_not_touch_earlier_turns() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("first question", &f, false);
+        t.ask("first question", &f);
         t.delta("a short answer", &f, 400.0);
         t.finish_answer(&f);
-        t.ask("second question", &f, false);
+        t.ask("second question", &f);
         for _ in 0..100 {
             t.delta(&"y".repeat(1024), &f, 400.0);
         }
@@ -1078,7 +971,6 @@ mod tests {
         t.ask(
             "a question that is long enough to wrap at a narrow width",
             &f,
-            false,
         );
         t.delta(
             "and an answer that is also long enough to wrap when the panel narrows",
@@ -1115,9 +1007,9 @@ mod tests {
     fn a_new_question_closes_the_answer_left_open() {
         let f = font();
         let mut t = Transcript::default();
-        t.ask("one", &f, false);
+        t.ask("one", &f);
         t.delta("streaming", &f, 400.0);
-        t.ask("two", &f, false);
+        t.ask("two", &f);
         assert!(
             !t.entries()[1].complete,
             "the abandoned answer is not complete"

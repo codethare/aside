@@ -44,7 +44,7 @@ change.
    panel holds the keyboard: an unfocused panel must look unfocused — river hands a layer surface its keyboard only at a map, and neither
    `river_seat_v1` nor its window-management protocol can focus another client's layer
    surface.
-4. **The chrome is `plush`'s, in the default mode.** Copied exactly: radius 12, `PAD` 16, 8 px gap,
+4. **The chrome is `plush`'s.** Copied exactly: radius 12, `PAD` 16, 8 px gap,
    `SEPARATION` 16 (which must clear `SHADOW_REACH_UP`), the 26 px shadow margin
    with the tight and wide layers, the rim's lit and dark profiles with the band one
    pixel inside it, the plush inks, and the 3 px scroll indicator in `render.rs`, which
@@ -67,19 +67,6 @@ change.
    with no caret on a line nobody can type into. When the request ends it is drawn out
    of the bar — off the edge it was heading for, accelerating and fading, from the same
    `marquee` read one more way — and typing drops it at once.
-
-   `mode = "cat"` is the one other chrome, and only that mode's: the input is the bar
-   drawn as the cat's paw pad (same box, same text, same keys), the reply is the same
-   fixed card with a tail to the cat's mouth and growth out of that mouth, and the cat
-   itself is a second layer surface beside the input card that takes no keyboard and no
-   click, drawn as a flat paper-and-ink mascot — cream fills inside a warm near-black
-   line in three weights, coral inner ears, nose, blush and tongue, and big eyes with a
-   gaze and a curved blink — so its head and body are filled, its paw mitten touches the
-   card's rim, and the bubble's tail ends on the mouth's point. The head rests cocked
-   toward the panel; its ears turn about the head's centre and its face about the fixed
-   mouth. The entrance and the paw's reaches spring, the lick flicks and pauses, the tail
-   curls and sways, and a waiting cat blinks. Both cards stay one tone and the transcript
-   stays a stack of blocks; nothing else about the panel changes.
 5. **Frame cost is per visible row**, never per transcript row. Wrapping happens
    once per delta and once per resize; re-wrapping on every frame is a bug.
 6. **Zero dependencies beyond the seven in `Cargo.toml`.** Ask before adding one;

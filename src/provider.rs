@@ -169,8 +169,8 @@ fn read_config(path: &std::path::Path) -> Result<Vec<(String, String)>, ConfigEr
 }
 
 /// Flat `key = "value"` lines with `#` comments. `model`, `base_url`, `proxy`,
-/// `font_size`, `font_family`, `animations`, `mode` and `instructions` are the only known
-/// keys; anything else is an error
+/// `font_size`, `font_family` and `animations` are the only known keys; anything else
+/// is an error
 /// rather than a silent shrug, so a typo cannot quietly change nothing. A size is
 /// validated here, where its line number is known.
 pub fn parse_config(text: &str) -> Result<Vec<(String, String)>, (usize, String)> {
@@ -221,15 +221,6 @@ pub fn parse_config(text: &str) -> Result<Vec<(String, String)>, (usize, String)
                     return Err((
                         line,
                         format!("`animations` must be \"true\" or \"false\": {value:?}"),
-                    ));
-                }
-                out.push((key.to_string(), value));
-            }
-            "mode" => {
-                if value != "default" && value != "cat" {
-                    return Err((
-                        line,
-                        format!("`mode` must be \"default\" or \"cat\": {value:?}"),
                     ));
                 }
                 out.push((key.to_string(), value));
@@ -512,23 +503,6 @@ mod tests {
         assert!(message.contains("animations"), "{message}");
         assert!(
             message.contains("false"),
-            "both values are named: {message}"
-        );
-    }
-
-    #[test]
-    fn the_mode_key_takes_two_values_and_nothing_else() {
-        for good in ["default", "cat"] {
-            assert!(
-                parse_config(&format!("mode = \"{good}\"")).is_ok(),
-                "{good} is a mode"
-            );
-        }
-        let (line, message) = parse_config("mode = \"dog\"").expect_err("must fail");
-        assert_eq!(line, 1, "the line is named");
-        assert!(message.contains("mode"), "{message}");
-        assert!(
-            message.contains("default") && message.contains("cat"),
             "both values are named: {message}"
         );
     }
